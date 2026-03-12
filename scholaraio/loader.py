@@ -308,9 +308,14 @@ class ContentExtractor:
 
 
 class LLMRunner:
-    """LLM execution with unified retry logic."""
+    """LLM execution with unified retry logic (wraps scholaraio.llm)."""
 
     def __init__(self, config: Config) -> None:
+        from scholaraio.llm import LLMRunner as _LLMRunner, create_request
+
+        # Get API key for this config
+        api_key = config.api_key("llm")
+        self._runner = _LLMRunner(config, api_key=api_key)
         self._config = config
 
     def execute(
@@ -321,16 +326,20 @@ class LLMRunner:
         timeout: int | None = None,
     ) -> tuple[str | None, str]:
         """Execute LLM with unified retry. Returns (result, reason)."""
-        from scholaraio.metrics import call_llm
+        from scholaraio.llm import LLMRequest
 
-        for attempt in range(1, max_retries + 2):
-            try:
-                result = call_llm(prompt, self._config, timeout=timeout, purpose="loader")
-                return result.content, f"attempt{attempt}"
-            except Exception as e:
-                if attempt == max_retries + 1:
-                    return None, str(e)
-        return None, "exhausted"
+        request = LLMRequest(
+            prompt=prompt,
+            config=self._config,
+            timeout=timeout,
+            max_retries=max_retries,
+            purpose="loader",
+        )
+        try:
+            result = self._runner.execute(request)
+            return result.content, f"attempt{1}"
+        except Exception as e:
+            return None, str(e)
 
 
 # ============================================================================

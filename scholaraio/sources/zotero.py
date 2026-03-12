@@ -7,8 +7,7 @@ import re
 import sqlite3
 from pathlib import Path
 
-from scholaraio.ingest.metadata._extract import _extract_lastname
-from scholaraio.ingest.metadata._models import PaperMetadata
+from scholaraio.papers import PaperMetadata, _extract_lastname
 from scholaraio.log import ui
 
 _log = logging.getLogger(__name__)

@@ -298,7 +298,7 @@ def unified_search(
         workspace: Optional workspace name.
     """
     try:
-        from scholaraio.index import unified_search as _usearch
+        from scholaraio.index import SearchIndex, unified_search as _usearch
 
         cfg = _get_cfg()
         paper_ids = _resolve_workspace_ids(workspace)

@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import sqlite3
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator
@@ -264,109 +263,7 @@ def count_papers(name: str, cfg: Config | None = None) -> int:
 
 
 # ============================================================================
-#  Embedding
-# ============================================================================
-
-
-def build_explore_vectors(
-    name: str, *, rebuild: bool = False, cfg: Config | None = None
-) -> int:
-    """为探索库生成语义向量。
-
-    复用主库的 Qwen3-Embedding 模型，向量存入探索库自己的
-    ``explore.db``。
-
-    Args:
-        name: 探索库名称。
-        rebuild: 为 ``True`` 时清空重建。
-        cfg: 可选的全局配置（用于模型加载）。
-
-    Returns:
-        本次新嵌入的论文数量。
-    """
-    from scholaraio.vectors import (
-        _append_faiss_files,
-        _embed_batch,
-        _ensure_schema,
-        _load_model,
-        _pack,
-    )
-
-    _load_model(cfg)
-
-    db = _db_path(name, cfg)
-    conn = sqlite3.connect(db)
-    try:
-        _ensure_schema(conn)
-
-        if rebuild:
-            conn.execute("DELETE FROM paper_vectors")
-
-        existing = set()
-        if not rebuild:
-            existing = {
-                row[0]
-                for row in conn.execute("SELECT paper_id FROM paper_vectors").fetchall()
-            }
-
-        to_embed: list[tuple[str, str]] = []
-        for p in iter_papers(name, cfg):
-            pid = p.get("doi") or p.get("openalex_id", "")
-            if not pid or pid in existing:
-                continue
-            title = (p.get("title") or "").strip()
-            abstract = (p.get("abstract") or "").strip()
-            if not abstract or _is_boilerplate(abstract):
-                continue
-            if p.get("type") in ("paratext", "erratum", "editorial"):
-                continue
-            text = f"{title}\n\n{abstract}" if title else abstract
-            to_embed.append((pid, text))
-
-        if not to_embed:
-            return 0
-
-        _log.info("Embedding %d papers...", len(to_embed))
-
-        batch_size = 64
-        total = 0
-        all_new_ids: list[str] = []
-        all_new_vecs: list[list[float]] = []
-        for i in range(0, len(to_embed), batch_size):
-            batch = to_embed[i : i + batch_size]
-            texts = [t for _, t in batch]
-            vecs = _embed_batch(texts, cfg)
-            for (pid, _), vec in zip(batch, vecs):
-                blob = _pack(vec)
-                conn.execute(
-                    "INSERT OR REPLACE INTO paper_vectors "
-                    "(paper_id, embedding) VALUES (?, ?)",
-                    (pid, blob),
-                )
-                all_new_ids.append(pid)
-                all_new_vecs.append(vec)
-            total += len(batch)
-            if total % (batch_size * 10) == 0 or i + batch_size >= len(to_embed):
-                _log.info("Progress: %d/%d", total, len(to_embed))
-
-        conn.commit()
-    finally:
-        conn.close()
-
-    if all_new_ids:
-        explore_dir = _explore_dir(name, cfg)
-        _append_faiss_files(
-            explore_dir / "faiss.index",
-            explore_dir / "faiss_ids.json",
-            all_new_ids,
-            all_new_vecs,
-        )
-
-    return len(to_embed)
-
-
-# ============================================================================
-#  Topics (BERTopic) — delegates to topics.py
+#  Paper Map Builder
 # ============================================================================
 
 
@@ -388,122 +285,16 @@ def build_papers_map(name: str, cfg: Config | None = None) -> dict[str, dict]:
     return pm
 
 
-def build_explore_topics(
-    name: str,
-    *,
-    rebuild: bool = False,
-    min_topic_size: int = 30,
-    nr_topics: int | str | None = None,
-    cfg: Config | None = None,
-) -> dict:
-    """对探索库运行 BERTopic 主题建模。
-
-    复用主库的 ``build_topics()`` 流程，但参数针对大规模数据调整
-    （默认 ``min_topic_size=30``）。模型以统一格式保存（bertopic_model.pkl +
-    scholaraio_meta.pkl），可直接用 ``topics.load_model()`` 加载。
-
-    Args:
-        name: 探索库名称。
-        rebuild: 为 ``True`` 时重建模型。
-        min_topic_size: HDBSCAN 最小聚类大小。
-        nr_topics: 目标主题数。``"auto"`` 自动合并。
-        cfg: 可选的全局配置。
-
-    Returns:
-        统计字典：``{"n_topics": N, "n_outliers": N, "n_papers": N}``。
-    """
-    from scholaraio.vectors import _load_model
-
-    _load_model(cfg)
-
-    model_dir = _explore_dir(name, cfg) / "topic_model"
-    if model_dir.exists() and not rebuild:
-        return _load_topic_info(name, cfg)
-
-    db = _db_path(name, cfg)
-    if not db.exists():
-        raise FileNotFoundError(
-            f"向量库不存在: {db}\n请先运行 explore embed --name {name}"
-        )
-
-    papers_map = build_papers_map(name, cfg)
-
-    from scholaraio.topics import build_topics
-
-    # Compute explore-tuned hyperparameters
-    n = len(papers_map)
-    model = build_topics(
-        db,
-        papers_map=papers_map,
-        min_topic_size=min_topic_size,
-        nr_topics=nr_topics,
-        save_path=model_dir,
-        cfg=cfg,
-        n_neighbors=min(15, max(5, n // 50)),
-        n_components=min(5, max(2, n // 200)),
-        min_samples=max(1, min_topic_size // 5),
-        ngram_range=(1, 2),
-        min_df=1,
-    )
-
-    # Write info.json for quick stats retrieval
-    topics = getattr(model, "_topics", [])
-    n_topics = len(set(topics)) - (1 if -1 in topics else 0)
-    n_outliers = sum(1 for t in topics if t == -1)
-    info = {"n_topics": n_topics, "n_outliers": n_outliers, "n_papers": len(topics)}
-    (model_dir / "info.json").write_text(
-        json.dumps(info, indent=2) + "\n", encoding="utf-8"
-    )
-    return info
+# ============================================================================
+#  Path Helpers (for external use with VectorIndex/TopicTrainer)
+# ============================================================================
 
 
-def _load_topic_info(name: str, cfg: Config | None = None) -> dict:
-    info_path = _explore_dir(name, cfg) / "topic_model" / "info.json"
-    if info_path.exists():
-        return json.loads(info_path.read_text("utf-8"))
-    return {}
+def get_explore_dir(name: str, cfg: Config | None = None) -> Path:
+    """Get explore directory path."""
+    return _explore_dir(name, cfg)
 
 
-def _build_faiss_index(name: str, cfg: Config | None = None):
-    """Build or load a FAISS index for an explore silo."""
-    from scholaraio.vectors import _build_faiss_from_db
-
-    explore_dir = _explore_dir(name, cfg)
-    return _build_faiss_from_db(
-        _db_path(name, cfg),
-        explore_dir / "faiss.index",
-        explore_dir / "faiss_ids.json",
-        empty_msg=f"向量库为空: {_db_path(name, cfg)}",
-    )
-
-
-def explore_vsearch(
-    name: str, query: str, *, top_k: int = 10, cfg: Config | None = None
-) -> list[dict]:
-    """在探索库中进行语义搜索（FAISS 加速）。
-
-    Args:
-        name: 探索库名称。
-        query: 查询文本。
-        top_k: 返回条数。
-        cfg: 可选的全局配置。
-
-    Returns:
-        论文列表，按 cosine similarity 降序。
-    """
-    from scholaraio.vectors import _vsearch_faiss
-
-    index, paper_ids = _build_faiss_index(name, cfg)
-    hits = _vsearch_faiss(query, index, paper_ids, top_k, cfg=cfg)
-
-    paper_map = {}
-    for p in iter_papers(name, cfg):
-        pid = p.get("doi") or p.get("openalex_id", "")
-        if pid:
-            paper_map[pid] = p
-
-    results = []
-    for pid, score in hits:
-        p = paper_map.get(pid, {})
-        results.append({**p, "score": score})
-    return results
+def get_explore_db_path(name: str, cfg: Config | None = None) -> Path:
+    """Get explore vector database path."""
+    return _db_path(name, cfg)

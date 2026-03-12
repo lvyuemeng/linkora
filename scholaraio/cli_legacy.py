@@ -204,7 +204,7 @@ def _add_subcommand(
 
 
 def cmd_index(args: argparse.Namespace, cfg) -> None:
-    from scholaraio.index import build_index
+    from scholaraio.index import SearchIndex
 
     papers_dir = cfg.papers_dir
     db_path = cfg.index_db
@@ -215,23 +215,27 @@ def cmd_index(args: argparse.Namespace, cfg) -> None:
 
     action = "Rebuilding" if args.rebuild else "Building"
     ui(f"{action} index: {papers_dir} -> {db_path}")
-    count = build_index(papers_dir, db_path, rebuild=args.rebuild)
+    with SearchIndex(db_path) as idx:
+        if args.rebuild:
+            count = idx.rebuild(papers_dir)
+        else:
+            count = idx.update(papers_dir)
     ui(f"Done, indexed {count} papers.")
 
 
 def cmd_search_author(args: argparse.Namespace, cfg) -> None:
-    from scholaraio.index import search_author
+    from scholaraio.index import SearchIndex
 
     query = " ".join(args.query)
     try:
-        results = search_author(
-            query,
-            cfg.index_db,
-            top_k=_resolve_top(args, cfg.search.top_k),
-            year=args.year,
-            journal=args.journal,
-            paper_type=args.paper_type,
-        )
+        with SearchIndex(cfg.index_db) as idx:
+            results = idx.search_author(
+                query,
+                top_k=_resolve_top(args, cfg.search.top_k),
+                year=args.year,
+                journal=args.journal,
+                paper_type=args.paper_type,
+            )
     except FileNotFoundError as e:
         _log.error("%s", e)
         sys.exit(1)
@@ -246,18 +250,18 @@ def cmd_search_author(args: argparse.Namespace, cfg) -> None:
 
 
 def cmd_search(args: argparse.Namespace, cfg) -> None:
-    from scholaraio.index import search
+    from scholaraio.index import SearchIndex
 
     query = " ".join(args.query)
     try:
-        results = search(
-            query,
-            cfg.index_db,
-            top_k=_resolve_top(args, cfg.search.top_k),
-            year=args.year,
-            journal=args.journal,
-            paper_type=args.paper_type,
-        )
+        with SearchIndex(cfg.index_db) as idx:
+            results = idx.search(
+                query,
+                top_k=_resolve_top(args, cfg.search.top_k),
+                year=args.year,
+                journal=args.journal,
+                paper_type=args.paper_type,
+            )
     except FileNotFoundError as e:
         _log.error("%s", e)
         sys.exit(1)
@@ -360,18 +364,31 @@ def cmd_vsearch(args: argparse.Namespace, cfg) -> None:
 
 
 def cmd_usearch(args: argparse.Namespace, cfg) -> None:
-    from scholaraio.index import unified_search
+    from scholaraio.vectors import VectorIndex
 
     query = " ".join(args.query)
-    results = unified_search(
-        query,
-        cfg.index_db,
-        top_k=_resolve_top(args, cfg.search.top_k),
-        cfg=cfg,
-        year=args.year,
-        journal=args.journal,
-        paper_type=args.paper_type,
-    )
+    try:
+        with VectorIndex(cfg.index_db) as vidx:
+            results = vidx.search(
+                query,
+                top_k=_resolve_top(args, cfg.search.top_k),
+                year=args.year,
+                journal=args.journal,
+                paper_type=args.paper_type,
+            )
+    except FileNotFoundError:
+        # Fall back to FTS
+        from scholaraio.index import SearchIndex
+
+        ui("Vector index not found, falling back to FTS search...")
+        with SearchIndex(cfg.index_db) as idx:
+            results = idx.search(
+                query,
+                top_k=_resolve_top(args, cfg.search.top_k),
+                year=args.year,
+                journal=args.journal,
+                paper_type=args.paper_type,
+            )
 
     if not results:
         ui(f'No results for "{query}".')
@@ -599,16 +616,16 @@ def cmd_enrich_l3(args: argparse.Namespace, cfg) -> None:
 
 
 def cmd_top_cited(args: argparse.Namespace, cfg) -> None:
-    from scholaraio.index import top_cited
+    from scholaraio.index import SearchIndex
 
     try:
-        results = top_cited(
-            cfg.index_db,
-            top_k=_resolve_top(args, cfg.search.top_k),
-            year=args.year,
-            journal=args.journal,
-            paper_type=args.paper_type,
-        )
+        with SearchIndex(cfg.index_db) as idx:
+            results = idx.top_cited(
+                top_k=_resolve_top(args, cfg.search.top_k),
+                year=args.year,
+                journal=args.journal,
+                paper_type=args.paper_type,
+            )
     except FileNotFoundError as e:
         _log.error("%s", e)
         sys.exit(1)
@@ -623,7 +640,7 @@ def cmd_top_cited(args: argparse.Namespace, cfg) -> None:
 
 
 def cmd_refs(args: argparse.Namespace, cfg) -> None:
-    from scholaraio.index import get_references
+    from scholaraio.index import SearchIndex
     from scholaraio.papers import read_meta
 
     paper_d = _resolve_paper(args.paper_id, cfg)
@@ -631,7 +648,8 @@ def cmd_refs(args: argparse.Namespace, cfg) -> None:
     paper_uuid = meta.get("id", "")
 
     pids = _resolve_ws_paper_ids(args, cfg)
-    refs = get_references(paper_uuid, cfg.index_db, paper_ids=pids)
+    idx = SearchIndex(cfg.index_db)
+    refs = idx.references(paper_uuid, paper_ids=pids)
     if not refs:
         ui("该论文没有参考文献数据。请先运行 refetch 拉取 references。")
         return
@@ -663,7 +681,7 @@ def cmd_refs(args: argparse.Namespace, cfg) -> None:
 
 
 def cmd_citing(args: argparse.Namespace, cfg) -> None:
-    from scholaraio.index import get_citing_papers
+    from scholaraio.index import SearchIndex
     from scholaraio.papers import read_meta
 
     paper_d = _resolve_paper(args.paper_id, cfg)
@@ -671,7 +689,8 @@ def cmd_citing(args: argparse.Namespace, cfg) -> None:
     paper_uuid = meta.get("id", "")
 
     pids = _resolve_ws_paper_ids(args, cfg)
-    results = get_citing_papers(paper_uuid, cfg.index_db, paper_ids=pids)
+    idx = SearchIndex(cfg.index_db)
+    results = idx.citing(paper_uuid, paper_ids=pids)
     if not results:
         scope = f"工作区 {args.ws} 中" if getattr(args, "ws", None) else "本地"
         ui(f"没有找到引用该论文的{scope}论文。")
@@ -689,7 +708,7 @@ def cmd_citing(args: argparse.Namespace, cfg) -> None:
 
 
 def cmd_shared_refs(args: argparse.Namespace, cfg) -> None:
-    from scholaraio.index import get_shared_references
+    from scholaraio.index import SearchIndex
     from scholaraio.papers import read_meta
 
     paper_uuids = []
@@ -700,8 +719,9 @@ def cmd_shared_refs(args: argparse.Namespace, cfg) -> None:
 
     min_shared = args.min or 2
     pids = _resolve_ws_paper_ids(args, cfg)
-    results = get_shared_references(
-        paper_uuids, cfg.index_db, min_shared=min_shared, paper_ids=pids
+    idx = SearchIndex(cfg.index_db)
+    results = idx.shared_citations(
+        paper_uuids, min_count=min_shared, paper_ids=pids
     )
     if not results:
         ui(f"没有找到被 ≥{min_shared} 篇论文共同引用的参考文献。")
@@ -1897,9 +1917,10 @@ def _resolve_paper(paper_id: str, cfg) -> Path:
     if (paper_d / "meta.json").exists():
         return paper_d
     # 2. Registry lookup (fast, but may be stale)
-    from scholaraio.index import lookup_paper
+    from scholaraio.index import SearchIndex
 
-    reg = lookup_paper(cfg.index_db, paper_id)
+    idx = SearchIndex(cfg.index_db)
+    reg = idx.lookup(paper_id)
     if reg:
         paper_d = papers_dir / reg["dir_name"]
         if (paper_d / "meta.json").exists():

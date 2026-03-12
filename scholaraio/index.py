@@ -449,7 +449,7 @@ class SearchIndex:
 
     def rebuild(self, papers_dir: Path) -> int:
         """Full rebuild of search index."""
-        from scholaraio.papers import iter_paper_dirs
+        from scholaraio.papers import PaperStore
 
         self._ensure_schemas()
         conn = self._ensure_connection()
@@ -461,12 +461,11 @@ class SearchIndex:
         conn.execute("DELETE FROM papers_registry")
         conn.execute("DELETE FROM citations")
 
+        store = PaperStore(papers_dir)
         count = 0
-        for pdir in iter_paper_dirs(papers_dir):
-            from scholaraio.papers import read_meta as _read_meta
-
+        for pdir in store.iter_papers():
             try:
-                meta = _read_meta(pdir)
+                meta = store.read_meta(pdir)
             except (ValueError, FileNotFoundError):
                 continue
             paper_id = meta.get("id") or pdir.name
@@ -480,7 +479,7 @@ class SearchIndex:
 
     def update(self, papers_dir: Path) -> int:
         """Incrementally update search index."""
-        from scholaraio.papers import iter_paper_dirs, read_meta as _read_meta
+        from scholaraio.papers import PaperStore
 
         self._ensure_schemas()
         conn = self._ensure_connection()
@@ -492,10 +491,11 @@ class SearchIndex:
         ).fetchall():
             existing_hashes[row[0]] = row[1]
 
+        store = PaperStore(papers_dir)
         count = 0
-        for pdir in iter_paper_dirs(papers_dir):
+        for pdir in store.iter_papers():
             try:
-                meta = _read_meta(pdir)
+                meta = store.read_meta(pdir)
             except (ValueError, FileNotFoundError):
                 continue
             paper_id = meta.get("id") or pdir.name

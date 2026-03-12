@@ -17,6 +17,127 @@ from typing import Iterator, Callable
 
 _log = logging.getLogger(__name__)
 
+# ============================================================================
+#  Data Structures (from ingest/metadata/_models.py)
+# ============================================================================
+
+
+@dataclass
+class PaperMetadata:
+    """Paper metadata - complete record of academic paper.
+
+    Attributes:
+        id: UUID, assigned at ingest time, never changes.
+        title: Paper title.
+        authors: Author list.
+        first_author: First author full name.
+        first_author_lastname: First author last name (for filename).
+        year: Publication year.
+        doi: DOI identifier (without https://doi.org/ prefix).
+        journal: Journal or conference name.
+        abstract: Abstract text.
+        paper_type: Paper type (article, review, conference-paper, etc.).
+        citation_count_s2: Semantic Scholar citation count.
+        citation_count_openalex: OpenAlex citation count.
+        citation_count_crossref: Crossref citation count.
+        s2_paper_id: Semantic Scholar paper ID.
+        openalex_id: OpenAlex paper ID.
+        crossref_doi: Crossref returned DOI.
+        api_sources: List of APIs that returned data.
+        references: Reference DOI list (from Semantic Scholar).
+        source_file: Original filename.
+        extraction_method: Extraction method (doi_lookup, title_search, etc.).
+    """
+
+    id: str = ""
+    title: str = ""
+    authors: list[str] = field(default_factory=list)
+    first_author: str = ""
+    first_author_lastname: str = ""
+    year: int | None = None
+    doi: str = ""
+    journal: str = ""
+    abstract: str = ""
+    paper_type: str = ""
+    citation_count_s2: int | None = None
+    citation_count_openalex: int | None = None
+    citation_count_crossref: int | None = None
+    s2_paper_id: str = ""
+    openalex_id: str = ""
+    crossref_doi: str = ""
+    api_sources: list[str] = field(default_factory=list)
+    references: list[str] = field(default_factory=list)
+    volume: str = ""
+    issue: str = ""
+    pages: str = ""
+    publisher: str = ""
+    issn: str = ""
+    source_file: str = ""
+    extraction_method: str = ""
+
+
+# ============================================================================
+#  Utilities
+# ============================================================================
+
+
+# Last name extraction patterns
+_LASTNAME_PREFIX_RE = re.compile(
+    r"^(?:Prof|Prof\.|Dr|Dr\.|Mr|Mr\.|Mrs|Mrs\.|Ms|Ms\.)\s+",
+    re.IGNORECASE,
+)
+_LASTNAME_JP_RE = re.compile(r"^[\u3040-\u309f\u30a0-\u30ff]+")  # Hiragana/Katakana
+_LASTNAME_CN_RE = re.compile(r"^[\u4e00-\u9fff]+")  # CJK
+
+
+def _extract_lastname(full_name: str) -> str:
+    """Extract last name (surname) from full author name.
+
+    Handles:
+    - Western: "John Smith" -> "Smith"
+    - Western with prefix: "Prof. John Smith" -> "Smith"
+    - Chinese: "Smith John" (given, family) -> "Smith" (assumes Western order)
+    - Japanese: "山田" (family only) -> "山田"
+    - Chinese: "张 三" -> "张"
+
+    Args:
+        full_name: Full author name.
+
+    Returns:
+        Last name (surname).
+    """
+    if not full_name:
+        return ""
+
+    # Remove common prefixes
+    name = _LASTNAME_PREFIX_RE.sub("", full_name).strip()
+    if not name:
+        return ""
+
+    # Check for CJK names
+    # Japanese: hiragana/katakana only = family name (usually)
+    if _LASTNAME_JP_RE.match(name):
+        return name
+
+    # Chinese: first CJK block is family name
+    m = _LASTNAME_CN_RE.match(name)
+    if m:
+        return m.group(0)
+
+    # Western: last word is last name
+    parts = name.split()
+    if len(parts) == 1:
+        return parts[0]
+
+    # Common "Family Given" order (most Western): last part
+    # But some Chinese Western-order names: "John Smith" -> "Smith"
+    # Heuristic: if last name looks like Western surname (capitalized, no CJK)
+    last = parts[-1]
+    if last and last[0].isupper():
+        return last
+
+    return parts[0] if parts else ""
+
 
 @dataclass(frozen=True)
 class Issue:
