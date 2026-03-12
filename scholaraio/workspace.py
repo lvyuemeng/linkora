@@ -20,6 +20,7 @@ _log = logging.getLogger(__name__)
 #  Internal helpers
 # ============================================================================
 
+
 def _papers_json(ws_dir: Path) -> Path:
     return ws_dir / "papers.json"
 
@@ -41,6 +42,7 @@ def _write(ws_dir: Path, entries: list[dict]) -> None:
 # ============================================================================
 #  Public API
 # ============================================================================
+
 
 def create(ws_dir: Path) -> Path:
     """创建工作区目录并初始化空 papers.json。
@@ -139,8 +141,7 @@ def list_workspaces(ws_root: Path) -> list[str]:
     if not ws_root.is_dir():
         return []
     return sorted(
-        d.name for d in ws_root.iterdir()
-        if d.is_dir() and _papers_json(d).exists()
+        d.name for d in ws_root.iterdir() if d.is_dir() and _papers_json(d).exists()
     )
 
 

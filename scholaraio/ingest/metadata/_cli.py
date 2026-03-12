@@ -11,12 +11,12 @@ from pathlib import Path
 
 _log = logging.getLogger(__name__)
 
-from scholaraio.log import ui
+from scholaraio.log import ui  # noqa: E402
 
-from ._models import PaperMetadata
-from ._extract import _extract_lastname
-from ._api import enrich_metadata
-from ._writer import (
+from ._models import PaperMetadata  # noqa: E402
+from ._extract import _extract_lastname  # noqa: E402
+from ._api import enrich_metadata  # noqa: E402
+from ._writer import (  # noqa: E402
     generate_new_stem,
     metadata_to_dict,
     rename_files,
@@ -54,6 +54,7 @@ def _process_one(
 ) -> tuple[bool, PaperMetadata]:
     """Process a single markdown file. Returns (success, metadata)."""
     from scholaraio.ingest.extractor import RegexExtractor
+
     extractor = extractor or RegexExtractor()
 
     _log.info("processing: %s", filepath.name)
@@ -61,7 +62,9 @@ def _process_one(
     # Step 1: Extract from markdown
     meta = extractor.extract(filepath)
     ui(f"Title:  {meta.title[:80]}{'...' if len(meta.title) > 80 else ''}")
-    ui(f"Author: {meta.first_author_lastname or '?'} | Year: {meta.year or '?'} | DOI: {meta.doi or 'none'}")
+    ui(
+        f"Author: {meta.first_author_lastname or '?'} | Year: {meta.year or '?'} | DOI: {meta.doi or 'none'}"
+    )
 
     # Step 2: API enrichment
     if not no_api:
@@ -81,7 +84,7 @@ def _process_one(
         meta.extraction_method = "local_only"
 
     # Step 3: Write JSON
-    json_path = filepath.with_suffix('.json')
+    json_path = filepath.with_suffix(".json")
     if not dry_run:
         write_metadata_json(meta, json_path)
         _log.info("wrote: %s", json_path.name)
@@ -129,17 +132,23 @@ def cmd_batch(args: argparse.Namespace) -> None:
     if args.force:
         targets = all_md
     else:
-        targets = [f for f in all_md if not f.with_suffix('.json').exists()]
+        targets = [f for f in all_md if not f.with_suffix(".json").exists()]
 
     if not targets:
-        _log.info("no unprocessed .md files in %s%s", dirpath,
-                  " (use --force to reprocess)" if all_md else "")
+        _log.info(
+            "no unprocessed .md files in %s%s",
+            dirpath,
+            " (use --force to reprocess)" if all_md else "",
+        )
         return
 
     total = len(targets)
     skipped = len(all_md) - total
-    _log.info("found %d file(s) to process%s", total,
-              f" ({skipped} skipped, already have .json)" if skipped else "")
+    _log.info(
+        "found %d file(s) to process%s",
+        total,
+        f" ({skipped} skipped, already have .json)" if skipped else "",
+    )
 
     succeeded = 0
     failed = 0
@@ -190,7 +199,9 @@ def cmd_fix(args: argparse.Namespace) -> None:
 
     _log.info("fixing: %s", filepath.name)
     ui(f"Title:  {meta.title}")
-    ui(f"Author: {meta.first_author or '?'} | Year: {meta.year or '?'} | DOI: {meta.doi or 'none'}")
+    ui(
+        f"Author: {meta.first_author or '?'} | Year: {meta.year or '?'} | DOI: {meta.doi or 'none'}"
+    )
 
     # API enrichment
     if not args.no_api:
@@ -226,7 +237,7 @@ def cmd_fix(args: argparse.Namespace) -> None:
     ui(f"Final -> {meta.first_author_lastname} ({meta.year}) {meta.title[:60]}...")
 
     # Write JSON
-    json_path = filepath.with_suffix('.json')
+    json_path = filepath.with_suffix(".json")
     if not args.dry_run:
         write_metadata_json(meta, json_path)
         _log.info("wrote: %s", json_path.name)
@@ -253,28 +264,48 @@ def main() -> None:
     p_show = sub.add_parser("show", help="Preview extracted metadata (no writes)")
     p_show.add_argument("file", type=str, help="Path to MinerU markdown file")
 
-    p_extract = sub.add_parser("extract", help="Extract metadata, query APIs, write JSON, rename")
+    p_extract = sub.add_parser(
+        "extract", help="Extract metadata, query APIs, write JSON, rename"
+    )
     p_extract.add_argument("file", type=str, help="Path to MinerU markdown file")
-    p_extract.add_argument("--dry-run", action="store_true", help="Preview without writing/renaming")
-    p_extract.add_argument("--no-rename", action="store_true", help="Write JSON but don't rename")
+    p_extract.add_argument(
+        "--dry-run", action="store_true", help="Preview without writing/renaming"
+    )
+    p_extract.add_argument(
+        "--no-rename", action="store_true", help="Write JSON but don't rename"
+    )
     p_extract.add_argument("--no-api", action="store_true", help="Skip API queries")
 
     p_batch = sub.add_parser("batch", help="Batch-process all .md files in a directory")
     p_batch.add_argument("directory", type=str, help="Directory containing .md files")
-    p_batch.add_argument("--recursive", "-r", action="store_true", help="Recurse into subdirectories")
-    p_batch.add_argument("--force", action="store_true", help="Reprocess files that already have .json")
-    p_batch.add_argument("--dry-run", action="store_true", help="Preview without writing/renaming")
-    p_batch.add_argument("--no-rename", action="store_true", help="Write JSON but don't rename")
+    p_batch.add_argument(
+        "--recursive", "-r", action="store_true", help="Recurse into subdirectories"
+    )
+    p_batch.add_argument(
+        "--force", action="store_true", help="Reprocess files that already have .json"
+    )
+    p_batch.add_argument(
+        "--dry-run", action="store_true", help="Preview without writing/renaming"
+    )
+    p_batch.add_argument(
+        "--no-rename", action="store_true", help="Write JSON but don't rename"
+    )
     p_batch.add_argument("--no-api", action="store_true", help="Skip API queries")
 
-    p_fix = sub.add_parser("fix", help="Fix metadata with manual title/DOI/author, then enrich via API")
+    p_fix = sub.add_parser(
+        "fix", help="Fix metadata with manual title/DOI/author, then enrich via API"
+    )
     p_fix.add_argument("file", type=str, help="Path to .md file to fix")
     p_fix.add_argument("--title", required=True, help="Correct paper title")
     p_fix.add_argument("--doi", default="", help="Known DOI (speeds up API lookup)")
     p_fix.add_argument("--author", default="", help="First author full name")
     p_fix.add_argument("--year", type=int, default=None, help="Publication year")
-    p_fix.add_argument("--dry-run", action="store_true", help="Preview without writing/renaming")
-    p_fix.add_argument("--no-rename", action="store_true", help="Write JSON but don't rename")
+    p_fix.add_argument(
+        "--dry-run", action="store_true", help="Preview without writing/renaming"
+    )
+    p_fix.add_argument(
+        "--no-rename", action="store_true", help="Write JSON but don't rename"
+    )
     p_fix.add_argument("--no-api", action="store_true", help="Skip API queries")
 
     args = parser.parse_args()

@@ -114,7 +114,9 @@ def _record_to_meta(record: dict, source_file: str) -> PaperMetadata:
     # authors: "; "-separated string → list
     # Endnote exports "Last, First" format; normalize to "First Last" for consistency
     raw_authors = record.get("authors", "")
-    authors_raw = [a.strip() for a in raw_authors.split("; ") if a.strip()] if raw_authors else []
+    authors_raw = (
+        [a.strip() for a in raw_authors.split("; ") if a.strip()] if raw_authors else []
+    )
     authors = [_normalize_author_name(a) for a in authors_raw]
 
     first_author = authors[0] if authors else ""
@@ -263,8 +265,4 @@ def extract_pdf_map(xml_paths: list[Path]) -> dict[str, Path]:
         ``{doi: pdf_path}`` 映射，仅包含 DOI 和 PDF 均存在的记录。
     """
     records, pdf_paths = parse_endnote_full(xml_paths)
-    return {
-        r.doi: p
-        for r, p in zip(records, pdf_paths)
-        if r.doi and p is not None
-    }
+    return {r.doi: p for r, p in zip(records, pdf_paths) if r.doi and p is not None}

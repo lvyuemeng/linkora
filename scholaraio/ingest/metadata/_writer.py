@@ -10,8 +10,7 @@ from pathlib import Path
 
 _log = logging.getLogger(__name__)
 
-from ._models import PaperMetadata
-from ._extract import _extract_lastname
+from ._models import PaperMetadata  # noqa: E402
 
 
 # ============================================================================
@@ -68,10 +67,18 @@ def metadata_to_dict(meta: PaperMetadata) -> dict:
         d["ids"]["doi_url"] = f"https://doi.org/{meta.doi}"
     if meta.s2_paper_id:
         d["ids"]["semantic_scholar"] = meta.s2_paper_id
-        d["ids"]["semantic_scholar_url"] = f"https://www.semanticscholar.org/paper/{meta.s2_paper_id}"
+        d["ids"]["semantic_scholar_url"] = (
+            f"https://www.semanticscholar.org/paper/{meta.s2_paper_id}"
+        )
     if meta.openalex_id:
         d["ids"]["openalex"] = meta.openalex_id
-        d["ids"]["openalex_url"] = meta.openalex_id.replace("https://openalex.org/", "https://openalex.org/works/") if "openalex.org" in meta.openalex_id else meta.openalex_id
+        d["ids"]["openalex_url"] = (
+            meta.openalex_id.replace(
+                "https://openalex.org/", "https://openalex.org/works/"
+            )
+            if "openalex.org" in meta.openalex_id
+            else meta.openalex_id
+        )
     return d
 
 
@@ -83,6 +90,7 @@ def write_metadata_json(meta: PaperMetadata, output_path: Path) -> None:
         output_path: 输出 JSON 文件路径。
     """
     from scholaraio.papers import write_meta
+
     d = metadata_to_dict(meta)
     write_meta(output_path.parent, d)
 
@@ -147,14 +155,26 @@ def refetch_metadata(json_path: Path) -> bool:
 
     # Check if anything changed
     changed = False
-    for key in ("citation_count", "ids", "api_sources", "abstract", "paper_type",
-                 "volume", "issue", "pages", "publisher", "issn", "references"):
+    for key in (
+        "citation_count",
+        "ids",
+        "api_sources",
+        "abstract",
+        "paper_type",
+        "volume",
+        "issue",
+        "pages",
+        "publisher",
+        "issn",
+        "references",
+    ):
         if new_data.get(key) != data.get(key):
             changed = True
             break
 
     if changed:
         from scholaraio.papers import write_meta
+
         write_meta(json_path.parent, new_data)
         # Rename directory if metadata now yields a better name
         new_path = rename_paper(json_path)
@@ -247,34 +267,34 @@ def _clean_title_for_filename(title: str) -> str:
     if not title:
         return "Untitled"
     # Remove LaTeX inline math: $...$
-    title = re.sub(r'\$[^$]+\$', '', title)
+    title = re.sub(r"\$[^$]+\$", "", title)
     # Remove LaTeX commands: \mathrm{...}, \textit{...}, etc.
-    title = re.sub(r'\\[a-zA-Z]+\{[^}]*\}', '', title)
+    title = re.sub(r"\\[a-zA-Z]+\{[^}]*\}", "", title)
     # Remove remaining backslash commands
-    title = re.sub(r'\\[a-zA-Z]+', '', title)
+    title = re.sub(r"\\[a-zA-Z]+", "", title)
     # Remove standalone math symbols
-    title = re.sub(r'[=+<>~^{}|\\]', '', title)
+    title = re.sub(r"[=+<>~^{}|\\]", "", title)
     # Collapse whitespace
-    title = re.sub(r'\s+', ' ', title).strip()
+    title = re.sub(r"\s+", " ", title).strip()
     return title
 
 
 def _strip_diacritics(text: str) -> str:
     """Jiménez → Jimenez, François → Francois."""
-    nfkd = unicodedata.normalize('NFKD', text)
-    return ''.join(c for c in nfkd if not unicodedata.combining(c))
+    nfkd = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
 
 
 def _sanitize_for_filename(text: str) -> str:
     """Make text filesystem-safe."""
     # Replace whitespace with hyphens
-    text = re.sub(r'\s+', '-', text)
+    text = re.sub(r"\s+", "-", text)
     # Keep only safe characters (including Chinese)
-    text = re.sub(r'[^\w\-\u4e00-\u9fff]', '', text)
+    text = re.sub(r"[^\w\-\u4e00-\u9fff]", "", text)
     # Collapse multiple hyphens
-    text = re.sub(r'-{2,}', '-', text)
+    text = re.sub(r"-{2,}", "-", text)
     # Strip leading/trailing hyphens
-    text = text.strip('-')
+    text = text.strip("-")
     return text
 
 
@@ -308,6 +328,7 @@ def rename_files(
 def _update_registry_dir_name(db_path: Path, uuid: str, new_dir_name: str) -> None:
     """Best-effort update of dir_name in papers_registry after rename."""
     import sqlite3
+
     if not db_path.exists():
         return
     try:

@@ -63,7 +63,11 @@ def query_semantic_scholar(doi: str = "", title: str = "") -> dict:
         # Search endpoint returns list — pick best match
         if "data" in data:
             for item in data.get("data", []):
-                if title and _fuzzy_title_match(title, item.get("title", "")) >= TITLE_MATCH_THRESHOLD:
+                if (
+                    title
+                    and _fuzzy_title_match(title, item.get("title", ""))
+                    >= TITLE_MATCH_THRESHOLD
+                ):
                     return item
             return {}
         return data
@@ -105,7 +109,11 @@ def query_openalex(doi: str = "", title: str = "") -> dict:
         # Search endpoint returns list
         if "results" in data:
             for item in data.get("results", []):
-                if title and _fuzzy_title_match(title, item.get("title", "")) >= TITLE_MATCH_THRESHOLD:
+                if (
+                    title
+                    and _fuzzy_title_match(title, item.get("title", ""))
+                    >= TITLE_MATCH_THRESHOLD
+                ):
                     return item
             return {}
         return data
@@ -130,9 +138,12 @@ def query_crossref(doi: str = "", title: str = "") -> dict:
         url = f"{CR_BASE}/{doi}"
     elif title:
         keywords = _title_keywords(title, max_words=8)
-        params = {"query.title": keywords, "rows": "3",
-                  "select": "DOI,title,author,container-title,published-print,"
-                            "published-online,type,is-referenced-by-count,abstract"}
+        params = {
+            "query.title": keywords,
+            "rows": "3",
+            "select": "DOI,title,author,container-title,published-print,"
+            "published-online,type,is-referenced-by-count,abstract",
+        }
         url = f"{CR_BASE}?{urlencode(params)}"
     else:
         return {}
@@ -172,8 +183,10 @@ def _fuzzy_title_match(a: str, b: str) -> float:
     Dice = 2*|A∩B| / (|A|+|B|).  More forgiving than Jaccard for
     different-length strings (e.g. subtitle included in only one source).
     """
+
     def words(s: str) -> set[str]:
-        return set(re.sub(r'[^\w\s]', '', s.lower()).split())
+        return set(re.sub(r"[^\w\s]", "", s.lower()).split())
+
     wa, wb = words(a), words(b)
     if not wa or not wb:
         return 0.0
@@ -182,10 +195,24 @@ def _fuzzy_title_match(a: str, b: str) -> float:
 
 def _title_keywords(title: str, max_words: int = 8) -> str:
     """Extract significant keywords from title for API search."""
-    stop = {'a', 'an', 'the', 'of', 'in', 'on', 'for', 'and', 'by', 'to', 'with', 'its', 'their'}
-    words = re.sub(r'[^\w\s-]', '', title).replace('-', ' ').split()
+    stop = {
+        "a",
+        "an",
+        "the",
+        "of",
+        "in",
+        "on",
+        "for",
+        "and",
+        "by",
+        "to",
+        "with",
+        "its",
+        "their",
+    }
+    words = re.sub(r"[^\w\s-]", "", title).replace("-", " ").split()
     significant = [w for w in words if w.lower() not in stop]
-    return ' '.join(significant[:max_words])
+    return " ".join(significant[:max_words])
 
 
 # ============================================================================
@@ -196,9 +223,12 @@ def _title_keywords(title: str, max_words: int = 8) -> str:
 def _query_crossref_relaxed(title: str) -> dict:
     """Crossref title search with relaxed matching."""
     keywords = _title_keywords(title, max_words=8)
-    params = {"query.title": keywords, "rows": "5",
-              "select": "DOI,title,author,container-title,published-print,"
-                        "published-online,type,is-referenced-by-count,abstract"}
+    params = {
+        "query.title": keywords,
+        "rows": "5",
+        "select": "DOI,title,author,container-title,published-print,"
+        "published-online,type,is-referenced-by-count,abstract",
+    }
     url = f"{CR_BASE}?{urlencode(params)}"
     try:
         resp = SESSION.get(url, timeout=TIMEOUT)
@@ -287,13 +317,23 @@ def enrich_metadata(meta: PaperMetadata) -> PaperMetadata:
         if cr_data or s2_data or oa_data:
             # Guard: verify API-returned title matches local title (prevent DOI hallucination)
             api_title = (
-                (cr_data.get("title", [None]) or [None])[0] if cr_data
-                else (s2_data.get("title") if s2_data
-                      else (oa_data.get("title") if oa_data else None))
+                (cr_data.get("title", [None]) or [None])[0]
+                if cr_data
+                else (
+                    s2_data.get("title")
+                    if s2_data
+                    else (oa_data.get("title") if oa_data else None)
+                )
             )
-            title_score = _fuzzy_title_match(meta.title, api_title) if (meta.title and api_title) else 1.0
+            title_score = (
+                _fuzzy_title_match(meta.title, api_title)
+                if (meta.title and api_title)
+                else 1.0
+            )
             if title_score < RELAXED_THRESHOLD:
-                _log.debug("DOI title mismatch (score=%.2f), discarding DOI", title_score)
+                _log.debug(
+                    "DOI title mismatch (score=%.2f), discarding DOI", title_score
+                )
                 meta.doi = ""
                 cr_data, s2_data, oa_data = {}, {}, {}
             else:
@@ -386,7 +426,9 @@ def enrich_metadata(meta: PaperMetadata) -> PaperMetadata:
             # Use Crossref's structured family name directly (handles double
             # surnames like García-Villalba, Ouyang, etc. that _extract_lastname misses)
             first_a = cr_data["author"][0]
-            meta.first_author_lastname = first_a.get("family", "") or _extract_lastname(meta.first_author)
+            meta.first_author_lastname = first_a.get("family", "") or _extract_lastname(
+                meta.first_author
+            )
         # Paper type
         if cr_data.get("type"):
             meta.paper_type = cr_data["type"]
@@ -448,9 +490,9 @@ def enrich_metadata(meta: PaperMetadata) -> PaperMetadata:
     # ---- 3. Crossref abstract (strip HTML/JATS tags, collapse whitespace) ----
     if cr_data and not meta.abstract and cr_data.get("abstract"):
         raw = cr_data["abstract"]
-        raw = re.sub(r'<[^>]+>', '', raw)         # strip HTML/JATS tags
-        raw = re.sub(r'[\n\t\r]+', ' ', raw)      # collapse newlines/tabs
-        raw = re.sub(r'\s{2,}', ' ', raw)          # collapse multiple spaces
+        raw = re.sub(r"<[^>]+>", "", raw)  # strip HTML/JATS tags
+        raw = re.sub(r"[\n\t\r]+", " ", raw)  # collapse newlines/tabs
+        raw = re.sub(r"\s{2,}", " ", raw)  # collapse multiple spaces
         meta.abstract = raw.strip()
 
     # ---- 4. OpenAlex (fallback for everything) ----

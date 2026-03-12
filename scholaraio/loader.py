@@ -1,24 +1,23 @@
 """
-loader.py — 分层内容加载 + TOC 提取 + L3 结论提取
-====================================================
+loader.py — Layered Content Loading + TOC/Conclusion Extraction
+===============================================================
 
-L1: title / authors / year / journal / doi  ← JSON 字段
-L2: abstract                                ← JSON 字段
-L3: conclusion                              ← JSON 字段（需先运行 enrich_l3 提取）
-L4: full markdown                           ← 读 .md 文件
+L1: title/authors/year/journal/doi  ← JSON fields
+L2: abstract                       ← JSON fields
+L3: conclusion                     ← JSON fields (requires enrich_l3)
+L4: full markdown                  ← Read .md file
 
-TOC 提取（enrich_toc）
------------------------
-1. regex 提取所有 # 标题 + 行号
-2. LLM 过滤 noise（author running headers、期刊名、论文标题重复等），
-   并为每个真实节标题分配层级（level）
-3. 写入 JSON["toc"]：[{"line": N, "level": N, "title": "..."}]
+Architecture:
+  - StrategyRegistry: Key-based pipeline resolution (prompt + strategy)
+  - LLMRunner: LLM execution with retry
+  - ContentExtractor: Pure functions
+  - PaperEnricher: Class-based interface
 
-L3 提取（enrich_l3）
----------------------
-若 JSON 已有 TOC，直接从中定位结论节（跳过第一次 LLM 调用）。
-否则走 Primary path：LLM 从原始标题列表选出结论节 → Python 截取 → LLM 校验。
-Fallback path：LLM 直接给出起止行号 → Python 截取 → LLM 校验。
+Usage:
+    from scholaraio.loader import PaperEnricher
+    enricher = PaperEnricher(papers_dir)
+    enricher.enrich_toc(paper_id, config)
+    enricher.enrich_conclusion(paper_id, config)
 """
 
 from __future__ import annotations
@@ -26,516 +25,558 @@ from __future__ import annotations
 import json
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
-
 
 if TYPE_CHECKING:
     from scholaraio.config import Config
 
 _log = logging.getLogger(__name__)
 
-
 # ============================================================================
-#  Public load functions (L1–L4)
-# ============================================================================
-
-
-def load_l1(json_path: Path) -> dict:
-    """加载 L1 层元数据（标题、作者、年份、期刊、DOI）。
-
-    Args:
-        json_path: 论文 JSON 元数据文件路径。
-
-    Returns:
-        包含 ``paper_id``, ``title``, ``authors``, ``year``,
-        ``journal``, ``doi`` 的字典。
-    """
-    data = json.loads(json_path.read_text(encoding="utf-8"))
-    return {
-        "paper_id": data.get("id") or json_path.parent.name,
-        "title": data.get("title") or "",
-        "authors": data.get("authors") or [],
-        "year": data.get("year"),
-        "journal": data.get("journal") or "",
-        "doi": data.get("doi") or "",
-        "paper_type": data.get("paper_type") or "",
-        "citation_count": data.get("citation_count") or {},
-        "ids": data.get("ids") or {},
-    }
-
-
-def load_l2(json_path: Path) -> str:
-    """加载 L2 层摘要文本。
-
-    Args:
-        json_path: 论文 JSON 元数据文件路径。
-
-    Returns:
-        摘要文本，无摘要时返回 ``"[No abstract available]"``。
-    """
-    data = json.loads(json_path.read_text(encoding="utf-8"))
-    return data.get("abstract") or "[No abstract available]"
-
-
-def load_l3(json_path: Path) -> str | None:
-    """加载 L3 层结论文本。
-
-    需先运行 :func:`enrich_l3` 提取结论段到 JSON。
-
-    Args:
-        json_path: 论文 JSON 元数据文件路径。
-
-    Returns:
-        结论文本，尚未提取时返回 ``None``。
-    """
-    data = json.loads(json_path.read_text(encoding="utf-8"))
-    return data.get("l3_conclusion") or None
-
-
-def load_l4(md_path: Path) -> str:
-    """加载 L4 层全文 Markdown。
-
-    Args:
-        md_path: MinerU 输出的 ``.md`` 文件路径。
-
-    Returns:
-        完整 Markdown 文本。
-    """
-    return md_path.read_text(encoding="utf-8", errors="replace")
-
-
-# ============================================================================
-#  TOC extraction
+# Strategy Registry: Key-based Pipeline Resolution
 # ============================================================================
 
 
-def enrich_toc(
-    json_path: Path,
-    md_path: Path,
-    config: "Config",
-    *,
-    force: bool = False,
-    inspect: bool = False,
-) -> bool:
-    """用 LLM 提取论文目录结构，写入 ``JSON["toc"]``。
+@dataclass(frozen=True)
+class PromptTemplate:
+    """Immutable prompt template."""
 
-    从 Markdown 中提取所有 ``#`` 标题，通过 LLM 过滤 running headers、
-    期刊名、作者名等噪声，为真实节标题分配层级。
+    system: str
+    user_template: str
 
-    Args:
-        json_path: 论文 JSON 元数据文件路径（结果写回此文件）。
-        md_path: 论文 Markdown 文件路径。
-        config: 全局配置（用于 LLM 调用）。
-        force: 为 ``True`` 时覆盖已有 TOC。
-        inspect: 为 ``True`` 时打印过滤过程详情。
+    def render(self, **kwargs: str) -> str:
+        return self.user_template.format(**kwargs)
 
-    Returns:
-        提取成功返回 ``True``，失败返回 ``False``。
-    """
-    from scholaraio.papers import read_meta, write_meta
-    paper_d = json_path.parent
-    data = read_meta(paper_d)
 
-    if data.get("toc") and not force:
-        _log.debug("existing TOC (%d entries), skipping", len(data["toc"]))
-        return True
+# Prompt definitions
+_TOC_PROMPT = PromptTemplate(
+    system="You are an academic paper analyzer.",
+    user_template="""The following are ALL lines starting with '#' extracted from an academic paper
+markdown file (converted from PDF by MinerU). Some are real section headers;
+others are NOISE to discard: author running headers (e.g. '# Smith and others'),
+journal name headers (e.g. '# Journal of Fluid Mechanics'), repeated paper titles,
+or publisher metadata (e.g. '# ARTICLEINFO', '# AFFILIATIONS', '# Articles You May Be Interested In').
 
-    lines = md_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    raw_headers = _extract_headers(lines)
+KEEP the following as real headers (they are needed as section boundary markers):
+- Numbered/lettered sections and subsections
+- Introduction, Abstract, Conclusion, Conclusions, Concluding Remarks, Summary
+- References, Bibliography
+- Appendix (any variant)
+- Post-matter sections: Acknowledgments, Acknowledgements, Funding,
+CRediT authorship contribution statement, Declaration of competing interest,
+Conflict of interest, Data availability, Author contributions, Author ORCIDs,
+Declaration of interests
 
-    _log.debug("regex found %d headers, sending to LLM", len(raw_headers))
+Assign level: 1=top-level, 2=subsection (e.g. '2.1'), 3=sub-subsection (e.g. '2.1.1').
 
-    prompt = (
-        "The following are ALL lines starting with '#' extracted from an academic paper "
-        "markdown file (converted from PDF by MinerU). Some are real section headers; "
-        "others are NOISE to discard: author running headers (e.g. '# Smith and others'), "
-        "journal name headers (e.g. '# Journal of Fluid Mechanics'), repeated paper titles, "
-        "or publisher metadata (e.g. '# ARTICLEINFO', '# AFFILIATIONS', '# Articles You May Be Interested In').\n\n"
-        "KEEP the following as real headers (they are needed as section boundary markers):\n"
-        "- Numbered/lettered sections and subsections\n"
-        "- Introduction, Abstract, Conclusion, Conclusions, Concluding Remarks, Summary\n"
-        "- References, Bibliography\n"
-        "- Appendix (any variant)\n"
-        "- Post-matter sections: Acknowledgments, Acknowledgements, Funding, "
-        "CRediT authorship contribution statement, Declaration of competing interest, "
-        "Conflict of interest, Data availability, Author contributions, Author ORCIDs, "
-        "Declaration of interests\n\n"
-        "Assign level: 1=top-level, 2=subsection (e.g. '2.1'), 3=sub-subsection (e.g. '2.1.1').\n\n"
-        "Headers:\n"
-        + "\n".join(f"Line {h['line']}: {'#'*h['level']} {h['text']}" for h in raw_headers)
-        + "\n\nReturn JSON only:\n"
-        '{"toc": [{"line": <N>, "level": <1|2|3>, "title": "<title>"}, ...]}'
+Headers:
+{headers}
+
+Return JSON only:
+{{"toc": [{{"line": <N>, "level": <1|2|3>, "title": "<title>"}}, ...]}}""",
+)
+
+_CONCLUSION_SELECT_PROMPT = PromptTemplate(
+    system="You are an academic paper analyzer.",
+    user_template="""Below are all section headers (with line numbers) from an academic paper markdown file.
+Identify the header that marks the START of the conclusion section
+(may be named 'Conclusion', 'Conclusions', 'Concluding Remarks', 'Summary', etc.).
+
+{headers}
+
+Return JSON only: {{"line": <line_number>, "header": "<header_text>"}}
+If no conclusion section exists, return: {{"line": null, "header": null}}""",
+)
+
+_CONCLUSION_FALLBACK_PROMPT = PromptTemplate(
+    system="You are an academic paper analyzer.",
+    user_template="""Find the conclusion section in this academic paper (markdown format).
+Return the 1-indexed line number where the conclusion STARTS and where it ENDS
+(last line before References/Appendix/end of file).
+
+{sample}
+
+Return JSON only: {{"start_line": <N>, "end_line": <N>}}
+If no conclusion exists: {{"start_line": null, "end_line": null}}""",
+)
+
+_CONCLUSION_VALIDATE_PROMPT = PromptTemplate(
+    system="You are an academic paper analyzer.",
+    user_template="""The following text was extracted as the conclusion section of an academic paper.
+Your tasks:
+1. Check if it contains actual conclusion content (summary of findings, contributions, or future work).
+2. If yes, return a CLEANED version:
+   - Remove the section header line (e.g. '# 6. Conclusion', '# Concluding Remarks')
+   - Remove any in-text running headers
+   - Remove everything AFTER the conclusion ends: Acknowledgments, Funding, CRediT, etc.
+   - Keep only the actual conclusion/summary paragraphs. Do NOT truncate mid-sentence.
+3. If it contains NO conclusion content at all, set conclusion to null.
+
+{text}
+
+Return JSON only: {{"conclusion": "<cleaned text or null>", "reason": "<one sentence>"}}""",
+)
+
+
+class StrategyRegistry:
+    """Registry that resolves entire pipeline by strategy key."""
+
+    @staticmethod
+    def get_prompt(key: str) -> PromptTemplate:
+        """Get prompt template by key."""
+        prompts = {
+            "toc": _TOC_PROMPT,
+            "conclusion_select": _CONCLUSION_SELECT_PROMPT,
+            "conclusion_fallback": _CONCLUSION_FALLBACK_PROMPT,
+            "conclusion_validate": _CONCLUSION_VALIDATE_PROMPT,
+        }
+        if key not in prompts:
+            raise ValueError(f"Unknown strategy: {key}")
+        return prompts[key]
+
+    @staticmethod
+    def prepare(key: str, lines: list[str], meta: dict) -> str:
+        """Prepare prompt data by key."""
+        if key == "toc":
+            headers = ContentExtractor.extract_headers(lines)
+            return "\n".join(
+                f"Line {h['line']}: {'#' * h['level']} {h['text']}" for h in headers
+            )
+        elif key == "conclusion_select":
+            headers = ContentExtractor.extract_headers(lines)
+            return "\n".join(
+                f"Line {h['line']}: {'#' * h['level']} {h['text']}" for h in headers
+            )
+        elif key == "conclusion_fallback":
+            return ContentExtractor.sample_lines(lines)
+        elif key == "conclusion_validate":
+            return meta.get("_text_to_validate", "")
+        return ""
+
+    @staticmethod
+    def parse(key: str, raw: str) -> dict:
+        """Parse LLM response by key."""
+        text = raw.strip()
+        text = re.sub(r"^```\w*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+
+        try:
+            result = json.loads(text)
+        except json.JSONDecodeError:
+            fixed = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", text)
+            try:
+                result = json.loads(fixed)
+            except json.JSONDecodeError:
+                result = {}
+
+        if key == "toc":
+            return {"toc": result.get("toc", [])}
+        elif key == "conclusion_select":
+            return result
+        elif key == "conclusion_fallback":
+            return result
+        elif key == "conclusion_validate":
+            return result
+        return {}
+
+    @staticmethod
+    def process(key: str, parsed: dict, lines: list[str]) -> str | None:
+        """Process parsed result by key."""
+        if key == "toc":
+            toc = parsed.get("toc", [])
+            if not toc:
+                return None
+            return json.dumps(toc)
+
+        elif key == "conclusion_select":
+            start_line = parsed.get("line")
+            if not start_line:
+                return None
+            headers = ContentExtractor.extract_headers(lines)
+            end_line = ContentExtractor.find_next_section_line(headers, start_line)
+            return ContentExtractor.slice_lines(lines, start_line, end_line)
+
+        elif key == "conclusion_fallback":
+            start_line = parsed.get("start_line")
+            end_line = parsed.get("end_line")
+            if not start_line:
+                return None
+            return ContentExtractor.slice_lines(lines, start_line, end_line)
+
+        elif key == "conclusion_validate":
+            conclusion = parsed.get("conclusion")
+            if not conclusion or len(conclusion.strip()) < 50:
+                return None
+            return conclusion.strip()
+
+        return None
+
+
+# ============================================================================
+# Content Extractor: Pure Functions
+# ============================================================================
+
+
+class ContentExtractor:
+    """Pure content extraction functions."""
+
+    _HEADER_RE = re.compile(r"^(#{1,4})\s+(.+)")
+    _REAL_SECTION_RE = re.compile(
+        r"^(?:"
+        r"\d[\d.]*[\s.]|"  # Arabic: 1, 1.1, 2., etc.
+        r"[IVX]+[\s.)]|"  # Roman: I., II., IV.
+        r"[A-F][\s.)]|"  # Letter: A., B.
+        r"(?:abstract|introduction|method|result|discussion|"
+        r"conclusion|concluding|summary|reference|bibliography|"
+        r"appendix|acknowledge|funding|credit|declaration|"
+        r"data\s+avail|author\s+contrib|conflict)\b"
+        r")",
+        re.IGNORECASE,
+    )
+    _CONCLUSION_KEYWORDS = re.compile(
+        r"\b(conclusion|conclusions|concluding|summary|closing)\b", re.IGNORECASE
     )
 
-    try:
-        result = _parse_json(_call_llm(prompt, config, timeout=config.llm.timeout_toc))
-        toc = result.get("toc") or []
+    @staticmethod
+    def extract_headers(lines: list[str]) -> list[dict]:
+        """Extract all # headers with line numbers (1-indexed)."""
+        headers = []
+        for i, line in enumerate(lines, start=1):
+            m = ContentExtractor._HEADER_RE.match(line.rstrip())
+            if m:
+                headers.append({
+                    "line": i,
+                    "level": len(m.group(1)),
+                    "text": m.group(2).strip(),
+                })
+        return headers
+
+    @staticmethod
+    def is_real_section(title: str) -> bool:
+        """Check if title is a real section (not running header)."""
+        return bool(ContentExtractor._REAL_SECTION_RE.match(title.strip()))
+
+    @staticmethod
+    def filter_real_sections(headers: list[dict]) -> list[dict]:
+        """Filter to only real section headers."""
+        return [h for h in headers if ContentExtractor.is_real_section(h["text"])]
+
+    @staticmethod
+    def slice_lines(lines: list[str], start: int, end: int | None) -> str:
+        """Slice lines by 1-indexed inclusive range."""
+        s = max(0, start - 1)
+        e = end if end is not None else len(lines)
+        return "\n".join(lines[s:e]).strip()
+
+    @staticmethod
+    def find_conclusion_entry(toc: list[dict]) -> dict | None:
+        """Find conclusion entry in TOC."""
+        for entry in toc:
+            if ContentExtractor._CONCLUSION_KEYWORDS.search(entry.get("title", "")):
+                return entry
+        return None
+
+    @staticmethod
+    def find_next_section_line(headers: list[dict], after_line: int) -> int | None:
+        """Find next real section after given line."""
+        for h in ContentExtractor.filter_real_sections(headers):
+            if h["line"] > after_line:
+                return h["line"] - 1
+        return None
+
+    @staticmethod
+    def sample_lines(lines: list[str], head: int = 100, tail: int = 200) -> str:
+        """Sample lines for fallback path (first head + last tail)."""
+        n = len(lines)
+        if n <= head + tail:
+            return "\n".join(f"{i + 1}: {line}" for i, line in enumerate(lines))
+
+        head_str = "\n".join(f"{i + 1}: {line}" for i, line in enumerate(lines[:head]))
+        tail_start = max(head, n - tail)
+        tail_str = "\n".join(
+            f"{tail_start + i + 1}: {line}" for i, line in enumerate(lines[tail_start:])
+        )
+        return f"[Lines 1–{head}]\n{head_str}\n\n...[middle]...\n\n[Lines {tail_start + 1}–{n}]\n{tail_str}"
+
+
+# ============================================================================
+# LLM Runner
+# ============================================================================
+
+
+class LLMRunner:
+    """LLM execution with unified retry logic."""
+
+    def __init__(self, config: Config) -> None:
+        self._config = config
+
+    def execute(
+        self,
+        prompt: str,
+        *,
+        max_retries: int = 2,
+        timeout: int | None = None,
+    ) -> tuple[str | None, str]:
+        """Execute LLM with unified retry. Returns (result, reason)."""
+        from scholaraio.metrics import call_llm
+
+        for attempt in range(1, max_retries + 2):
+            try:
+                result = call_llm(prompt, self._config, timeout=timeout, purpose="loader")
+                return result.content, f"attempt{attempt}"
+            except Exception as e:
+                if attempt == max_retries + 1:
+                    return None, str(e)
+        return None, "exhausted"
+
+
+# ============================================================================
+# Paper Enricher
+# ============================================================================
+
+
+class PaperEnricher:
+    """Orchestrates TOC and conclusion extraction."""
+
+    def __init__(self, papers_dir: Path) -> None:
+        """Initialize with papers directory."""
+        from scholaraio.papers import PaperStore
+
+        self._store = PaperStore(papers_dir)
+
+    def _get_runner(self, config: Config) -> LLMRunner:
+        """Get LLM runner for config."""
+        return LLMRunner(config)
+
+    def _execute(
+        self,
+        strategy_key: str,
+        lines: list[str],
+        meta: dict,
+        runner: LLMRunner,
+        *,
+        timeout: int | None = None,
+    ) -> tuple[str | None, str]:
+        """Execute strategy by key with unified retry."""
+        # Prepare prompt data
+        prompt_data = StrategyRegistry.prepare(strategy_key, lines, meta)
+
+        # Get prompt template
+        prompt_template = StrategyRegistry.get_prompt(strategy_key)
+        prompt = prompt_template.render(**{"headers": prompt_data, "sample": prompt_data, "text": prompt_data})
+
+        # Execute with retry
+        raw, reason = runner.execute(prompt, timeout=timeout)
+        if not raw:
+            return None, f"{strategy_key}-{reason}"
+
+        # Parse
+        parsed = StrategyRegistry.parse(strategy_key, raw)
+
+        # Process
+        result = StrategyRegistry.process(strategy_key, parsed, lines)
+        if result:
+            return result, strategy_key
+
+        return None, f"{strategy_key}-process-failed"
+
+    def enrich_toc(
+        self,
+        paper_id: str,
+        config: Config,
+        *,
+        force: bool = False,
+    ) -> bool:
+        """Enrich TOC for a paper."""
+        paper_d = self._store.paper_dir(paper_id)
+        if not paper_d.exists():
+            _log.error(f"Paper directory not found: {paper_d}")
+            return False
+
+        try:
+            meta = self._store.read_meta(paper_d)
+        except Exception as e:
+            _log.error(f"Failed to read meta: {e}")
+            return False
+
+        if meta.get("toc") and not force:
+            _log.debug("existing TOC (%d entries), skipping", len(meta["toc"]))
+            return True
+
+        md = self._store.read_md(paper_d)
+        if not md:
+            _log.error("No markdown content")
+            return False
+
+        lines = md.splitlines()
+        runner = self._get_runner(config)
+
+        result, method = self._execute("toc", lines, meta, runner)
+        if not result:
+            _log.error(f"TOC extraction failed: {method}")
+            return False
+
+        try:
+            toc = json.loads(result)
+        except json.JSONDecodeError:
+            toc = result
+
         if not toc:
             _log.error("LLM returned empty TOC")
             return False
 
         _log.debug("LLM kept %d real headers", len(toc))
-        for entry in toc:
-            indent = "  " * (entry.get("level", 1) - 1)
-            _log.debug("  line %4d  %s%s", entry["line"], indent, entry["title"])
 
-        data["toc"] = toc
-        data["toc_extracted_at"] = datetime.now().isoformat(timespec="seconds")
-        write_meta(paper_d, data)
+        meta["toc"] = toc
+        meta["toc_extracted_at"] = datetime.now().isoformat(timespec="seconds")
+        self._store.write_meta(paper_d, meta)
         _log.debug("TOC written to JSON")
         return True
 
-    except Exception as e:
-        _log.error("TOC extraction failed: %s", e)
-        return False
+    def enrich_conclusion(
+        self,
+        paper_id: str,
+        config: Config,
+        *,
+        force: bool = False,
+    ) -> bool:
+        """Enrich conclusion for a paper."""
+        paper_d = self._store.paper_dir(paper_id)
+        if not paper_d.exists():
+            _log.error(f"Paper directory not found: {paper_d}")
+            return False
 
+        try:
+            meta = self._store.read_meta(paper_d)
+        except Exception as e:
+            _log.error(f"Failed to read meta: {e}")
+            return False
 
-# ============================================================================
-#  L3 extraction entry point
-# ============================================================================
+        if meta.get("l3_conclusion") and not force:
+            _log.debug(
+                "existing L3 (method: %s), skipping", meta.get("l3_extraction_method", "?")
+            )
+            return True
 
+        md = self._store.read_md(paper_d)
+        if not md:
+            _log.error("No markdown content")
+            return False
 
-def enrich_l3(
-    json_path: Path,
-    md_path: Path,
-    config: "Config",
-    *,
-    force: bool = False,
-    max_retries: int = 2,
-    inspect: bool = False,
-) -> bool:
-    """用 LLM 提取结论段，写入 ``JSON["l3_conclusion"]``。
+        lines = md.splitlines()
+        runner = self._get_runner(config)
 
-    提取策略（按优先级）:
-      1. 从已有 TOC 定位结论节 → Python 截取 → LLM 校验清洗
-      2. Primary path: LLM 从标题列表选出结论节 → 截取 → 校验
-      3. Fallback path: LLM 直接给出起止行号 → 截取 → 校验
+        # Try strategies in order: TOC-based → select from headers → fallback
+        extract_strategies = [
+            ("toc_based", self._extract_toc_based),
+            ("select_from_headers", self._extract_select_from_headers),
+            ("fallback", self._extract_fallback),
+        ]
 
-    Args:
-        json_path: 论文 JSON 元数据文件路径（结果写回此文件）。
-        md_path: 论文 Markdown 文件路径。
-        config: 全局配置（用于 LLM 调用）。
-        force: 为 ``True`` 时覆盖已有结论。
-        max_retries: 每条路径的最大重试次数。
-        inspect: 为 ``True`` 时打印提取过程详情。
+        for strategy_name, extract_fn in extract_strategies:
+            extracted, method = extract_fn(lines, meta, runner)
+            if not extracted:
+                continue
 
-    Returns:
-        提取成功返回 ``True``，失败返回 ``False``。
-    """
-    from scholaraio.papers import read_meta, write_meta
-    paper_d = json_path.parent
-    data = read_meta(paper_d)
+            # Validate
+            validated, val_method = self._validate(extracted, runner)
+            if validated:
+                meta["l3_conclusion"] = validated
+                meta["l3_extraction_method"] = f"{method}+{val_method}"
+                meta["l3_extracted_at"] = datetime.now().isoformat(timespec="seconds")
+                self._store.write_meta(paper_d, meta)
+                _log.debug(
+                    "L3 written (method: %s, %d chars)",
+                    meta["l3_extraction_method"],
+                    len(validated),
+                )
+                return True
 
-    if data.get("l3_conclusion") and not force:
-        _log.debug("existing L3 (method: %s), skipping", data.get("l3_extraction_method", "?"))
-        return True
-
-    lines = md_path.read_text(encoding="utf-8", errors="replace").splitlines()
-
-    conclusion = method = None
-
-    # --- Try locating conclusion via existing TOC (skip first LLM call) ---
-    toc = data.get("toc")
-    if toc:
-        conclusion, method = _l3_from_toc(lines, toc, config, max_retries, inspect)
-
-    # --- Primary path (when TOC is unavailable) ---
-    if conclusion is None:
-        headers = _extract_headers(lines)
-        _log.debug("[Primary] found %d headers", len(headers))
-        for h in headers:
-            _log.debug("  line %4d  %s %s", h["line"], "#" * h["level"], h["text"])
-        if headers:
-            conclusion, method = _primary_path(lines, headers, config, max_retries, inspect)
-
-    # --- Fallback path ---
-    if conclusion is None:
-        _log.debug("[Fallback] Primary path failed, switching to fallback")
-        conclusion, method = _fallback_path(lines, config, max_retries, inspect)
-
-    if conclusion is None:
         _log.error("all paths failed to extract conclusion")
         return False
 
-    # Write back
-    data["l3_conclusion"] = conclusion
-    data["l3_extraction_method"] = method
-    data["l3_extracted_at"] = datetime.now().isoformat(timespec="seconds")
-    write_meta(paper_d, data)
-    _log.debug("L3 written to JSON (method: %s, %d chars)", method, len(conclusion))
-    return True
+    def _extract_toc_based(
+        self,
+        lines: list[str],
+        meta: dict,
+        runner: LLMRunner,
+    ) -> tuple[str | None, str]:
+        """Extract conclusion from existing TOC."""
+        toc = meta.get("toc")
+        if not toc:
+            return None, "toc-missing"
 
+        conclusion_entry = ContentExtractor.find_conclusion_entry(toc)
+        if not conclusion_entry:
+            return None, "toc-no-conclusion"
 
-# ============================================================================
-#  L3 from TOC (no extra LLM call for header identification)
-# ============================================================================
+        start_line = conclusion_entry["line"]
+        headers = ContentExtractor.extract_headers(lines)
+        end_line = ContentExtractor.find_next_section_line(headers, start_line)
 
-_CONCLUSION_KEYWORDS = re.compile(
-    r"\b(conclusion|conclusions|concluding|summary|closing)\b", re.IGNORECASE
-)
-
-
-def _l3_from_toc(
-    lines: list[str],
-    toc: list[dict],
-    config: "Config",
-    max_retries: int,
-    inspect: bool,
-) -> tuple[str | None, str | None]:
-    """用已有 TOC 定位结论节，Python 截取，LLM 校验。"""
-    # Find conclusion entry in TOC
-    conclusion_entry = None
-    for entry in toc:
-        if _CONCLUSION_KEYWORDS.search(entry.get("title", "")):
-            conclusion_entry = entry
-            break
-
-    if not conclusion_entry:
-        _log.debug("[TOC] no conclusion section found in TOC, switching to Primary")
-        return None, None
-
-    start_line = conclusion_entry["line"]
-    _log.debug("[TOC] found conclusion: line %d %s", start_line, conclusion_entry["title"])
-
-    # Find end: next TOC entry after conclusion
-    end_line = None
-    found = False
-    for entry in toc:
-        if found:
-            end_line = entry["line"] - 1
-            break
-        if entry["line"] == start_line:
-            found = True
-
-    extracted = _slice_lines(lines, start_line, end_line)
-    _log.debug("[TOC] extracted lines %d-%s, %d chars", start_line, end_line or "EOF", len(extracted))
-
-    cleaned, reason = _validate_and_clean(extracted, config)
-    _log.debug("[TOC] validate: %s %s", "PASS" if cleaned else "FAIL", reason)
-    if cleaned:
-        return cleaned, "toc"
-
-    return None, None
-
-
-# ============================================================================
-#  Primary path
-# ============================================================================
-
-
-_REAL_SECTION_RE = re.compile(
-    r"^(?:"
-    r"\d[\d.]*[\s.]|"           # 阿拉伯数字编号: 1, 1.1, 2., etc.
-    r"[IVX]+[\s.)]|"            # 罗马数字: I., II., IV.
-    r"[A-F][\s.)]|"             # 字母编号: A., B.
-    r"(?:abstract|introduction|method|result|discussion|"
-    r"conclusion|concluding|summary|reference|bibliography|"
-    r"appendix|acknowledge|funding|credit|declaration|"
-    r"data\s+avail|author\s+contrib|conflict)\b"
-    r")",
-    re.IGNORECASE,
-)
-
-
-def _is_real_section(title: str) -> bool:
-    """判断标题是否为真实节标题（非 running header）。"""
-    return bool(_REAL_SECTION_RE.match(title.strip()))
-
-
-def _extract_headers(lines: list[str]) -> list[dict]:
-    """提取所有 # 标题及行号（1-indexed）。"""
-    headers = []
-    for i, line in enumerate(lines, start=1):
-        m = re.match(r"^(#{1,4})\s+(.+)", line.rstrip())
-        if m:
-            headers.append(
-                {"line": i, "level": len(m.group(1)), "text": m.group(2).strip()}
-            )
-    return headers
-
-
-def _primary_path(
-    lines: list[str],
-    headers: list[dict],
-    config: "Config",
-    max_retries: int,
-    inspect: bool,
-) -> tuple[str | None, str | None]:
-    header_list = "\n".join(
-        f"Line {h['line']}: {'#' * h['level']} {h['text']}" for h in headers
-    )
-    prompt = (
-        "Below are all section headers (with line numbers) from an academic paper markdown file.\n"
-        "Identify the header that marks the START of the conclusion section "
-        "(may be named 'Conclusion', 'Conclusions', 'Concluding Remarks', 'Summary', etc.).\n\n"
-        f"{header_list}\n\n"
-        'Return JSON only: {"line": <line_number>, "header": "<header_text>"}\n'
-        'If no conclusion section exists, return: {"line": null, "header": null}'
-    )
-
-    # 1 initial attempt + max_retries retries; range(1, ...) so attempt number is 1-based
-    for attempt in range(1, max_retries + 2):
-        try:
-            result = _parse_json(_call_llm(prompt, config))
-            start_line = result.get("line")
-            if not start_line:
-                _log.debug("[Primary #%d] LLM found no conclusion", attempt)
-                return None, None
-
-            # Find end: next REAL section header after start_line
-            # Skip running headers (no section number, short text)
-            end_line = None
-            for h in headers:
-                if h["line"] > start_line and _is_real_section(h["text"]):
-                    end_line = h["line"] - 1
-                    break
-
-            extracted = _slice_lines(lines, start_line, end_line)
-            _log.debug("[Primary #%d] extracted lines %d-%s, %d chars", attempt, start_line, end_line or "EOF", len(extracted))
-
-            cleaned, reason = _validate_and_clean(extracted, config)
-            _log.debug("[Primary #%d] validate: %s %s", attempt, "PASS" if cleaned else "FAIL", reason)
-            if cleaned:
-                return cleaned, f"primary-attempt{attempt}"
-
-        except Exception as e:
-            _log.debug("[Primary #%d] exception: %s", attempt, e)
-
-    return None, None
-
-
-# ============================================================================
-#  Fallback path
-# ============================================================================
-
-
-def _fallback_path(
-    lines: list[str],
-    config: "Config",
-    max_retries: int,
-    inspect: bool,
-) -> tuple[str | None, str | None]:
-    n = len(lines)
-
-    # Send first 100 + last 200 lines (conclusion is usually near the end)
-    if n <= 300:
-        sample = "\n".join(f"{i+1}: {l}" for i, l in enumerate(lines))
-    else:
-        head = "\n".join(f"{i+1}: {l}" for i, l in enumerate(lines[:100]))
-        tail_start = max(100, n - 200)
-        tail = "\n".join(
-            f"{tail_start+i+1}: {l}" for i, l in enumerate(lines[tail_start:])
+        extracted = ContentExtractor.slice_lines(lines, start_line, end_line)
+        _log.debug(
+            "[TOC] extracted lines %d-%s, %d chars",
+            start_line,
+            end_line or "EOF",
+            len(extracted),
         )
-        sample = f"[Lines 1–100]\n{head}\n\n...[中间省略]...\n\n[Lines {tail_start+1}–{n}]\n{tail}"
+        return extracted, "toc"
 
-    prompt = (
-        "Find the conclusion section in this academic paper (markdown format). "
-        "Return the 1-indexed line number where the conclusion STARTS and where it ENDS "
-        "(last line before References/Appendix/end of file).\n\n"
-        f"{sample}\n\n"
-        'Return JSON only: {"start_line": <N>, "end_line": <N>}\n'
-        'If no conclusion exists, return: {"start_line": null, "end_line": null}'
-    )
+    def _extract_select_from_headers(
+        self,
+        lines: list[str],
+        meta: dict,
+        runner: LLMRunner,
+    ) -> tuple[str | None, str]:
+        """Extract conclusion by selecting from headers."""
+        headers = ContentExtractor.extract_headers(lines)
+        if not headers:
+            return None, "no-headers"
 
-    # 1 initial attempt + max_retries retries; range(1, ...) so attempt number is 1-based
-    for attempt in range(1, max_retries + 2):
-        try:
-            result = _parse_json(_call_llm(prompt, config))
-            start_line = result.get("start_line")
-            end_line = result.get("end_line")
-            if not start_line:
-                _log.debug("[Fallback #%d] LLM found no conclusion", attempt)
-                return None, None
+        _log.debug("[Select] found %d headers", len(headers))
+        return self._execute("conclusion_select", lines, meta, runner)
 
-            extracted = _slice_lines(lines, start_line, end_line)
-            _log.debug("[Fallback #%d] extracted lines %d-%s, %d chars", attempt, start_line, end_line or "EOF", len(extracted))
+    def _extract_fallback(
+        self,
+        lines: list[str],
+        meta: dict,
+        runner: LLMRunner,
+    ) -> tuple[str | None, str]:
+        """Extract conclusion using fallback (direct line numbers)."""
+        _log.debug("[Fallback] switching to fallback")
+        return self._execute("conclusion_fallback", lines, meta, runner)
 
-            cleaned, reason = _validate_and_clean(extracted, config)
-            _log.debug("[Fallback #%d] validate: %s %s", attempt, "PASS" if cleaned else "FAIL", reason)
-            if cleaned:
-                return cleaned, f"fallback-attempt{attempt}"
+    def _validate(
+        self,
+        text: str,
+        runner: LLMRunner,
+    ) -> tuple[str | None, str]:
+        """Validate and clean conclusion text."""
+        if len(text.strip()) < 100:
+            return None, "text-too-short"
 
-        except Exception as e:
-            _log.debug("[Fallback #%d] exception: %s", attempt, e)
-
-    return None, None
-
-
-# ============================================================================
-#  LLM validation + cleaning
-# ============================================================================
-
-
-def _validate_and_clean(text: str, config: "Config") -> tuple[str | None, str]:
-    """校验并清理提取的结论文本。
-
-    返回 (cleaned_text, reason)：
-    - cleaned_text 为 None 表示文本不包含有效结论内容
-    - cleaned_text 为清理后的纯结论文本（去除标题行、Acknowledgments 等）
-    """
-    if len(text.strip()) < 100:
-        return None, "文本过短"
-
-    prompt = (
-        "The following text was extracted as the conclusion section of an academic paper. "
-        "Your tasks:\n"
-        "1. Check if it contains actual conclusion content (summary of findings, contributions, or future work).\n"
-        "2. If yes, return a CLEANED version:\n"
-        "   - Remove the section header line (e.g. '# 6. Conclusion', '# Concluding Remarks')\n"
-        "   - Remove any in-text running headers (e.g. '# Author and others', '# Journal Name')\n"
-        "   - Remove everything AFTER the conclusion ends: Acknowledgments, Funding statements, "
-        "CRediT authorship statements, Declaration of interests/competing interest, "
-        "Data availability, Author ORCIDs, Author contributions, conflict of interest, etc.\n"
-        "   - Keep only the actual conclusion/summary paragraphs. Do NOT truncate mid-sentence.\n"
-        "3. If it contains NO conclusion content at all, set conclusion to null.\n\n"
-        f"{text}\n\n"
-        'Return JSON only: {"conclusion": "<cleaned text or null>", "reason": "<one sentence>"}'
-    )
-    try:
-        result = _parse_json(_call_llm(prompt, config, timeout=config.llm.timeout_clean))
-        cleaned = result.get("conclusion")
-        reason = result.get("reason") or ""
-        if not cleaned or len(cleaned.strip()) < 50:
-            return None, reason or "无有效结论内容"
-        return cleaned.strip(), reason
-    except Exception as e:
-        return None, f"校验异常：{e}"
+        meta = {"_text_to_validate": text}
+        return self._execute("conclusion_validate", [], meta, runner, timeout=30)
 
 
 # ============================================================================
-#  LLM + JSON utilities
+# Update Callers: CLI, MCP Server, Pipeline
 # ============================================================================
 
-
-def _call_llm(prompt: str, config: "Config", timeout: int | None = None) -> str:
-    from scholaraio.metrics import call_llm
-    result = call_llm(prompt, config, timeout=timeout, purpose="loader")
-    return result.content
-
-
-def _parse_json(text: str) -> dict:
-    text = text.strip()
-    # Strip markdown code fences if present
-    text = re.sub(r"^```\w*\s*", "", text)
-    text = re.sub(r"\s*```$", "", text)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        # Fix unescaped backslashes (e.g. LaTeX: \alpha, \vec, \frac).
-        # Only runs when initial parse fails. Valid JSON escapes are
-        # preserved: \" \\ \/ \b \f \n \r \t \uXXXX
-        fixed = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', text)
-        try:
-            return json.loads(fixed)
-        except json.JSONDecodeError:
-            # If escaping made things worse, raise with original text
-            return json.loads(text)
-
-
-def _slice_lines(lines: list[str], start: int, end: int | None) -> str:
-    """1-indexed, inclusive on both ends."""
-    s = max(0, start - 1)
-    e = end if end is not None else len(lines)
-    return "\n".join(lines[s:e]).strip()
+# Note: The following files need to be updated to use PaperEnricher:
+# - scholaraio/cli.py (cmd_enrich_toc, cmd_enrich_l3)
+# - scholaraio/mcp_server.py (enrich_toc, enrich_l3)
+# - scholaraio/ingest/pipeline.py
+#
+# Replace:
+#   from scholaraio.loader import enrich_toc, enrich_l3
+#   enrich_toc(json_path, md_path, config)
+#
+# With:
+#   from scholaraio.loader import PaperEnricher
+#   enricher = PaperEnricher(papers_dir)
+#   enricher.enrich_toc(paper_id, config)

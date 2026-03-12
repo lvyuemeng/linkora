@@ -1,32 +1,109 @@
 """
-index.py — SQLite FTS5 全文检索索引
-=====================================
+index.py — SQLite FTS5 Full-Text Search Index
+==============================================
 
-索引字段：title + abstract + conclusion（均可检索）
-其余字段（paper_id, authors, year, journal, doi, paper_type, citation_count, md_path）
-存储但不参与检索。
+Indexed fields: title + abstract + conclusion (all searchable).
+Other fields (paper_id, authors, year, journal, doi, paper_type, citation_count, md_path)
+are stored but not searched.
 
-用法：
-    from scholaraio.index import build_index, search
-    build_index(papers_dir, db_path)
-    results = search("turbulent boundary layer", db_path)
+Usage:
+    from scholaraio.index import SearchIndex
+
+    index = SearchIndex(db_path)
+    results = index.search("turbulent boundary layer")
+    author_results = index.search_author("Einstein")
+    top_cited = index.top_cited()
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from scholaraio.hash import compute_full_hash
 from scholaraio.papers import best_citation, parse_year_range
 
 if TYPE_CHECKING:
-    from scholaraio.config import Config
+    pass
 
-_SCHEMA = """
+# ============================================================================
+# Query Data Classes (Immutable, No Side Effects)
+# ============================================================================
+
+_SEARCH_COLS = (
+    "paper_id, title, authors, year, journal, doi, paper_type, citation_count"
+)
+
+
+@dataclass(frozen=True)
+class FilterParams:
+    """Filter parameters for search queries (immutable)."""
+
+    year: str | None = None
+    journal: str | None = None
+    paper_type: str | None = None
+
+    def to_sql(self) -> tuple[str, list[str]]:
+        """Convert to SQL WHERE clause and params."""
+        clauses: list[str] = []
+        params: list[str] = []
+        if self.year:
+            start, end = parse_year_range(self.year)
+            if start is not None and end is not None:
+                if start == end:
+                    clauses.append("year = ?")
+                    params.append(str(start))
+                else:
+                    clauses.append("year >= ? AND year <= ?")
+                    params.extend([str(start), str(end)])
+            elif start is not None:
+                clauses.append("year >= ?")
+                params.append(str(start))
+            elif end is not None:
+                clauses.append("year <= ?")
+                params.append(str(end))
+        if self.journal:
+            clauses.append("journal LIKE ?")
+            params.append(f"%{self.journal}%")
+        if self.paper_type:
+            clauses.append("paper_type LIKE ?")
+            params.append(f"%{self.paper_type}%")
+        return ("".join(f" AND {c}" for c in clauses), params) if clauses else ("", [])
+
+
+# ============================================================================
+# Search Mode Factories (Pure Data, No Side Effects)
+# ============================================================================
+
+
+class SearchMode:
+    """Search mode factories - pure data, no side effects."""
+
+    @staticmethod
+    def fts(query: str) -> tuple[str, str, list[str]]:
+        """Full-text search mode."""
+        safe = re.sub(r"[^\w\s]", " ", query).strip()
+        return (_SEARCH_COLS, "papers MATCH ?", [safe])
+
+    @staticmethod
+    def author(name: str) -> tuple[str, str, list[str]]:
+        """Author search mode."""
+        return (_SEARCH_COLS, "authors LIKE ?", [f"%{name}%"])
+
+    @staticmethod
+    def top_cited() -> tuple[str, str, list[str]]:
+        """Top-cited mode."""
+        return (_SEARCH_COLS, "citation_count != ''", [])
+
+
+# ============================================================================
+# Schemas (Constants)
+# ============================================================================
+
+_SCHEMAS = """
 CREATE VIRTUAL TABLE IF NOT EXISTS papers USING fts5(
     paper_id       UNINDEXED,
     title,
@@ -41,17 +118,12 @@ CREATE VIRTUAL TABLE IF NOT EXISTS papers USING fts5(
     md_path        UNINDEXED,
     tokenize       = 'unicode61'
 );
-"""
 
-
-_HASH_SCHEMA = """
 CREATE TABLE IF NOT EXISTS papers_hash (
     paper_id     TEXT PRIMARY KEY,
     content_hash TEXT NOT NULL
 );
-"""
 
-_REGISTRY_SCHEMA = """
 CREATE TABLE IF NOT EXISTS papers_registry (
     id           TEXT PRIMARY KEY,
     dir_name     TEXT NOT NULL UNIQUE,
@@ -60,68 +132,236 @@ CREATE TABLE IF NOT EXISTS papers_registry (
     year         INTEGER,
     first_author TEXT
 );
-"""
 
-_REGISTRY_DOI_INDEX = """
 CREATE UNIQUE INDEX IF NOT EXISTS idx_registry_doi
     ON papers_registry(doi) WHERE doi IS NOT NULL AND doi != '';
-"""
 
-_CITATIONS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS citations (
     source_id   TEXT NOT NULL,
     target_doi  TEXT NOT NULL,
     target_id   TEXT,
     PRIMARY KEY (source_id, target_doi)
 );
+
+CREATE INDEX IF NOT EXISTS idx_cit_target_doi ON citations(target_doi);
+CREATE INDEX IF NOT EXISTS idx_cit_target_id ON citations(target_id) WHERE target_id IS NOT NULL;
 """
-_CITATIONS_IDX_TARGET_DOI = "CREATE INDEX IF NOT EXISTS idx_cit_target_doi ON citations(target_doi);"
-_CITATIONS_IDX_TARGET_ID = "CREATE INDEX IF NOT EXISTS idx_cit_target_id ON citations(target_id) WHERE target_id IS NOT NULL;"
+
+_SCHEMA = _SCHEMAS.split(";")[0] + ";"
+_HASH_SCHEMA = _SCHEMAS.split(";")[1] + ";"
+_REGISTRY_SCHEMA = _SCHEMAS.split(";")[2] + ";"
+_REGISTRY_DOI_INDEX = _SCHEMAS.split(";")[3] + ";"
+_CITATIONS_SCHEMA = _SCHEMAS.split(";")[4] + ";"
+_CITATIONS_IDX_TARGET_DOI = _SCHEMAS.split(";")[5]
+_CITATIONS_IDX_TARGET_ID = _SCHEMAS.split(";")[6]
 
 
-def _index_hash(meta: dict) -> str:
-    """Compute a short hash of the fields indexed in FTS5."""
-    parts = [
-        meta.get("title") or "",
-        ", ".join(meta.get("authors") or []),
-        str(meta.get("year") or ""),
-        meta.get("journal") or "",
-        meta.get("abstract") or "",
-        meta.get("l3_conclusion") or "",
-        meta.get("doi") or "",
-        meta.get("paper_type") or "",
-    ]
-    cc = meta.get("citation_count")
-    if cc and isinstance(cc, dict):
-        vals = [v for v in cc.values() if isinstance(v, (int, float))]
-        parts.append(str(max(vals)) if vals else "")
-    parts.append(json.dumps(meta.get("references", []), sort_keys=True))
-    text = "\n".join(parts)
-    return hashlib.md5(text.encode("utf-8")).hexdigest()[:12]
+# ============================================================================
+# Search Index Class (Encapsulates DB Connection)
+# ============================================================================
 
 
-_best_citation = best_citation  # backward compat alias
+class SearchIndex:
+    """Search index with encapsulated DB connection."""
 
+    def __init__(self, db_path: Path) -> None:
+        """Initialize search index with database path."""
+        self._db_path = db_path
+        self._conn: sqlite3.Connection | None = None
 
-def build_index(papers_dir: Path, db_path: Path, rebuild: bool = False) -> int:
-    """建立或增量更新 SQLite FTS5 全文检索索引。
+    @property
+    def db_path(self) -> Path:
+        return self._db_path
 
-    索引字段: ``title`` + ``abstract`` + ``conclusion``，
-    均参与全文检索。其余字段（``paper_id``, ``authors`` 等）仅存储。
+    def _ensure_connection(self) -> sqlite3.Connection:
+        if self._conn is None:
+            self._conn = sqlite3.connect(self._db_path)
+            self._conn.row_factory = sqlite3.Row
+        return self._conn
 
-    Args:
-        papers_dir: 已入库论文目录，扫描其中的 ``*.json``。
-        db_path: SQLite 数据库路径，不存在时自动创建。
-        rebuild: 为 ``True`` 时清空旧数据后重建。
+    def _ensure_fts_table(self) -> None:
+        conn = self._ensure_connection()
+        has_table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='papers'"
+        ).fetchone()
+        if not has_table:
+            raise FileNotFoundError("FTS5 index table not found.")
 
-    Returns:
-        本次索引的论文数量。
-    """
-    import json as _json
-    from scholaraio.papers import iter_paper_dirs, read_meta as _read_meta
+    def _enrich_dir_names(self, results: list[dict]) -> None:
+        conn = self._conn
+        id_to_dir: dict[str, str] = {}
+        has_reg = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='papers_registry'"
+        ).fetchone()
+        if has_reg:
+            for row in conn.execute(
+                "SELECT id, dir_name FROM papers_registry"
+            ).fetchall():
+                id_to_dir[row[0]] = row[1]
+        for r in results:
+            r["dir_name"] = id_to_dir.get(r["paper_id"], "")
 
-    conn = sqlite3.connect(db_path)
-    try:
+    def _query(
+        self,
+        mode: tuple[str, str, list[str]],
+        filters: FilterParams,
+        top_k: int,
+        order_by: str = "rank",
+        paper_ids: set[str] | None = None,
+    ) -> list[dict]:
+        self._ensure_fts_table()
+        conn = self._conn
+
+        cols, where_clause, where_params = mode
+        filter_sql, filter_params = filters.to_sql()
+
+        fetch_k = top_k * 5 if paper_ids else top_k
+
+        rows = conn.execute(
+            f"SELECT {cols} FROM papers WHERE {where_clause}{filter_sql} ORDER BY {order_by} LIMIT ?",
+            [*where_params, *filter_params, fetch_k],
+        ).fetchall()
+
+        results = [dict(r) for r in rows]
+        self._enrich_dir_names(results)
+
+        if paper_ids is not None:
+            results = [r for r in results if r["paper_id"] in paper_ids]
+        return results[:top_k]
+
+    # -------------------------------------------------------------------------
+    # Search Methods
+    # -------------------------------------------------------------------------
+
+    def search(
+        self,
+        query: str,
+        top_k: int = 20,
+        *,
+        year: str | None = None,
+        journal: str | None = None,
+        paper_type: str | None = None,
+        paper_ids: set[str] | None = None,
+    ) -> list[dict]:
+        filters = FilterParams(year=year, journal=journal, paper_type=paper_type)
+        return self._query(SearchMode.fts(query), filters, top_k, "rank", paper_ids)
+
+    def search_author(
+        self,
+        query: str,
+        top_k: int = 20,
+        *,
+        year: str | None = None,
+        journal: str | None = None,
+        paper_type: str | None = None,
+        paper_ids: set[str] | None = None,
+    ) -> list[dict]:
+        filters = FilterParams(year=year, journal=journal, paper_type=paper_type)
+        return self._query(
+            SearchMode.author(query), filters, top_k, "year DESC", paper_ids
+        )
+
+    def top_cited(
+        self,
+        top_k: int = 10,
+        *,
+        year: str | None = None,
+        journal: str | None = None,
+        paper_type: str | None = None,
+        paper_ids: set[str] | None = None,
+    ) -> list[dict]:
+        filters = FilterParams(year=year, journal=journal, paper_type=paper_type)
+        return self._query(
+            SearchMode.top_cited(),
+            filters,
+            top_k,
+            "CAST(citation_count AS INTEGER) DESC",
+            paper_ids,
+        )
+
+    # -------------------------------------------------------------------------
+    # Citation Graph Methods
+    # -------------------------------------------------------------------------
+
+    def _fetch_citations(
+        self, sql: str, params: list, paper_ids: set[str] | None = None
+    ) -> list[dict]:
+        conn = self._ensure_connection()
+        rows = conn.execute(sql, params).fetchall()
+        results = [dict(r) for r in rows]
+        if paper_ids is not None:
+            id_fields = ["target_id", "source_id", "paper_id"]
+            results = [
+                r
+                for r in results
+                if any(r.get(f) in paper_ids for f in id_fields if r.get(f))
+            ]
+        return results
+
+    def references(
+        self, paper_id: str, *, paper_ids: set[str] | None = None
+    ) -> list[dict]:
+        """Get outgoing citations (what this paper cites)."""
+        sql = """SELECT c.target_doi, c.target_id,
+                         pr.title, pr.dir_name, pr.year, pr.first_author
+                  FROM citations c
+                  LEFT JOIN papers_registry pr ON c.target_id = pr.id
+                  WHERE c.source_id = ?
+                  ORDER BY pr.year DESC NULLS LAST, c.target_doi"""
+        return self._fetch_citations(sql, [paper_id], paper_ids)
+
+    def citing(self, paper_id: str, *, paper_ids: set[str] | None = None) -> list[dict]:
+        """Get incoming citations (what cites this paper)."""
+        conn = self._ensure_connection()
+        row = conn.execute(
+            "SELECT doi FROM papers_registry WHERE id = ?", (paper_id,)
+        ).fetchone()
+        target_doi = row["doi"] if row else ""
+
+        params: list = [paper_id]
+        doi_clause = ""
+        if target_doi:
+            doi_clause = " OR LOWER(c.target_doi) = LOWER(?)"
+            params.append(target_doi)
+
+        sql = f"""SELECT c.source_id as paper_id,
+                         pr.dir_name, pr.title, pr.year, pr.first_author
+                  FROM citations c
+                  JOIN papers_registry pr ON c.source_id = pr.id
+                  WHERE (c.target_id = ?{doi_clause})
+                  ORDER BY pr.year DESC"""
+        return self._fetch_citations(sql, params, paper_ids)
+
+    def shared_citations(
+        self,
+        paper_id_list: list[str],
+        min_count: int = 2,
+        *,
+        paper_ids: set[str] | None = None,
+    ) -> list[dict]:
+        """Find citations shared by multiple papers."""
+        if not paper_id_list:
+            return []
+
+        placeholders = ",".join("?" for _ in paper_id_list)
+        sql = f"""SELECT c.target_doi,
+                          COUNT(DISTINCT c.source_id) AS shared_count,
+                          c.target_id,
+                          pr.title, pr.dir_name, pr.year
+                   FROM citations c
+                   LEFT JOIN papers_registry pr ON c.target_id = pr.id
+                   WHERE c.source_id IN ({placeholders})
+                   GROUP BY LOWER(c.target_doi)
+                   HAVING shared_count >= ?
+                   ORDER BY shared_count DESC, c.target_doi"""
+        return self._fetch_citations(sql, [*paper_id_list, min_count], paper_ids)
+
+    # -------------------------------------------------------------------------
+    # Index Build Methods (Unified Pattern)
+    # -------------------------------------------------------------------------
+
+    def _ensure_schemas(self) -> None:
+        conn = self._ensure_connection()
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(_SCHEMA)
         conn.execute(_HASH_SCHEMA)
@@ -130,7 +370,7 @@ def build_index(papers_dir: Path, db_path: Path, rebuild: bool = False) -> int:
         try:
             conn.execute(_REGISTRY_DOI_INDEX)
         except sqlite3.OperationalError:
-            pass  # index already exists
+            pass
         try:
             conn.execute(_CITATIONS_IDX_TARGET_DOI)
         except sqlite3.OperationalError:
@@ -140,20 +380,117 @@ def build_index(papers_dir: Path, db_path: Path, rebuild: bool = False) -> int:
         except sqlite3.OperationalError:
             pass
 
-        if rebuild:
-            conn.execute("DROP TABLE IF EXISTS papers")
-            conn.execute(_SCHEMA)
-            conn.execute("DELETE FROM papers_hash")
-            conn.execute("DELETE FROM papers_registry")
-            conn.execute("DELETE FROM citations")
+    def _index_paper(
+        self, conn: sqlite3.Connection, pdir: Path, meta: dict, paper_id: str, h: str
+    ) -> bool:
+        """Index single paper. Returns True if indexed."""
+        best_cite = best_citation(meta)
+        md_file = pdir / "paper.md"
 
-        # Load existing hashes for incremental change detection
+        conn.execute(
+            """
+            INSERT INTO papers
+                (paper_id, title, authors, year, journal, abstract, conclusion,
+                 doi, paper_type, citation_count, md_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                paper_id,
+                meta.get("title") or "",
+                ", ".join(meta.get("authors") or []),
+                str(meta.get("year") or ""),
+                meta.get("journal") or "",
+                meta.get("abstract") or "",
+                meta.get("l3_conclusion") or "",
+                meta.get("doi") or "",
+                meta.get("paper_type") or "",
+                str(best_cite) if best_cite is not None else "",
+                str(md_file) if md_file.exists() else "",
+            ),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO papers_hash (paper_id, content_hash) VALUES (?, ?)",
+            (paper_id, h),
+        )
+
+        dir_name = pdir.name
+        conn.execute(
+            """INSERT OR REPLACE INTO papers_registry
+               (id, dir_name, title, doi, year, first_author)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                paper_id,
+                dir_name,
+                meta.get("title") or "",
+                meta.get("doi") or "",
+                meta.get("year"),
+                meta.get("first_author_lastname") or "",
+            ),
+        )
+
+        refs = meta.get("references") or []
+        if refs:
+            conn.execute("DELETE FROM citations WHERE source_id = ?", (paper_id,))
+            conn.executemany(
+                "INSERT OR IGNORE INTO citations (source_id, target_doi, target_id) VALUES (?, ?, NULL)",
+                [(paper_id, doi) for doi in refs],
+            )
+
+        return True
+
+    def _resolve_citations(self, conn: sqlite3.Connection) -> None:
+        """Bulk resolve target_id for citations where target paper is in library."""
+        conn.execute("""
+            UPDATE citations SET target_id = (
+                SELECT pr.id FROM papers_registry pr
+                WHERE LOWER(pr.doi) = LOWER(citations.target_doi)
+            ) WHERE target_id IS NULL
+        """)
+
+    def rebuild(self, papers_dir: Path) -> int:
+        """Full rebuild of search index."""
+        from scholaraio.papers import iter_paper_dirs
+
+        self._ensure_schemas()
+        conn = self._ensure_connection()
+
+        # Clear existing data
+        conn.execute("DROP TABLE IF EXISTS papers")
+        conn.execute(_SCHEMA)
+        conn.execute("DELETE FROM papers_hash")
+        conn.execute("DELETE FROM papers_registry")
+        conn.execute("DELETE FROM citations")
+
+        count = 0
+        for pdir in iter_paper_dirs(papers_dir):
+            from scholaraio.papers import read_meta as _read_meta
+
+            try:
+                meta = _read_meta(pdir)
+            except (ValueError, FileNotFoundError):
+                continue
+            paper_id = meta.get("id") or pdir.name
+            h = compute_full_hash(meta)
+            if self._index_paper(conn, pdir, paper_id, meta, h):
+                count += 1
+
+        self._resolve_citations(conn)
+        conn.commit()
+        return count
+
+    def update(self, papers_dir: Path) -> int:
+        """Incrementally update search index."""
+        from scholaraio.papers import iter_paper_dirs, read_meta as _read_meta
+
+        self._ensure_schemas()
+        conn = self._ensure_connection()
+
+        # Load existing hashes
         existing_hashes: dict[str, str] = {}
-        if not rebuild:
-            for row in conn.execute(
-                "SELECT paper_id, content_hash FROM papers_hash"
-            ).fetchall():
-                existing_hashes[row[0]] = row[1]
+        for row in conn.execute(
+            "SELECT paper_id, content_hash FROM papers_hash"
+        ).fetchall():
+            existing_hashes[row[0]] = row[1]
 
         count = 0
         for pdir in iter_paper_dirs(papers_dir):
@@ -162,633 +499,30 @@ def build_index(papers_dir: Path, db_path: Path, rebuild: bool = False) -> int:
             except (ValueError, FileNotFoundError):
                 continue
             paper_id = meta.get("id") or pdir.name
-            h = _index_hash(meta)
-            if not rebuild and existing_hashes.get(paper_id) == h:
-                continue  # unchanged, skip
+            h = compute_full_hash(meta)
 
-            if not rebuild:
-                conn.execute("DELETE FROM papers WHERE paper_id = ?", (paper_id,))
+            if existing_hashes.get(paper_id) == h:
+                continue  # unchanged
 
-            best_cite = _best_citation(meta)
-            md_file = pdir / "paper.md"
-            conn.execute(
-                """
-                INSERT INTO papers
-                    (paper_id, title, authors, year, journal, abstract, conclusion,
-                     doi, paper_type, citation_count, md_path)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    paper_id,
-                    meta.get("title") or "",
-                    ", ".join(meta.get("authors") or []),
-                    str(meta.get("year") or ""),
-                    meta.get("journal") or "",
-                    meta.get("abstract") or "",
-                    meta.get("l3_conclusion") or "",
-                    meta.get("doi") or "",
-                    meta.get("paper_type") or "",
-                    str(best_cite) if best_cite is not None else "",
-                    str(md_file) if md_file.exists() else "",
-                ),
-            )
-            conn.execute(
-                "INSERT OR REPLACE INTO papers_hash (paper_id, content_hash) VALUES (?, ?)",
-                (paper_id, h),
-            )
+            conn.execute("DELETE FROM papers WHERE paper_id = ?", (paper_id,))
+            if self._index_paper(conn, pdir, paper_id, meta, h):
+                count += 1
 
-            # Update papers_registry
-            dir_name = pdir.name
-            conn.execute(
-                """INSERT OR REPLACE INTO papers_registry
-                   (id, dir_name, title, doi, year, first_author)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (
-                    paper_id,
-                    dir_name,
-                    meta.get("title") or "",
-                    meta.get("doi") or "",
-                    meta.get("year"),
-                    meta.get("first_author_lastname") or "",
-                ),
-            )
-
-            # Insert references into citations table
-            refs = meta.get("references") or []
-            if refs:
-                conn.execute("DELETE FROM citations WHERE source_id = ?", (paper_id,))
-                conn.executemany(
-                    "INSERT OR IGNORE INTO citations (source_id, target_doi, target_id) VALUES (?, ?, NULL)",
-                    [(paper_id, doi) for doi in refs],
-                )
-
-            count += 1
-
-        # Bulk resolve target_id for citations where target paper is in library
-        conn.execute("""
-            UPDATE citations SET target_id = (
-                SELECT pr.id FROM papers_registry pr
-                WHERE LOWER(pr.doi) = LOWER(citations.target_doi)
-            ) WHERE target_id IS NULL
-        """)
-
+        self._resolve_citations(conn)
         conn.commit()
-    finally:
-        conn.close()
-    return count
+        return count
 
+    # -------------------------------------------------------------------------
+    # Connection Management
+    # -------------------------------------------------------------------------
 
-_SEARCH_COLS = "paper_id, title, authors, year, journal, doi, paper_type, citation_count"
+    def close(self) -> None:
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
 
+    def __enter__(self) -> "SearchIndex":
+        return self
 
-def _ensure_fts_table(conn: sqlite3.Connection) -> None:
-    """Raise FileNotFoundError if the FTS5 papers table does not exist."""
-    has_table = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='papers'"
-    ).fetchone()
-    if not has_table:
-        raise FileNotFoundError("FTS5 索引表不存在，请先运行 `scholaraio index`")
-
-
-def search(
-    query: str,
-    db_path: Path,
-    top_k: int | None = None,
-    cfg: Config | None = None,
-    *,
-    year: str | None = None,
-    journal: str | None = None,
-    paper_type: str | None = None,
-    paper_ids: set[str] | None = None,
-) -> list[dict]:
-    """FTS5 关键词全文检索。
-
-    在 ``title``、``abstract``、``conclusion`` 字段上执行 FTS5 MATCH，
-    按 BM25 相关性排序返回结果。
-
-    Args:
-        query: 检索词（多词用空格分隔，FTS5 语法）。
-        db_path: SQLite 索引数据库路径。
-        top_k: 最多返回条数，为 ``None`` 时从 ``cfg.search.top_k`` 读取。
-        cfg: 可选的 :class:`~scholaraio.config.Config` 实例。
-        year: 年份过滤（``"2023"`` / ``"2020-2024"`` / ``"2020-"``）。
-        journal: 期刊名过滤（LIKE 模糊匹配）。
-        paper_type: 论文类型过滤（如 ``"review"``、``"journal-article"``）。
-        paper_ids: 论文 UUID 白名单，仅返回集合内的结果。
-
-    Returns:
-        匹配的论文字典列表，每项包含 ``paper_id``, ``title``,
-        ``authors``, ``year``, ``journal``, ``doi``, ``paper_type``,
-        ``citation_count``。
-
-    Raises:
-        FileNotFoundError: 索引文件或 FTS5 表不存在。
-    """
-    if top_k is None:
-        top_k = cfg.search.top_k if cfg is not None else 20
-
-    if not db_path.exists():
-        raise FileNotFoundError(
-            f"索引文件不存在：{db_path}\n请先运行 `scholaraio index`"
-        )
-
-    conn = sqlite3.connect(db_path)
-    try:
-        _ensure_fts_table(conn)
-
-        conn.row_factory = sqlite3.Row
-        filter_sql, filter_params = _build_filter_clause(year=year, journal=journal, paper_type=paper_type)
-
-        # Over-fetch when post-filtering by paper_ids to avoid empty results
-        fetch_k = top_k * 5 if paper_ids else top_k
-
-        rows = conn.execute(
-            f"""
-            SELECT {_SEARCH_COLS}
-            FROM papers
-            WHERE papers MATCH ?{filter_sql}
-            ORDER BY rank
-            LIMIT ?
-            """,
-            [_safe_query(query), *filter_params, fetch_k],
-        ).fetchall()
-        results = [dict(r) for r in rows]
-        _enrich_dir_names(results, conn)
-    finally:
-        conn.close()
-    if paper_ids is not None:
-        results = [r for r in results if r["paper_id"] in paper_ids]
-    return results[:top_k]
-
-
-def search_author(
-    query: str,
-    db_path: Path,
-    top_k: int | None = None,
-    cfg: Config | None = None,
-    *,
-    year: str | None = None,
-    journal: str | None = None,
-    paper_type: str | None = None,
-    paper_ids: set[str] | None = None,
-) -> list[dict]:
-    """按作者名搜索论文（LIKE 模糊匹配）。
-
-    Args:
-        query: 作者名（或部分名字），不区分大小写。
-        db_path: SQLite 索引数据库路径。
-        top_k: 最多返回条数，为 ``None`` 时从 ``cfg.search.top_k`` 读取。
-        cfg: 可选的 :class:`~scholaraio.config.Config` 实例。
-        year: 年份过滤（``"2023"`` / ``"2020-2024"`` / ``"2020-"``）。
-        journal: 期刊名过滤（LIKE 模糊匹配）。
-        paper_type: 论文类型过滤（如 ``"review"``、``"journal-article"``）。
-        paper_ids: 论文 UUID 白名单，仅返回集合内的结果。
-
-    Returns:
-        匹配的论文字典列表。
-    """
-    if top_k is None:
-        top_k = cfg.search.top_k if cfg is not None else 20
-
-    if not db_path.exists():
-        raise FileNotFoundError(
-            f"索引文件不存在：{db_path}\n请先运行 `scholaraio index`"
-        )
-
-    conn = sqlite3.connect(db_path)
-    try:
-        _ensure_fts_table(conn)
-
-        conn.row_factory = sqlite3.Row
-        filter_sql, filter_params = _build_filter_clause(year=year, journal=journal, paper_type=paper_type)
-
-        # Over-fetch when post-filtering by paper_ids to avoid empty results
-        fetch_k = top_k * 5 if paper_ids else top_k
-
-        rows = conn.execute(
-            f"""
-            SELECT {_SEARCH_COLS}
-            FROM papers
-            WHERE authors LIKE ?{filter_sql}
-            ORDER BY year DESC
-            LIMIT ?
-            """,
-            [f"%{query}%", *filter_params, fetch_k],
-        ).fetchall()
-        results = [dict(r) for r in rows]
-        _enrich_dir_names(results, conn)
-    finally:
-        conn.close()
-    if paper_ids is not None:
-        results = [r for r in results if r["paper_id"] in paper_ids]
-    return results[:top_k]
-
-
-def top_cited(
-    db_path: Path,
-    top_k: int = 10,
-    *,
-    year: str | None = None,
-    journal: str | None = None,
-    paper_type: str | None = None,
-    paper_ids: set[str] | None = None,
-) -> list[dict]:
-    """按引用量降序返回论文。
-
-    Args:
-        db_path: SQLite 索引数据库路径。
-        top_k: 最多返回条数。
-        year: 年份过滤（``"2023"`` / ``"2020-2024"`` / ``"2020-"``）。
-        journal: 期刊名过滤（LIKE 模糊匹配）。
-        paper_type: 论文类型过滤（如 ``"review"``、``"journal-article"``）。
-        paper_ids: 论文 UUID 白名单，仅返回集合内的结果。
-
-    Returns:
-        论文字典列表，按 ``citation_count`` 降序排列。
-
-    Raises:
-        FileNotFoundError: 索引文件或 FTS5 表不存在。
-    """
-    if not db_path.exists():
-        raise FileNotFoundError(
-            f"索引文件不存在：{db_path}\n请先运行 `scholaraio index`"
-        )
-
-    conn = sqlite3.connect(db_path)
-    try:
-        _ensure_fts_table(conn)
-
-        conn.row_factory = sqlite3.Row
-        filter_sql, filter_params = _build_filter_clause(year=year, journal=journal, paper_type=paper_type)
-
-        # Skip SQL LIMIT when post-filtering by paper_ids (workspace scope)
-        limit_clause = "" if paper_ids else "LIMIT ?"
-        limit_params = [] if paper_ids else [top_k]
-
-        rows = conn.execute(
-            f"""
-            SELECT {_SEARCH_COLS}
-            FROM papers
-            WHERE citation_count != ''{filter_sql}
-            ORDER BY CAST(citation_count AS INTEGER) DESC
-            {limit_clause}
-            """,
-            [*filter_params, *limit_params],
-        ).fetchall()
-        results = [dict(r) for r in rows]
-        _enrich_dir_names(results, conn)
-    finally:
-        conn.close()
-    if paper_ids is not None:
-        results = [r for r in results if r["paper_id"] in paper_ids]
-    return results[:top_k]
-
-
-def _parse_year_filter(year: str) -> tuple[str, list[str]]:
-    """解析年份过滤表达式，返回 SQL WHERE 片段和参数。
-
-    支持格式: ``"2023"`` (单年), ``"2020-2024"`` (范围), ``"2020-"`` (起始年至今)。
-
-    Args:
-        year: 年份过滤表达式。
-
-    Returns:
-        ``(where_clause, params)`` 二元组。
-    """
-    start, end = parse_year_range(year)
-    if start is not None and end is not None:
-        if start == end:
-            return "year = ?", [str(start)]
-        return "year >= ? AND year <= ?", [str(start), str(end)]
-    elif start is not None:
-        return "year >= ?", [str(start)]
-    elif end is not None:
-        return "year <= ?", [str(end)]
-    return "1=1", []
-
-
-def _build_filter_clause(
-    year: str | None = None,
-    journal: str | None = None,
-    paper_type: str | None = None,
-) -> tuple[str, list[str]]:
-    """构建过滤 WHERE 子句（不含前导 AND/WHERE）。
-
-    Args:
-        year: 年份过滤表达式，为 ``None`` 时不过滤。
-        journal: 期刊名（LIKE 模糊匹配），为 ``None`` 时不过滤。
-        paper_type: 论文类型（LIKE 模糊匹配，如 ``review``、``journal-article``），
-            为 ``None`` 时不过滤。
-
-    Returns:
-        ``(clauses_str, params)``，clauses_str 每个条件前带 ``AND``。
-    """
-    clauses: list[str] = []
-    params: list[str] = []
-    if year:
-        yc, yp = _parse_year_filter(year)
-        clauses.append(yc)
-        params.extend(yp)
-    if journal:
-        clauses.append("journal LIKE ?")
-        params.append(f"%{journal}%")
-    if paper_type:
-        clauses.append("paper_type LIKE ?")
-        params.append(f"%{paper_type}%")
-    sql = "".join(f" AND {c}" for c in clauses)
-    return sql, params
-
-
-def _safe_query(query: str) -> str:
-    """去除 FTS5 特殊字符，避免语法错误。"""
-    return re.sub(r"[^\w\s]", " ", query).strip()
-
-
-def _enrich_dir_names(results: list[dict], conn: sqlite3.Connection) -> list[dict]:
-    """Enrich search results with dir_name from papers_registry."""
-    has_reg = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='papers_registry'"
-    ).fetchone()
-    if not has_reg:
-        return results
-    id_to_dir: dict[str, str] = {}
-    for row in conn.execute("SELECT id, dir_name FROM papers_registry").fetchall():
-        id_to_dir[row[0]] = row[1]
-    for r in results:
-        r["dir_name"] = id_to_dir.get(r["paper_id"], "")
-    return results
-
-
-def lookup_paper(db_path: Path, user_input: str) -> dict | None:
-    """查找论文：支持 UUID、dir_name、DOI。
-
-    Args:
-        db_path: SQLite 数据库路径。
-        user_input: UUID、目录名或 DOI。
-
-    Returns:
-        ``papers_registry`` 行字典，找不到时返回 ``None``。
-    """
-    if not db_path.exists():
-        return None
-    conn = sqlite3.connect(db_path)
-    try:
-        has_table = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='papers_registry'"
-        ).fetchone()
-        if not has_table:
-            return None
-        conn.row_factory = sqlite3.Row
-        # Try UUID
-        row = conn.execute(
-            "SELECT * FROM papers_registry WHERE id = ?", (user_input,)
-        ).fetchone()
-        if row:
-            return dict(row)
-        # Try dir_name
-        row = conn.execute(
-            "SELECT * FROM papers_registry WHERE dir_name = ?", (user_input,)
-        ).fetchone()
-        if row:
-            return dict(row)
-        # Try DOI
-        row = conn.execute(
-            "SELECT * FROM papers_registry WHERE doi = ?", (user_input,)
-        ).fetchone()
-        if row:
-            return dict(row)
-    finally:
-        conn.close()
-    return None
-
-
-def unified_search(
-    query: str,
-    db_path: Path,
-    top_k: int | None = None,
-    cfg: Config | None = None,
-    *,
-    year: str | None = None,
-    journal: str | None = None,
-    paper_type: str | None = None,
-    paper_ids: set[str] | None = None,
-) -> list[dict]:
-    """融合检索：FTS5 关键词 + FAISS 语义向量，合并去重排序。
-
-    两路并行检索，各取 ``top_k`` 条候选，按 ``paper_id`` 去重后
-    以综合得分排序返回。FTS5 命中的论文获得排名加分，向量检索的
-    论文按余弦相似度得分。同时命中的论文得分叠加，排名更靠前。
-
-    当向量索引不可用时（未运行 ``embed``），自动降级为纯 FTS5 检索。
-
-    Args:
-        query: 自然语言查询文本。
-        db_path: SQLite 数据库路径。
-        top_k: 最多返回条数，为 ``None`` 时从配置读取。
-        cfg: 可选的 :class:`~scholaraio.config.Config` 实例。
-        year: 年份过滤。
-        journal: 期刊名过滤。
-        paper_type: 论文类型过滤。
-        paper_ids: 论文 UUID 白名单，仅返回集合内的结果。
-
-    Returns:
-        论文字典列表，按综合得分降序。每项包含 ``paper_id``, ``title``,
-        ``authors``, ``year``, ``journal``, ``score``, ``match``
-        （``"fts"`` / ``"vec"`` / ``"both"``）。
-    """
-    if top_k is None:
-        top_k = cfg.search.top_k if cfg is not None else 20
-
-    # -- FTS5 leg --
-    fts_results: list[dict] = []
-    try:
-        fts_results = search(
-            query, db_path, top_k=top_k, cfg=cfg,
-            year=year, journal=journal, paper_type=paper_type,
-            paper_ids=paper_ids,
-        )
-    except FileNotFoundError:
-        pass
-
-    # -- Vector leg (graceful degradation) --
-    vec_results: list[dict] = []
-    try:
-        from scholaraio.vectors import vsearch
-        vec_results = vsearch(
-            query, db_path, top_k=top_k, cfg=cfg,
-            year=year, journal=journal, paper_type=paper_type,
-            paper_ids=paper_ids,
-        )
-    except (FileNotFoundError, ImportError):
-        pass
-
-    # -- Merge via Reciprocal Rank Fusion (RRF) --
-    # RRF score = sum of 1/(k + rank) across retrieval legs.
-    # k=60 is the standard constant from Cormack et al. (2009).
-    rrf_k = 60
-    merged: dict[str, dict] = {}  # paper_id → result dict
-
-    for rank, r in enumerate(fts_results):
-        pid = r["paper_id"]
-        merged[pid] = {
-            **r,
-            "score": 1.0 / (rrf_k + rank + 1),
-            "match": "fts",
-        }
-
-    for rank, r in enumerate(vec_results):
-        pid = r["paper_id"]
-        rrf_score = 1.0 / (rrf_k + rank + 1)
-        if pid in merged:
-            merged[pid]["score"] += rrf_score
-            merged[pid]["match"] = "both"
-        else:
-            merged[pid] = {
-                **r,
-                "score": rrf_score,
-                "match": "vec",
-            }
-
-    results = sorted(merged.values(), key=lambda x: x["score"], reverse=True)
-    return results[:top_k]
-
-
-# ============================================================================
-#  Citation graph queries
-# ============================================================================
-
-
-def get_references(
-    paper_id: str,
-    db_path: Path,
-    *,
-    paper_ids: set[str] | None = None,
-) -> list[dict]:
-    """查询论文的参考文献列表。
-
-    Args:
-        paper_id: 论文 UUID。
-        db_path: SQLite 数据库路径。
-        paper_ids: 论文 UUID 白名单（仅过滤库内结果）。
-
-    Returns:
-        参考文献列表，每项含 ``target_doi``、``target_id``，
-        库内论文另含 ``title``、``dir_name``、``year``、``first_author``。
-    """
-    if not db_path.exists():
-        return []
-    conn = sqlite3.connect(db_path)
-    try:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            """SELECT c.target_doi, c.target_id,
-                      pr.title, pr.dir_name, pr.year, pr.first_author
-               FROM citations c
-               LEFT JOIN papers_registry pr ON c.target_id = pr.id
-               WHERE c.source_id = ?
-               ORDER BY pr.year DESC NULLS LAST, c.target_doi""",
-            (paper_id,),
-        ).fetchall()
-    finally:
-        conn.close()
-    results = [dict(r) for r in rows]
-    if paper_ids is not None:
-        results = [r for r in results if r.get("target_id") is None or r["target_id"] in paper_ids]
-    return results
-
-
-def get_citing_papers(
-    paper_id: str,
-    db_path: Path,
-    *,
-    paper_ids: set[str] | None = None,
-) -> list[dict]:
-    """查询哪些本地论文引用了指定论文（库内反向查找）。
-
-    Args:
-        paper_id: 被引论文的 UUID。
-        db_path: SQLite 数据库路径。
-        paper_ids: 论文 UUID 白名单。
-
-    Returns:
-        引用方论文列表，每项含 ``source_id``、``dir_name``、``title``、``year``。
-    """
-    if not db_path.exists():
-        return []
-    conn = sqlite3.connect(db_path)
-    try:
-        conn.row_factory = sqlite3.Row
-        # Get DOI of target paper
-        row = conn.execute(
-            "SELECT doi FROM papers_registry WHERE id = ?", (paper_id,)
-        ).fetchone()
-        target_doi = row["doi"] if row else ""
-
-        # Find papers that cite this paper (by target_id or target_doi)
-        params: list = [paper_id]
-        doi_clause = ""
-        if target_doi:
-            doi_clause = " OR LOWER(c.target_doi) = LOWER(?)"
-            params.append(target_doi)
-
-        rows = conn.execute(
-            f"""SELECT DISTINCT c.source_id,
-                       pr.dir_name, pr.title, pr.year, pr.first_author
-                FROM citations c
-                JOIN papers_registry pr ON c.source_id = pr.id
-                WHERE (c.target_id = ?{doi_clause})
-                ORDER BY pr.year DESC""",
-            params,
-        ).fetchall()
-    finally:
-        conn.close()
-    results = [dict(r) for r in rows]
-    if paper_ids is not None:
-        results = [r for r in results if r["source_id"] in paper_ids]
-    return results
-
-
-def get_shared_references(
-    paper_id_list: list[str],
-    db_path: Path,
-    min_shared: int = 2,
-    *,
-    paper_ids: set[str] | None = None,
-) -> list[dict]:
-    """查询多篇论文的共同参考文献。
-
-    Args:
-        paper_id_list: 论文 UUID 列表。
-        db_path: SQLite 数据库路径。
-        min_shared: 最少被几篇论文共同引用才纳入结果。
-        paper_ids: 论文 UUID 白名单（仅过滤库内结果）。
-
-    Returns:
-        共同引用列表，每项含 ``target_doi``、``shared_count``、``target_id``，
-        库内论文另含 ``title``、``dir_name``。
-    """
-    if not db_path.exists() or not paper_id_list:
-        return []
-    conn = sqlite3.connect(db_path)
-    try:
-        conn.row_factory = sqlite3.Row
-        placeholders = ",".join("?" for _ in paper_id_list)
-        rows = conn.execute(
-            f"""SELECT c.target_doi,
-                       COUNT(DISTINCT c.source_id) AS shared_count,
-                       c.target_id,
-                       pr.title, pr.dir_name, pr.year
-                FROM citations c
-                LEFT JOIN papers_registry pr ON c.target_id = pr.id
-                WHERE c.source_id IN ({placeholders})
-                GROUP BY LOWER(c.target_doi)
-                HAVING shared_count >= ?
-                ORDER BY shared_count DESC, c.target_doi""",
-            [*paper_id_list, min_shared],
-        ).fetchall()
-    finally:
-        conn.close()
-    results = [dict(r) for r in rows]
-    if paper_ids is not None:
-        results = [r for r in results if r.get("target_id") is None or r["target_id"] in paper_ids]
-    return results
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()

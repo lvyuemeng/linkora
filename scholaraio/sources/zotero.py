@@ -159,8 +159,10 @@ def fetch_zotero_api(
 
     # Filter out attachments and notes (keep only top-level items)
     items = [
-        it for it in items
-        if it.get("data", {}).get("itemType") not in ("attachment", "note", "linkAttachment")
+        it
+        for it in items
+        if it.get("data", {}).get("itemType")
+        not in ("attachment", "note", "linkAttachment")
     ]
 
     records: list[PaperMetadata] = []
@@ -296,7 +298,6 @@ def parse_zotero_local(
 
         for row in items_rows:
             item_id = row["itemID"]
-            item_key = row["key"]
             item_type = row["typeName"]
 
             if item_id_filter is not None and item_id not in item_id_filter:
@@ -348,7 +349,9 @@ def parse_zotero_local(
         conn.close()
 
 
-def _find_local_pdf(conn: sqlite3.Connection, parent_id: int, storage_dir: Path) -> Path | None:
+def _find_local_pdf(
+    conn: sqlite3.Connection, parent_id: int, storage_dir: Path
+) -> Path | None:
     """Find PDF attachment for a given item in local Zotero storage."""
     rows = conn.execute(
         "SELECT ia.path, i.key "
@@ -364,7 +367,7 @@ def _find_local_pdf(conn: sqlite3.Connection, parent_id: int, storage_dir: Path)
         att_key = r["key"]
         # Zotero stores paths as "storage:<filename>"
         if raw_path.startswith("storage:"):
-            filename = raw_path[len("storage:"):]
+            filename = raw_path[len("storage:") :]
             pdf_path = storage_dir / att_key / filename
             if pdf_path.exists():
                 return pdf_path

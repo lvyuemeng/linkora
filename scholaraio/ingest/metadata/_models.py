@@ -39,6 +39,7 @@ class PaperMetadata:
         extraction_method: 提取方式（``doi_lookup`` | ``title_search`` |
             ``title_search_relaxed`` | ``title_search_s2`` | ``local_only``）。
     """
+
     id: str = ""  # UUID, assigned at ingest time
     title: str = ""
     authors: list[str] = field(default_factory=list)
@@ -74,51 +75,53 @@ DOI_CORE = r'10\.\d{4,9}/[^\s,;)\]>"\'}]+'
 
 # H1 headings that are NOT paper titles
 NON_TITLE_H1 = [
-    re.compile(p, re.IGNORECASE) for p in [
-        r'^Annual\s+Review',
-        r'^ANNUAL\s+REVIEW',
-        r'^Invited\s+Article',
-        r'^Review$',
-        r'^Research\s+Paper$',
-        r'^Keywords?$',
-        r'^Key\s*Words?$',
-        r'^Abstract$',
-        r'^ABSTRACT$',
-        r'^a\s*r\s*t\s*i\s*c\s*l\s*e\s+i\s*n\s*f\s*o',
-        r'^a\s*b\s*s\s*t\s*r\s*a\s*c\s*t',
-        r'^ARTICLE\s+INFO',
-        r'^Contents?\s+lists?',
-        r'^\d+\.?\s',             # Section numbers
-        r'^#\s*$',                # Empty heading
-        r'^Cite\s+as',
-        r'^References?$',
-        r'^Acknowledgments?$',
+    re.compile(p, re.IGNORECASE)
+    for p in [
+        r"^Annual\s+Review",
+        r"^ANNUAL\s+REVIEW",
+        r"^Invited\s+Article",
+        r"^Review$",
+        r"^Research\s+Paper$",
+        r"^Keywords?$",
+        r"^Key\s*Words?$",
+        r"^Abstract$",
+        r"^ABSTRACT$",
+        r"^a\s*r\s*t\s*i\s*c\s*l\s*e\s+i\s*n\s*f\s*o",
+        r"^a\s*b\s*s\s*t\s*r\s*a\s*c\s*t",
+        r"^ARTICLE\s+INFO",
+        r"^Contents?\s+lists?",
+        r"^\d+\.?\s",  # Section numbers
+        r"^#\s*$",  # Empty heading
+        r"^Cite\s+as",
+        r"^References?$",
+        r"^Acknowledgments?$",
     ]
 ]
 
 # Patterns indicating a line is an author name (short, personal name structure)
 AUTHOR_H1_INDICATORS = [
-    re.compile(r'<sup>', re.IGNORECASE),
-    re.compile(r'\$\^\{'),
-    re.compile(r'✉'),
+    re.compile(r"<sup>", re.IGNORECASE),
+    re.compile(r"\$\^\{"),
+    re.compile(r"✉"),
 ]
 
 # Stop markers when scanning for authors after title
 AUTHOR_STOP = [
-    re.compile(p, re.IGNORECASE) for p in [
-        r'^(?:Department|School|Institute|Faculty|Center|Centre|Laboratory)\b',
-        r'@\w+\.\w+',
-        r'^(?:Annu\.?\s*Rev|Annual\s+Review|Copyright|©)',
-        r'^(?:doi|DOI|https?://doi)',
-        r'^#\s+(?:Abstract|Keywords?|Key\s*Words?|\d+|ABSTRACT|ARTICLE)',
-        r'^!\[image\]',
-        r'^Phys\.\s+(?:Rev|Fluids)',
-        r'^J\.\s+(?:Fluid|Comput)',
-        r'^Int\.\s+J\.',
-        r'^Computers?\s+(?:and|&)',
-        r'^eScience\s',
-        r'^ARTICLES\s+YOU\s+MAY',
-        r'^APL\s+',
+    re.compile(p, re.IGNORECASE)
+    for p in [
+        r"^(?:Department|School|Institute|Faculty|Center|Centre|Laboratory)\b",
+        r"@\w+\.\w+",
+        r"^(?:Annu\.?\s*Rev|Annual\s+Review|Copyright|©)",
+        r"^(?:doi|DOI|https?://doi)",
+        r"^#\s+(?:Abstract|Keywords?|Key\s*Words?|\d+|ABSTRACT|ARTICLE)",
+        r"^!\[image\]",
+        r"^Phys\.\s+(?:Rev|Fluids)",
+        r"^J\.\s+(?:Fluid|Comput)",
+        r"^Int\.\s+J\.",
+        r"^Computers?\s+(?:and|&)",
+        r"^eScience\s",
+        r"^ARTICLES\s+YOU\s+MAY",
+        r"^APL\s+",
     ]
 ]
 
@@ -133,9 +136,11 @@ TITLE_MATCH_THRESHOLD = 0.85
 RELAXED_THRESHOLD = 0.65
 
 SESSION = requests.Session()
-SESSION.headers.update({
-    "User-Agent": "ScholarAIO/1.0 (https://github.com/scholaraio)",
-})
+SESSION.headers.update(
+    {
+        "User-Agent": "ScholarAIO/1.0 (https://github.com/scholaraio)",
+    }
+)
 # Bypass local proxy for academic API calls — proxies cause CLOSE-WAIT hangs
 SESSION.trust_env = False
 
@@ -144,11 +149,13 @@ def configure_session(contact_email: str) -> None:
     """Update SESSION User-Agent with contact email for Crossref polite pool."""
     if contact_email:
         SESSION.headers["User-Agent"] = f"ScholarAIO/1.0 (mailto:{contact_email})"
+
+
 # Retry on connection/SSL errors (common in WSL2 or when hitting APIs rapidly)
 _retry = requests.adapters.HTTPAdapter(
     max_retries=requests.packages.urllib3.util.retry.Retry(
         total=3,
-        backoff_factor=1,          # 1s, 2s, 4s
+        backoff_factor=1,  # 1s, 2s, 4s
         status_forcelist=[502, 503, 504],
         allowed_methods=["GET"],
     ),

@@ -68,10 +68,12 @@ def _init_logging(cfg):
         encoding="utf-8",
     )
     fh.setLevel(logging.DEBUG)
-    fh.setFormatter(logging.Formatter(
-        "%(asctime)s %(name)-24s %(levelname)-5s %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    ))
+    fh.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(name)-24s %(levelname)-5s %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
     root.addHandler(fh)
 
     for name in ("httpx", "urllib3", "modelscope", "httpcore", "sentence_transformers"):
@@ -165,8 +167,14 @@ def search(
         cfg = _get_cfg()
         paper_ids = _resolve_workspace_ids(workspace)
         results = _search(
-            query, cfg.index_db, top_k=top_k, cfg=cfg,
-            year=year, journal=journal, paper_type=paper_type, paper_ids=paper_ids,
+            query,
+            cfg.index_db,
+            top_k=top_k,
+            cfg=cfg,
+            year=year,
+            journal=journal,
+            paper_type=paper_type,
+            paper_ids=paper_ids,
         )
         return json.dumps(results, ensure_ascii=False)
     except FileNotFoundError:
@@ -201,8 +209,14 @@ def search_author(
         cfg = _get_cfg()
         paper_ids = _resolve_workspace_ids(workspace)
         results = _search_author(
-            query, cfg.index_db, top_k=top_k, cfg=cfg,
-            year=year, journal=journal, paper_type=paper_type, paper_ids=paper_ids,
+            query,
+            cfg.index_db,
+            top_k=top_k,
+            cfg=cfg,
+            year=year,
+            journal=journal,
+            paper_type=paper_type,
+            paper_ids=paper_ids,
         )
         return json.dumps(results, ensure_ascii=False)
     except FileNotFoundError:
@@ -236,14 +250,23 @@ def vsearch(
     try:
         from scholaraio.vectors import vsearch as _vsearch
     except ImportError:
-        return _error("missing_dependency", "Embedding dependencies not installed.",
-                       install_hint="pip install scholaraio[embed]")
+        return _error(
+            "missing_dependency",
+            "Embedding dependencies not installed.",
+            install_hint="pip install scholaraio[embed]",
+        )
     try:
         cfg = _get_cfg()
         paper_ids = _resolve_workspace_ids(workspace)
         results = _vsearch(
-            query, cfg.index_db, top_k=top_k, cfg=cfg,
-            year=year, journal=journal, paper_type=paper_type, paper_ids=paper_ids,
+            query,
+            cfg.index_db,
+            top_k=top_k,
+            cfg=cfg,
+            year=year,
+            journal=journal,
+            paper_type=paper_type,
+            paper_ids=paper_ids,
         )
         return json.dumps(results, ensure_ascii=False)
     except FileNotFoundError:
@@ -280,8 +303,14 @@ def unified_search(
         cfg = _get_cfg()
         paper_ids = _resolve_workspace_ids(workspace)
         results = _usearch(
-            query, cfg.index_db, top_k=top_k, cfg=cfg,
-            year=year, journal=journal, paper_type=paper_type, paper_ids=paper_ids,
+            query,
+            cfg.index_db,
+            top_k=top_k,
+            cfg=cfg,
+            year=year,
+            journal=journal,
+            paper_type=paper_type,
+            paper_ids=paper_ids,
         )
         return json.dumps(results, ensure_ascii=False)
     except FileNotFoundError:
@@ -314,8 +343,12 @@ def top_cited(
         cfg = _get_cfg()
         paper_ids = _resolve_workspace_ids(workspace)
         results = _top_cited(
-            cfg.index_db, top_k=top_k,
-            year=year, journal=journal, paper_type=paper_type, paper_ids=paper_ids,
+            cfg.index_db,
+            top_k=top_k,
+            year=year,
+            journal=journal,
+            paper_type=paper_type,
+            paper_ids=paper_ids,
         )
         return json.dumps(results, ensure_ascii=False)
     except FileNotFoundError:
@@ -344,23 +377,26 @@ def show_paper(paper_ref: str, layer: int = 2) -> str:
         layer: Detail level 1-4 (default 2).
     """
     try:
-        from scholaraio.loader import load_l1, load_l2, load_l3, load_l4
+        from scholaraio.loader import PaperData
 
         paper_d = _resolve_paper_dir(paper_ref)
-        json_path = paper_d / "meta.json"
-        md_path = paper_d / "paper.md"
+        paper = PaperData.from_dir(paper_d)
 
-        result = load_l1(json_path)
+        result = {
+            "title": paper.title,
+            "authors": paper.authors,
+            "year": paper.year,
+            "journal": paper.journal,
+            "doi": paper.DOI,
+            "paper_type": paper.paper_type,
+        }
 
         if layer >= 2:
-            result["abstract"] = load_l2(json_path)
+            result["abstract"] = paper.abstract
         if layer >= 3:
-            result["conclusion"] = load_l3(json_path)
+            result["conclusion"] = paper.conclusion
         if layer >= 4:
-            if md_path.exists():
-                result["full_text"] = load_l4(md_path)
-            else:
-                result["full_text"] = None
+            result["full_text"] = paper.content
 
         return json.dumps(result, ensure_ascii=False)
     except ValueError as e:
@@ -417,6 +453,7 @@ def get_references(paper_ref: str, workspace: str | None = None) -> str:
         # Resolve to UUID
         paper_d = _resolve_paper_dir(paper_ref)
         from scholaraio.papers import read_meta
+
         meta = read_meta(paper_d)
         uuid = meta["id"]
 
@@ -446,6 +483,7 @@ def get_citing_papers(paper_ref: str, workspace: str | None = None) -> str:
         paper_ids = _resolve_workspace_ids(workspace)
         paper_d = _resolve_paper_dir(paper_ref)
         from scholaraio.papers import read_meta
+
         meta = read_meta(paper_d)
         uuid = meta["id"]
 
@@ -488,7 +526,9 @@ def get_shared_references(
             meta = read_meta(paper_d)
             uuids.append(meta["id"])
 
-        results = _get_shared(uuids, cfg.index_db, min_shared=min_shared, paper_ids=paper_ids)
+        results = _get_shared(
+            uuids, cfg.index_db, min_shared=min_shared, paper_ids=paper_ids
+        )
         return json.dumps(results, ensure_ascii=False)
     except ValueError as e:
         return _error("not_found", str(e))
@@ -534,8 +574,11 @@ def build_vectors(rebuild: bool = False) -> str:
     try:
         from scholaraio.vectors import build_vectors as _build_vectors
     except ImportError:
-        return _error("missing_dependency", "Embedding dependencies not installed.",
-                       install_hint="pip install scholaraio[embed]")
+        return _error(
+            "missing_dependency",
+            "Embedding dependencies not installed.",
+            install_hint="pip install scholaraio[embed]",
+        )
     try:
         cfg = _get_cfg()
         count = _build_vectors(cfg.papers_dir, cfg.index_db, rebuild=rebuild, cfg=cfg)
@@ -561,10 +604,17 @@ def build_topics(
         nr_topics: Target number of topics (0 = auto).
     """
     try:
-        from scholaraio.topics import build_topics as _build_topics, load_model, get_topic_overview
+        from scholaraio.topics import (
+            build_topics as _build_topics,
+            load_model,
+            get_topic_overview,
+        )
     except ImportError:
-        return _error("missing_dependency", "Topics dependencies not installed.",
-                       install_hint="pip install scholaraio[topics]")
+        return _error(
+            "missing_dependency",
+            "Topics dependencies not installed.",
+            install_hint="pip install scholaraio[topics]",
+        )
     try:
         cfg = _get_cfg()
         model_dir = cfg.topics_model_dir
@@ -574,18 +624,23 @@ def build_topics(
         else:
             nr = None if nr_topics == 0 else nr_topics
             model = _build_topics(
-                cfg.index_db, cfg.papers_dir,
-                min_topic_size=min_topic_size, nr_topics=nr,
-                save_path=model_dir, cfg=cfg,
+                cfg.index_db,
+                cfg.papers_dir,
+                min_topic_size=min_topic_size,
+                nr_topics=nr,
+                save_path=model_dir,
+                cfg=cfg,
             )
 
         overview = get_topic_overview(model)
         n_outliers = sum(1 for t in overview if t.get("topic_id") == -1)
-        return json.dumps({
-            "topics": len(overview) - (1 if n_outliers else 0),
-            "outliers": n_outliers,
-            "total_papers": sum(t.get("count", 0) for t in overview),
-        })
+        return json.dumps(
+            {
+                "topics": len(overview) - (1 if n_outliers else 0),
+                "outliers": n_outliers,
+                "total_papers": sum(t.get("count", 0) for t in overview),
+            }
+        )
     except Exception as e:
         _log.exception("build_topics failed")
         return _error("internal", str(e))
@@ -606,13 +661,18 @@ def topic_overview() -> str:
     try:
         from scholaraio.topics import load_model, get_topic_overview
     except ImportError:
-        return _error("missing_dependency", "Topics dependencies not installed.",
-                       install_hint="pip install scholaraio[topics]")
+        return _error(
+            "missing_dependency",
+            "Topics dependencies not installed.",
+            install_hint="pip install scholaraio[topics]",
+        )
     try:
         cfg = _get_cfg()
         model_dir = cfg.topics_model_dir
         if not (model_dir / "bertopic_model.pkl").exists():
-            return _error("model_not_found", "Topic model not built. Run build_topics first.")
+            return _error(
+                "model_not_found", "Topic model not built. Run build_topics first."
+            )
         model = load_model(model_dir)
         overview = get_topic_overview(model)
         return json.dumps(overview, ensure_ascii=False)
@@ -631,13 +691,18 @@ def topic_papers(topic_id: int) -> str:
     try:
         from scholaraio.topics import load_model, get_topic_papers
     except ImportError:
-        return _error("missing_dependency", "Topics dependencies not installed.",
-                       install_hint="pip install scholaraio[topics]")
+        return _error(
+            "missing_dependency",
+            "Topics dependencies not installed.",
+            install_hint="pip install scholaraio[topics]",
+        )
     try:
         cfg = _get_cfg()
         model_dir = cfg.topics_model_dir
         if not (model_dir / "bertopic_model.pkl").exists():
-            return _error("model_not_found", "Topic model not built. Run build_topics first.")
+            return _error(
+                "model_not_found", "Topic model not built. Run build_topics first."
+            )
         model = load_model(model_dir)
         papers = get_topic_papers(model, topic_id)
         return json.dumps(papers, ensure_ascii=False)
@@ -796,14 +861,21 @@ def audit(severity: str | None = None) -> str:
             issues = [i for i in issues if i.severity == severity]
 
         issue_dicts = [
-            {"paper_id": i.paper_id, "severity": i.severity, "rule": i.rule, "message": i.message}
+            {
+                "paper_id": i.paper_id,
+                "severity": i.severity,
+                "rule": i.rule,
+                "message": i.message,
+            }
             for i in issues
         ]
         summary = {}
         for i in issue_dicts:
             summary[i["severity"]] = summary.get(i["severity"], 0) + 1
 
-        return json.dumps({"issues": issue_dicts, "summary": summary}, ensure_ascii=False)
+        return json.dumps(
+            {"issues": issue_dicts, "summary": summary}, ensure_ascii=False
+        )
     except Exception as e:
         _log.exception("audit failed")
         return _error("internal", str(e))
@@ -822,10 +894,11 @@ def setup_check() -> str:
         results = run_check(cfg)
         formatted = format_check_results(results)
         result_dicts = [
-            {"label": r.label, "ok": r.ok, "detail": r.detail}
-            for r in results
+            {"label": r.label, "ok": r.ok, "detail": r.detail} for r in results
         ]
-        return json.dumps({"checks": result_dicts, "formatted": formatted}, ensure_ascii=False)
+        return json.dumps(
+            {"checks": result_dicts, "formatted": formatted}, ensure_ascii=False
+        )
     except Exception as e:
         _log.exception("setup_check failed")
         return _error("internal", str(e))
@@ -866,8 +939,10 @@ def pipeline_ingest(
         cfg = _get_cfg()
 
         if preset not in PRESETS:
-            return _error("invalid_args",
-                          f"Unknown preset '{preset}'. Available: {', '.join(PRESETS)}")
+            return _error(
+                "invalid_args",
+                f"Unknown preset '{preset}'. Available: {', '.join(PRESETS)}",
+            )
 
         step_names = PRESETS[preset]
         opts = {
@@ -882,8 +957,11 @@ def pipeline_ingest(
         return json.dumps({"status": "ok", "preset": preset, "dry_run": dry_run})
     except ImportError as e:
         mod = getattr(e, "name", "") or ""
-        return _error("missing_dependency", f"Missing dependency: {mod}",
-                       install_hint="pip install scholaraio[full]")
+        return _error(
+            "missing_dependency",
+            f"Missing dependency: {mod}",
+            install_hint="pip install scholaraio[full]",
+        )
     except Exception as e:
         _log.exception("pipeline_ingest failed")
         return _error("internal", str(e))
@@ -912,8 +990,11 @@ def import_endnote(
     try:
         from scholaraio.sources.endnote import parse_endnote_full
     except ImportError:
-        return _error("missing_dependency", "Endnote import dependencies not installed.",
-                       install_hint="pip install scholaraio[import]")
+        return _error(
+            "missing_dependency",
+            "Endnote import dependencies not installed.",
+            install_hint="pip install scholaraio[import]",
+        )
     try:
         from scholaraio.ingest.pipeline import import_external
 
@@ -928,7 +1009,8 @@ def import_endnote(
             return json.dumps({"status": "empty", "message": "No records parsed"})
 
         stats = import_external(
-            records, cfg,
+            records,
+            cfg,
             pdf_paths=pdf_paths,
             no_api=no_api,
             dry_run=dry_run,
@@ -976,8 +1058,8 @@ def import_zotero(
         cfg = _get_cfg()
 
         # Resolve credentials
-        _api_key = api_key or cfg.resolved_zotero_api_key()
-        _library_id = library_id or cfg.resolved_zotero_library_id()
+        _api_key = api_key or cfg.api_key("zotero")
+        _library_id = library_id or cfg.api_key("zotero", "library_id")
         _library_type = library_type or cfg.zotero.library_type
 
         if local:
@@ -985,37 +1067,55 @@ def import_zotero(
             if not db_path.exists():
                 return _error("not_found", f"Zotero database not found: {db_path}")
 
-            from scholaraio.sources.zotero import list_collections_local, parse_zotero_local
+            from scholaraio.sources.zotero import (
+                list_collections_local,
+                parse_zotero_local,
+            )
 
             if list_collections:
                 collections = list_collections_local(db_path)
                 return json.dumps(collections, ensure_ascii=False)
 
             records, pdf_paths = parse_zotero_local(
-                db_path, collection_key=collection,
+                db_path,
+                collection_key=collection,
             )
         else:
             if not _api_key:
-                return _error("missing_config",
-                              "Zotero API key required. Set --api-key, config.local.yaml, or ZOTERO_API_KEY env var.")
+                return _error(
+                    "missing_config",
+                    "Zotero API key required. Set --api-key, config.local.yaml, or ZOTERO_API_KEY env var.",
+                )
             if not _library_id:
-                return _error("missing_config",
-                              "Zotero library ID required. Set --library-id, config.local.yaml, or ZOTERO_LIBRARY_ID env var.")
+                return _error(
+                    "missing_config",
+                    "Zotero library ID required. Set --library-id, config.local.yaml, or ZOTERO_LIBRARY_ID env var.",
+                )
 
             try:
-                from scholaraio.sources.zotero import fetch_zotero_api, list_collections_api
+                from scholaraio.sources.zotero import (
+                    fetch_zotero_api,
+                    list_collections_api,
+                )
             except ImportError:
-                return _error("missing_dependency", "Zotero import dependencies not installed.",
-                               install_hint="pip install scholaraio[import]")
+                return _error(
+                    "missing_dependency",
+                    "Zotero import dependencies not installed.",
+                    install_hint="pip install scholaraio[import]",
+                )
 
             if list_collections:
-                collections = list_collections_api(_library_id, _api_key, library_type=_library_type)
+                collections = list_collections_api(
+                    _library_id, _api_key, library_type=_library_type
+                )
                 return json.dumps(collections, ensure_ascii=False)
 
             import tempfile
+
             pdf_dir = Path(tempfile.mkdtemp(prefix="scholaraio_zotero_"))
             records, pdf_paths = fetch_zotero_api(
-                _library_id, _api_key,
+                _library_id,
+                _api_key,
                 library_type=_library_type,
                 collection_key=collection,
                 download_pdfs=True,
@@ -1026,8 +1126,10 @@ def import_zotero(
             return json.dumps({"status": "empty", "message": "No records found"})
 
         from scholaraio.ingest.pipeline import import_external
+
         stats = import_external(
-            records, cfg,
+            records,
+            cfg,
             pdf_paths=pdf_paths,
             no_api=no_api,
             dry_run=dry_run,
@@ -1035,8 +1137,11 @@ def import_zotero(
         return json.dumps({"status": "ok", **stats, "dry_run": dry_run})
     except ImportError as e:
         mod = getattr(e, "name", "") or ""
-        return _error("missing_dependency", f"Missing dependency: {mod}",
-                       install_hint="pip install scholaraio[import]")
+        return _error(
+            "missing_dependency",
+            f"Missing dependency: {mod}",
+            install_hint="pip install scholaraio[import]",
+        )
     except Exception as e:
         _log.exception("import_zotero failed")
         return _error("internal", str(e))
@@ -1079,19 +1184,25 @@ def attach_pdf(paper_ref: str, pdf_path: str) -> str:
         if check_server(cfg.ingest.mineru_endpoint):
             result = convert_pdf(dest_pdf, mineru_opts)
         else:
-            api_key = cfg.resolved_mineru_api_key()
+            api_key = cfg.api_key("mineru")
             if not api_key:
-                return _error("missing_config",
-                              "MinerU not reachable and no cloud API key configured.")
+                return _error(
+                    "missing_config",
+                    "MinerU not reachable and no cloud API key configured.",
+                )
             from scholaraio.ingest.mineru import convert_pdf_cloud
+
             result = convert_pdf_cloud(
-                dest_pdf, mineru_opts,
+                dest_pdf,
+                mineru_opts,
                 api_key=api_key,
                 cloud_url=cfg.ingest.mineru_cloud_url,
             )
 
         if not result.success:
-            return _error("conversion_failed", f"MinerU conversion failed: {result.error}")
+            return _error(
+                "conversion_failed", f"MinerU conversion failed: {result.error}"
+            )
 
         # Move output to paper.md
         paper_md = paper_d / "paper.md"
@@ -1116,6 +1227,7 @@ def attach_pdf(paper_ref: str, pdf_path: str) -> str:
             data = read_meta(paper_d)
             if not data.get("abstract") and paper_md.exists():
                 from scholaraio.ingest.metadata import extract_abstract_from_md
+
                 abstract = extract_abstract_from_md(paper_md, cfg)
                 if abstract:
                     data["abstract"] = abstract
@@ -1147,18 +1259,19 @@ def enrich_toc(paper_ref: str, force: bool = False) -> str:
         force: Re-extract even if TOC already exists.
     """
     try:
-        from scholaraio.loader import enrich_toc as _enrich_toc
+        from scholaraio.loader import PaperEnricher
 
         cfg = _get_cfg()
         paper_d = _resolve_paper_dir(paper_ref)
-        json_path = paper_d / "meta.json"
-        md_path = paper_d / "paper.md"
 
-        if not md_path.exists():
+        if not (paper_d / "paper.md").exists():
             return _error("not_found", f"No paper.md in {paper_d.name}")
 
-        success = _enrich_toc(json_path, md_path, cfg, force=force)
-        return json.dumps({"status": "ok" if success else "failed", "paper": paper_d.name})
+        enricher = PaperEnricher(cfg.papers_dir)
+        success = enricher.enrich_toc(paper_d.name, cfg, force=force)
+        return json.dumps(
+            {"status": "ok" if success else "failed", "paper": paper_d.name}
+        )
     except ValueError as e:
         return _error("not_found", str(e))
     except Exception as e:
@@ -1177,18 +1290,19 @@ def enrich_l3(paper_ref: str, force: bool = False) -> str:
         force: Re-extract even if conclusion already exists.
     """
     try:
-        from scholaraio.loader import enrich_l3 as _enrich_l3
+        from scholaraio.loader import PaperEnricher
 
         cfg = _get_cfg()
         paper_d = _resolve_paper_dir(paper_ref)
-        json_path = paper_d / "meta.json"
-        md_path = paper_d / "paper.md"
 
-        if not md_path.exists():
+        if not (paper_d / "paper.md").exists():
             return _error("not_found", f"No paper.md in {paper_d.name}")
 
-        success = _enrich_l3(json_path, md_path, cfg, force=force)
-        return json.dumps({"status": "ok" if success else "failed", "paper": paper_d.name})
+        enricher = PaperEnricher(cfg.papers_dir)
+        success = enricher.enrich_conclusion(paper_d.name, cfg, force=force)
+        return json.dumps(
+            {"status": "ok" if success else "failed", "paper": paper_d.name}
+        )
     except ValueError as e:
         return _error("not_found", str(e))
     except Exception as e:
@@ -1223,7 +1337,9 @@ def refetch(
             paper_d = _resolve_paper_dir(paper_ref)
             jp = paper_d / "meta.json"
             changed = refetch_metadata(jp)
-            return _json.dumps({"status": "ok", "changed": changed, "paper": paper_d.name})
+            return _json.dumps(
+                {"status": "ok", "changed": changed, "paper": paper_d.name}
+            )
         elif all_papers:
             targets = sorted(d / "meta.json" for d in iter_paper_dirs(cfg.papers_dir))
             if not force:
@@ -1232,7 +1348,9 @@ def refetch(
                     data = _json.loads(jp.read_text(encoding="utf-8"))
                     if not data.get("doi"):
                         continue
-                    if not data.get("citation_count") or not all(data.get(k) for k in ("volume", "publisher")):
+                    if not data.get("citation_count") or not all(
+                        data.get(k) for k in ("volume", "publisher")
+                    ):
                         filtered.append(jp)
                 targets = filtered
 
@@ -1246,7 +1364,9 @@ def refetch(
                         skip += 1
                 except Exception:
                     fail += 1
-            return _json.dumps({"status": "ok", "updated": ok, "skipped": skip, "failed": fail})
+            return _json.dumps(
+                {"status": "ok", "updated": ok, "skipped": skip, "failed": fail}
+            )
         else:
             return _error("invalid_args", "Specify paper_ref or set all_papers=True.")
     except ValueError as e:
@@ -1292,7 +1412,9 @@ def backfill_abstract(dry_run: bool = False) -> str:
             else:
                 skipped += 1
 
-        return json.dumps({"status": "ok", "updated": updated, "skipped": skipped, "dry_run": dry_run})
+        return json.dumps(
+            {"status": "ok", "updated": updated, "skipped": skipped, "dry_run": dry_run}
+        )
     except Exception as e:
         _log.exception("backfill_abstract failed")
         return _error("internal", str(e))
@@ -1339,6 +1461,7 @@ def rename_paper(
                 continue
 
             from scholaraio.ingest.metadata import PaperMetadata
+
             pm = PaperMetadata()
             for k, v in meta.items():
                 if hasattr(pm, k):
@@ -1356,10 +1479,16 @@ def rename_paper(
             renamed += 1
             results.append({"old": paper_d.name, "new": new_stem})
 
-        return json.dumps({
-            "status": "ok", "renamed": renamed, "skipped": skipped,
-            "dry_run": dry_run, "changes": results,
-        }, ensure_ascii=False)
+        return json.dumps(
+            {
+                "status": "ok",
+                "renamed": renamed,
+                "skipped": skipped,
+                "dry_run": dry_run,
+                "changes": results,
+            },
+            ensure_ascii=False,
+        )
     except ValueError as e:
         return _error("not_found", str(e))
     except Exception as e:

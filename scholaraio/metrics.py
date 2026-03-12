@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, Generator
 import requests
 
 if TYPE_CHECKING:
-    from .config import Config, LLMConfig
+    from .config import Config, LLMConfig, resolve_llm, resolve_llm
 
 _log = logging.getLogger(__name__)
 
@@ -45,6 +45,7 @@ class LLMResult:
         model: 实际使用的模型名。
         duration_s: 调用耗时（秒）。
     """
+
     content: str
     tokens_in: int = 0
     tokens_out: int = 0
@@ -325,6 +326,7 @@ def timed(name: str = "", category: str = "step"):
         name: 事件名称，默认为函数全限定名。
         category: 事件类别。
     """
+
     def decorator(fn):
         event_name = name or f"{fn.__module__}.{fn.__qualname__}"
 
@@ -334,6 +336,7 @@ def timed(name: str = "", category: str = "step"):
                 return fn(*args, **kwargs)
 
         return wrapper
+
     return decorator
 
 
@@ -380,12 +383,13 @@ def call_llm(
     """
     # Support both Config (has .llm attr) and LLMConfig (has .base_url directly)
     from .config import LLMConfig
+
     if isinstance(config, LLMConfig):
         llm_cfg = config
         resolved_key = api_key or llm_cfg.api_key
     else:
         llm_cfg = config.llm
-        resolved_key = api_key or config.resolved_api_key()
+        resolved_key = api_key or resolve_llm(config)
 
     if not resolved_key:
         raise RuntimeError("未配置 LLM API key。")
@@ -416,14 +420,18 @@ def call_llm(
     tokens_in = tokens_out = tokens_total = 0
     model_name = llm_cfg.model
     try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=timeout or llm_cfg.timeout)
+        resp = requests.post(
+            url, json=payload, headers=headers, timeout=timeout or llm_cfg.timeout
+        )
         resp.raise_for_status()
         data = resp.json()
         try:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as e:
             snippet = _json.dumps(data, ensure_ascii=False)[:300]
-            raise ValueError(f"Unexpected API response structure: {e}\n{snippet}") from e
+            raise ValueError(
+                f"Unexpected API response structure: {e}\n{snippet}"
+            ) from e
         usage = data.get("usage") or {}
         tokens_in = usage.get("prompt_tokens", 0)
         tokens_out = usage.get("completion_tokens", 0)
@@ -436,12 +444,17 @@ def call_llm(
         duration = round(time.monotonic() - t0, 3)
         _log.debug(
             "LLM [%s] %d tokens (in=%d out=%d) %.1fs [%s]",
-            purpose or "unnamed", tokens_total, tokens_in, tokens_out,
-            duration, status,
+            purpose or "unnamed",
+            tokens_total,
+            tokens_in,
+            tokens_out,
+            duration,
+            status,
         )
         if _store:
             _store.record(
-                "llm", purpose or "unnamed",
+                "llm",
+                purpose or "unnamed",
                 duration_s=duration,
                 tokens_in=tokens_in if tokens_in is not None else None,
                 tokens_out=tokens_out if tokens_out is not None else None,

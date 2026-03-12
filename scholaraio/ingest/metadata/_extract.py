@@ -126,13 +126,14 @@ def _extract_authors(lines: list[str], start_idx: int) -> list[str]:
 
     # Lines to skip (metadata, not authors, but not stop-worthy)
     SKIP_LINES = [
-        re.compile(p, re.IGNORECASE) for p in [
-            r'^Cite\s+as',
-            r'^Submitted',
-            r'^Published\s+Online',
-            r'^Accepted',
-            r'^Received',
-            r'^Available\s+online',
+        re.compile(p, re.IGNORECASE)
+        for p in [
+            r"^Cite\s+as",
+            r"^Submitted",
+            r"^Published\s+Online",
+            r"^Accepted",
+            r"^Received",
+            r"^Available\s+online",
         ]
     ]
 
@@ -170,7 +171,9 @@ def _extract_authors(lines: list[str], start_idx: int) -> list[str]:
     return [a for a in authors if a]
 
 
-def _extract_authors_from_h1_before_title(lines: list[str], title_idx: int) -> list[str]:
+def _extract_authors_from_h1_before_title(
+    lines: list[str], title_idx: int
+) -> list[str]:
     """Extract authors from H1 headings that appear before the title (ASME/JFEG format)."""
     authors = []
     for i in range(title_idx):
@@ -194,19 +197,23 @@ def _extract_authors_from_h1_before_title(lines: list[str], title_idx: int) -> l
 def _split_authors(raw: str) -> list[str]:
     """Split raw author text into individual names."""
     # Remove H1 markers if present
-    raw = re.sub(r'^#+\s*', '', raw)
+    raw = re.sub(r"^#+\s*", "", raw)
     # Clean markers
     raw = _clean_author_text(raw)
     # Split on common delimiters (IGNORECASE to handle "AND" from spaced-out OCR)
-    parts = re.split(r'\s*(?:,\s*and\s+|,\s+and\s+|\band\b|;\s*|，\s*|、)\s*', raw, flags=re.IGNORECASE)
+    parts = re.split(
+        r"\s*(?:,\s*and\s+|,\s+and\s+|\band\b|;\s*|，\s*|、)\s*",
+        raw,
+        flags=re.IGNORECASE,
+    )
     # Also split on remaining commas
     result = []
     for p in parts:
         # If a part still has commas and looks like multiple names, split further
-        if ',' in p:
-            subparts = [s.strip() for s in p.split(',')]
+        if "," in p:
+            subparts = [s.strip() for s in p.split(",")]
             # Only split if each subpart looks like a name (has capital letter)
-            if all(re.search(r'[A-Z\u4e00-\u9fff]', s) for s in subparts if s):
+            if all(re.search(r"[A-Z\u4e00-\u9fff]", s) for s in subparts if s):
                 result.extend(subparts)
             else:
                 result.append(p.strip())
@@ -219,28 +226,29 @@ def _split_authors(raw: str) -> list[str]:
 def _clean_author_text(raw: str) -> str:
     """Remove markup from author text block."""
     # Remove HTML superscripts
-    raw = re.sub(r'<sup>[^<]*</sup>', '', raw)
+    raw = re.sub(r"<sup>[^<]*</sup>", "", raw)
     # Extract visible letters from inline LaTeX math (e.g., $\mathbf{D}^{1}$ → D)
-    raw = re.sub(r'\$([^$]*)\$', lambda m: _extract_text_from_latex(m.group(1)), raw)
+    raw = re.sub(r"\$([^$]*)\$", lambda m: _extract_text_from_latex(m.group(1)), raw)
     # Remove bare superscript numbers after names (with or without space)
-    raw = re.sub(r'\s*\d{1,3}(?=[,\s]|$)', '', raw)
+    raw = re.sub(r"\s*\d{1,3}(?=[,\s]|$)", "", raw)
     # Normalize spaced-out "A N D" delimiter to lowercase before collapsing,
     # so it won't be merged with adjacent spaced-out name letters
-    raw = re.sub(r'(?<=\s)A N D(?=\s)', 'and', raw)
+    raw = re.sub(r"(?<=\s)A N D(?=\s)", "and", raw)
     # Collapse OCR spaced-out letters: "B I J L A R D" → "BIJLARD"
     # Requires 3+ consecutive single uppercase letters separated by single spaces
     # (won't touch initials with periods like "M. J." or lowercase "and")
     raw = re.sub(
-        r'(?<![A-Za-z])([A-Z] ){2,}[A-Z](?![A-Za-z.])',
-        lambda m: m.group(0).replace(' ', ''), raw,
+        r"(?<![A-Za-z])([A-Z] ){2,}[A-Z](?![A-Za-z.])",
+        lambda m: m.group(0).replace(" ", ""),
+        raw,
     )
     # Remove ORCID icons and links
-    raw = re.sub(r'\\textcircled\{[^}]*\}', '', raw)
-    raw = re.sub(r'https?://orcid\.org/\S+', '', raw)
+    raw = re.sub(r"\\textcircled\{[^}]*\}", "", raw)
+    raw = re.sub(r"https?://orcid\.org/\S+", "", raw)
     # Remove email addresses
-    raw = re.sub(r'\S+@\S+\.\S+', '', raw)
+    raw = re.sub(r"\S+@\S+\.\S+", "", raw)
     # Remove remaining LaTeX commands (e.g. \oplus)
-    raw = re.sub(r'\\[a-zA-Z]+', '', raw)
+    raw = re.sub(r"\\[a-zA-Z]+", "", raw)
     return raw
 
 
@@ -250,30 +258,30 @@ def _extract_text_from_latex(latex: str) -> str:
     E.g., ``\\mathbf{D}^{1}`` → ``D`` (keeps the letter, drops superscript).
     """
     # Remove superscripts: ^{...} or ^x (with optional spaces around braces)
-    s = re.sub(r'\^\s*(?:\{[^}]*\}|.)', '', latex)
+    s = re.sub(r"\^\s*(?:\{[^}]*\}|.)", "", latex)
     # Remove subscripts: _{...} or _x
-    s = re.sub(r'_\s*(?:\{[^}]*\}|.)', '', s)
+    s = re.sub(r"_\s*(?:\{[^}]*\}|.)", "", s)
     # Extract content from commands like \mathbf{D} → D
-    s = re.sub(r'\\[a-zA-Z]+\s*\{([^}]*)\}', r'\1', s)
+    s = re.sub(r"\\[a-zA-Z]+\s*\{([^}]*)\}", r"\1", s)
     # Remove remaining backslash commands
-    s = re.sub(r'\\[a-zA-Z]+', '', s)
+    s = re.sub(r"\\[a-zA-Z]+", "", s)
     # Keep only letters
-    s = re.sub(r'[^A-Za-z]', '', s)
+    s = re.sub(r"[^A-Za-z]", "", s)
     return s
 
 
 def _clean_author_name(name: str) -> str:
     """Clean individual author name."""
     # Remove symbols
-    name = re.sub(r'[*†‡§¶✉⇑∗⊕]', '', name)
+    name = re.sub(r"[*†‡§¶✉⇑∗⊕]", "", name)
     # Remove "By " prefix
-    name = re.sub(r'^By\s+', '', name, flags=re.IGNORECASE)
+    name = re.sub(r"^By\s+", "", name, flags=re.IGNORECASE)
     # Remove parenthetical affiliations
-    name = re.sub(r'\([^)]*\)', '', name)
+    name = re.sub(r"\([^)]*\)", "", name)
     # Collapse whitespace
-    name = re.sub(r'\s+', ' ', name).strip()
+    name = re.sub(r"\s+", " ", name).strip()
     # Remove trailing/leading punctuation
-    name = name.strip('., ')
+    name = name.strip("., ")
     return name
 
 
@@ -285,29 +293,29 @@ def _clean_author_name(name: str) -> str:
 def _extract_doi(text: str) -> str:
     """Extract DOI from header text using multiple patterns."""
     # Collapse split-line DOIs (Chinese papers)
-    text_c = re.sub(r'(文献DOI\s*[:：]?\s*)\n', r'\1', text)
-    text_c = re.sub(r'(10\.\d{4,}[./])\n\s*', r'\1', text_c)
+    text_c = re.sub(r"(文献DOI\s*[:：]?\s*)\n", r"\1", text)
+    text_c = re.sub(r"(10\.\d{4,}[./])\n\s*", r"\1", text_c)
 
     patterns = [
-        r'https?://(?:dx\.)?doi\.org/(' + DOI_CORE + r')',
-        r'(?:DOI|doi)\s*[:：]\s*(' + DOI_CORE + r')',
-        r'\[DOI:\s*(' + DOI_CORE + r')\]',
-        r"(?:article's\s+doi|文献DOI)\s*[:：]?\s*(" + DOI_CORE + r')',
-        r'^(' + DOI_CORE + r')\s*$',
+        r"https?://(?:dx\.)?doi\.org/(" + DOI_CORE + r")",
+        r"(?:DOI|doi)\s*[:：]\s*(" + DOI_CORE + r")",
+        r"\[DOI:\s*(" + DOI_CORE + r")\]",
+        r"(?:article's\s+doi|文献DOI)\s*[:：]?\s*(" + DOI_CORE + r")",
+        r"^(" + DOI_CORE + r")\s*$",
     ]
     # DOIs to reject (data repositories, not the paper itself)
     REJECT_DOI_PREFIXES = (
-        "10.17632/",   # Mendeley Data
-        "10.5281/",    # Zenodo
-        "10.6084/",    # figshare
-        "10.5061/",    # Dryad
-        "10.7910/",    # Harvard Dataverse
+        "10.17632/",  # Mendeley Data
+        "10.5281/",  # Zenodo
+        "10.6084/",  # figshare
+        "10.5061/",  # Dryad
+        "10.7910/",  # Harvard Dataverse
     )
 
     for pat in patterns:
         m = re.search(pat, text_c, re.MULTILINE | re.IGNORECASE)
         if m:
-            doi = m.group(1).rstrip('.;,')
+            doi = m.group(1).rstrip(".;,")
             if any(doi.startswith(prefix) for prefix in REJECT_DOI_PREFIXES):
                 continue  # skip data repository DOIs
             return doi
@@ -317,13 +325,13 @@ def _extract_doi(text: str) -> str:
 def _extract_year_from_text(text: str) -> int | None:
     """Extract publication year from header text."""
     patterns = [
-        r'(?:Annu\.?\s*Rev\.?|Annual\s+Review)[^.]*?(\d{4})',
-        r'Cite\s+as:.*?(\d{4})',
-        r'(?:Copyright|©)\s*(?:©\s*)?(\d{4})',
-        r'(?:published\s+(?:online\s+)?|Available\s+online\s+)\S+\s+\S+\s+(\d{4})',
-        r'(?:Received|accepted)\s+[^;.]*?(\d{4})',
-        r'\b((?:19|20)\d{2})\.\s+\d+\s*[:(.]\s*\d+',
-        r'Vol(?:ume)?\.?\s*\d+.*?((?:19|20)\d{2})',
+        r"(?:Annu\.?\s*Rev\.?|Annual\s+Review)[^.]*?(\d{4})",
+        r"Cite\s+as:.*?(\d{4})",
+        r"(?:Copyright|©)\s*(?:©\s*)?(\d{4})",
+        r"(?:published\s+(?:online\s+)?|Available\s+online\s+)\S+\s+\S+\s+(\d{4})",
+        r"(?:Received|accepted)\s+[^;.]*?(\d{4})",
+        r"\b((?:19|20)\d{2})\.\s+\d+\s*[:(.]\s*\d+",
+        r"Vol(?:ume)?\.?\s*\d+.*?((?:19|20)\d{2})",
     ]
     for pat in patterns:
         m = re.search(pat, text, re.IGNORECASE)
@@ -337,17 +345,17 @@ def _extract_year_from_text(text: str) -> int | None:
 def _extract_journal(text: str) -> str:
     """Extract journal name from header text."""
     patterns = [
-        r'(Annu(?:al)?\.?\s+Rev(?:iew)?\.?\s+(?:of\s+)?Fluid\s+Mech(?:anics)?\.?)',
-        r'(Annual\s+Review\s+of\s+\w[\w\s]+)',
-        r'(Phys(?:ics)?\.?\s+(?:of\s+)?Fluids?)',
-        r'(Phys(?:ical)?\.?\s+Rev(?:iew)?\.?\s+\w+)',
-        r'(J(?:ournal)?\.?\s+(?:of\s+)?Fluid\s+Mech(?:anics)?\.?)',
-        r'(J(?:ournal)?\.?\s+(?:of\s+)?Comput(?:ational)?\.?\s+Phys(?:ics)?\.?)',
-        r'(Int(?:ernational)?\.?\s+J(?:ournal)?\.?\s+(?:of\s+)?Multiphase\s+Flow)',
-        r'(Comput(?:ers)?\.?\s+(?:and|&)\s+Fluids)',
-        r'(Flow,?\s+Turbulence\s+and\s+Combustion)',
-        r'(Nature\s+(?:Physics|Materials|Communications|Reviews?\s+\w+))',
-        r'(Science\s+(?:Advances|Robotics))',
+        r"(Annu(?:al)?\.?\s+Rev(?:iew)?\.?\s+(?:of\s+)?Fluid\s+Mech(?:anics)?\.?)",
+        r"(Annual\s+Review\s+of\s+\w[\w\s]+)",
+        r"(Phys(?:ics)?\.?\s+(?:of\s+)?Fluids?)",
+        r"(Phys(?:ical)?\.?\s+Rev(?:iew)?\.?\s+\w+)",
+        r"(J(?:ournal)?\.?\s+(?:of\s+)?Fluid\s+Mech(?:anics)?\.?)",
+        r"(J(?:ournal)?\.?\s+(?:of\s+)?Comput(?:ational)?\.?\s+Phys(?:ics)?\.?)",
+        r"(Int(?:ernational)?\.?\s+J(?:ournal)?\.?\s+(?:of\s+)?Multiphase\s+Flow)",
+        r"(Comput(?:ers)?\.?\s+(?:and|&)\s+Fluids)",
+        r"(Flow,?\s+Turbulence\s+and\s+Combustion)",
+        r"(Nature\s+(?:Physics|Materials|Communications|Reviews?\s+\w+))",
+        r"(Science\s+(?:Advances|Robotics))",
     ]
     for pat in patterns:
         m = re.search(pat, text, re.IGNORECASE)
@@ -367,30 +375,32 @@ def _extract_from_filename(filepath: Path) -> PaperMetadata:
     meta = PaperMetadata()
 
     # Standard: MinerU_markdown_{Author}-{Year}-{Title}_{hash}
-    m = re.match(
-        r'^MinerU_markdown_(.+?)-(\d{4})-(.+?)_(\d{10,})$', name
-    )
+    m = re.match(r"^MinerU_markdown_(.+?)-(\d{4})-(.+?)_(\d{10,})$", name)
     if m:
         author_part, year_str, title_part, _ = m.groups()
         meta.year = int(year_str)
         # For Chinese names keep as-is; for Western names replace hyphens with spaces
-        meta.first_author = author_part.replace('-', ' ') if not re.search(r'[\u4e00-\u9fff]', author_part) else author_part
+        meta.first_author = (
+            author_part.replace("-", " ")
+            if not re.search(r"[\u4e00-\u9fff]", author_part)
+            else author_part
+        )
         meta.first_author_lastname = _extract_lastname(meta.first_author)
-        meta.title = title_part.replace('_', ' ')
+        meta.title = title_part.replace("_", " ")
         return meta
 
     # Slug style: MinerU_markdown_slug-slug-2024-title-title_{hash}
-    m = re.match(r'^MinerU_markdown_(.+?)_(\d{10,})$', name)
+    m = re.match(r"^MinerU_markdown_(.+?)_(\d{10,})$", name)
     if m:
         slug = m.group(1)
-        year_match = re.search(r'-(\d{4})-', slug)
+        year_match = re.search(r"-(\d{4})-", slug)
         if year_match:
             meta.year = int(year_match.group(1))
-            before_year = slug[:year_match.start()]
-            after_year = slug[year_match.end():]
-            meta.first_author_lastname = before_year.split('-')[0].capitalize()
+            before_year = slug[: year_match.start()]
+            after_year = slug[year_match.end() :]
+            meta.first_author_lastname = before_year.split("-")[0].capitalize()
             meta.first_author = meta.first_author_lastname
-            meta.title = after_year.replace('-', ' ').replace('_', ' ')
+            meta.title = after_year.replace("-", " ").replace("_", " ")
 
     return meta
 
@@ -402,7 +412,7 @@ def _extract_lastname(full_name: str) -> str:
     name = full_name.strip()
 
     # Chinese name: first character is surname
-    if re.search(r'[\u4e00-\u9fff]', name):
+    if re.search(r"[\u4e00-\u9fff]", name):
         return name[0]
 
     parts = name.split()
@@ -410,15 +420,15 @@ def _extract_lastname(full_name: str) -> str:
         return ""
 
     # "de Vanna", "van Dyke" — particles
-    particles = {'de', 'van', 'von', 'del', 'della', 'di', 'le', 'la'}
+    particles = {"de", "van", "von", "del", "della", "di", "le", "la"}
 
     # If all parts except last are initials (e.g., "S. Balachandar", "J. K. Eaton")
     if len(parts) >= 2:
-        if all(len(p.rstrip('.')) <= 2 for p in parts[:-1]):
+        if all(len(p.rstrip(".")) <= 2 for p in parts[:-1]):
             return parts[-1]
 
     # General: last token is surname, unless preceded by a particle
     if len(parts) >= 3 and parts[-2].lower() in particles:
-        return parts[-2].capitalize() + ' ' + parts[-1]
+        return parts[-2].capitalize() + " " + parts[-1]
 
     return parts[-1]

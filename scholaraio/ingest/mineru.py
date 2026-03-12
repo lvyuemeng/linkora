@@ -81,8 +81,7 @@ import argparse
 import json
 import sys
 import time
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass
 from pathlib import Path
 
 import logging
@@ -129,6 +128,7 @@ class ConvertResult:
         error: 失败时的错误信息，成功时为 ``None``。
         md_size: 输出 Markdown 的字节数。
     """
+
     pdf_path: Path
     md_path: Path | None = None
     success: bool = False
@@ -156,6 +156,7 @@ class ConvertOptions:
         force: 是否强制重新转换已有 ``.md`` 的文件。
         dry_run: 预览模式，不写文件。
     """
+
     api_url: str = DEFAULT_API_URL
     output_dir: Path | None = None
     backend: str = DEFAULT_BACKEND
@@ -298,9 +299,16 @@ def convert_pdf(pdf_path: Path, opts: ConvertOptions) -> ConvertResult:
         cl = _extract_field(data, "content_list")
         if cl:
             cl_path = out_dir / (pdf_path.stem + "_content_list.json")
-            cl_path.write_text(json.dumps(cl, ensure_ascii=False, indent=2), encoding="utf-8")
+            cl_path.write_text(
+                json.dumps(cl, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
 
-    _log.info("-> %s (%s, %.1fs)", md_path.name, _fmt_size(result.md_size), result.elapsed_seconds)
+    _log.info(
+        "-> %s (%s, %.1fs)",
+        md_path.name,
+        _fmt_size(result.md_size),
+        result.elapsed_seconds,
+    )
     return result
 
 
@@ -456,7 +464,9 @@ def convert_pdf_cloud(
         return result
 
     # file_urls is a list of URL strings
-    upload_url = file_urls[0] if isinstance(file_urls[0], str) else file_urls[0].get("url", "")
+    upload_url = (
+        file_urls[0] if isinstance(file_urls[0], str) else file_urls[0].get("url", "")
+    )
     if not upload_url:
         result.error = "云 API 返回的上传 URL 为空"
         result.elapsed_seconds = time.time() - t0
@@ -533,7 +543,9 @@ def convert_pdf_cloud(
             result.elapsed_seconds = time.time() - t0
             _log.info(
                 "-> [cloud] %s (%s, %.1fs)",
-                md_path.name, _fmt_size(result.md_size), result.elapsed_seconds,
+                md_path.name,
+                _fmt_size(result.md_size),
+                result.elapsed_seconds,
             )
             return result
 
@@ -577,8 +589,10 @@ def convert_pdfs_cloud_batch(
     # Split into chunks
     all_results: list[ConvertResult] = []
     for chunk_start in range(0, len(pdf_paths), CLOUD_BATCH_SIZE):
-        chunk = pdf_paths[chunk_start:chunk_start + CLOUD_BATCH_SIZE]
-        chunk_results = _convert_chunk_cloud(chunk, opts, api_key=api_key, cloud_url=cloud_url)
+        chunk = pdf_paths[chunk_start : chunk_start + CLOUD_BATCH_SIZE]
+        chunk_results = _convert_chunk_cloud(
+            chunk, opts, api_key=api_key, cloud_url=cloud_url
+        )
         all_results.extend(chunk_results)
     return all_results
 
@@ -674,7 +688,11 @@ def _convert_chunk_cloud(
 
     if len(file_urls) != len(files_payload):
         for did in data_id_to_path:
-            results[did].error = f"云 API 返回 URL 数量不匹配: {len(file_urls)} vs {len(files_payload)}"
+            results[
+                did
+            ].error = (
+                f"云 API 返回 URL 数量不匹配: {len(file_urls)} vs {len(files_payload)}"
+            )
             results[did].elapsed_seconds = time.time() - t0
         return list(results.values())
 
@@ -683,7 +701,11 @@ def _convert_chunk_cloud(
 
     def _upload_one(idx: int) -> str | None:
         did = ordered_data_ids[idx]
-        url = file_urls[idx] if isinstance(file_urls[idx], str) else file_urls[idx].get("url", "")
+        url = (
+            file_urls[idx]
+            if isinstance(file_urls[idx], str)
+            else file_urls[idx].get("url", "")
+        )
         pdf_path = data_id_to_path[did]
         try:
             with open(pdf_path, "rb") as f:
@@ -694,7 +716,11 @@ def _convert_chunk_cloud(
             return str(e)
         return None
 
-    _log.info("Uploading %d PDFs to MinerU cloud (batch %s)...", len(files_payload), batch_id[:12])
+    _log.info(
+        "Uploading %d PDFs to MinerU cloud (batch %s)...",
+        len(files_payload),
+        batch_id[:12],
+    )
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         upload_errors = list(pool.map(_upload_one, range(len(files_payload))))
 
@@ -704,7 +730,9 @@ def _convert_chunk_cloud(
             results[did].error = f"PDF 上传失败: {err}"
             results[did].elapsed_seconds = time.time() - t0
 
-    pending_ids = {did for idx, did in enumerate(ordered_data_ids) if not upload_errors[idx]}
+    pending_ids = {
+        did for idx, did in enumerate(ordered_data_ids) if not upload_errors[idx]
+    }
     if not pending_ids:
         return list(results.values())
 
@@ -759,7 +787,8 @@ def _convert_chunk_cloud(
                     results[did].md_size = len(md_content.encode("utf-8"))
                     _log.info(
                         "-> [cloud] %s (%s)",
-                        md_path.name, _fmt_size(results[did].md_size),
+                        md_path.name,
+                        _fmt_size(results[did].md_size),
                     )
                 results[did].elapsed_seconds = time.time() - t0
                 done_ids.add(did)
@@ -774,7 +803,12 @@ def _convert_chunk_cloud(
 
         if running_count and not done_ids - pending_ids:
             done_count = len(done_ids)
-            _log.info("Cloud parsing: %d/%d done, %d running...", done_count, len(pending_ids), running_count)
+            _log.info(
+                "Cloud parsing: %d/%d done, %d running...",
+                done_count,
+                len(pending_ids),
+                running_count,
+            )
 
     # Mark timed-out files
     for did in pending_ids - done_ids:
@@ -783,7 +817,9 @@ def _convert_chunk_cloud(
 
     elapsed = time.time() - t0
     ok = sum(1 for did in pending_ids if results[did].success)
-    _log.info("Batch done: %d/%d succeeded (%.1fs total)", ok, len(pending_ids), elapsed)
+    _log.info(
+        "Batch done: %d/%d succeeded (%.1fs total)", ok, len(pending_ids), elapsed
+    )
 
     return list(results.values())
 
@@ -796,6 +832,7 @@ def _flatten_assets(src_dir: Path, out_dir: Path, data_id: str) -> None:
         images_dst = out_dir / f"{data_id}_images"
         if images_dst.exists():
             import shutil
+
             shutil.rmtree(str(images_dst))
         images_src.rename(images_dst)
 
@@ -840,8 +877,9 @@ def _download_cloud_result(item: dict, out_dir: Path) -> str | None:
             import zipfile
 
             # Bypass proxy for CDN downloads (domestic CDN through proxy causes SSL errors)
-            resp = requests.get(zip_url, timeout=120,
-                                proxies={"http": None, "https": None})
+            resp = requests.get(
+                zip_url, timeout=120, proxies={"http": None, "https": None}
+            )
             if resp.status_code == 200:
                 md_content = None
                 with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
@@ -863,8 +901,9 @@ def _download_cloud_result(item: dict, out_dir: Path) -> str | None:
     md_url = item.get("md_url")
     if md_url:
         try:
-            resp = requests.get(md_url, timeout=60,
-                                proxies={"http": None, "https": None})
+            resp = requests.get(
+                md_url, timeout=60, proxies={"http": None, "https": None}
+            )
             if resp.status_code == 200:
                 return resp.text
         except Exception as e:
@@ -970,7 +1009,11 @@ def cmd_batch(args: argparse.Namespace) -> None:
         return
 
     if skipped:
-        _log.info("Found %d PDF(s) to convert (%d skipped, already have .md)", len(targets), skipped)
+        _log.info(
+            "Found %d PDF(s) to convert (%d skipped, already have .md)",
+            len(targets),
+            skipped,
+        )
     else:
         _log.info("Found %d PDF(s) to convert", len(targets))
     if opts.dry_run:
@@ -1000,7 +1043,12 @@ def cmd_batch(args: argparse.Namespace) -> None:
             failed += 1
 
     # Summary
-    _log.info("Batch complete: %d succeeded, %d failed, %d skipped", succeeded, failed, skipped)
+    _log.info(
+        "Batch complete: %d succeeded, %d failed, %d skipped",
+        succeeded,
+        failed,
+        skipped,
+    )
 
 
 def _build_options(args: argparse.Namespace) -> ConvertOptions:
@@ -1034,41 +1082,56 @@ def _build_options(args: argparse.Namespace) -> ConvertOptions:
 def _add_common_args(parser: argparse.ArgumentParser) -> None:
     """Add arguments shared by convert and batch subcommands."""
     parser.add_argument(
-        "-o", "--output-dir", type=str, default=None,
+        "-o",
+        "--output-dir",
+        type=str,
+        default=None,
         help="Output directory for .md files (default: same as PDF)",
     )
     parser.add_argument(
-        "--api-url", type=str, default=DEFAULT_API_URL,
+        "--api-url",
+        type=str,
+        default=DEFAULT_API_URL,
         help=f"MinerU server URL (default: {DEFAULT_API_URL})",
     )
     parser.add_argument(
-        "--backend", type=str, default=DEFAULT_BACKEND,
+        "--backend",
+        type=str,
+        default=DEFAULT_BACKEND,
         choices=VALID_BACKENDS,
         help=f"MinerU parsing backend (default: {DEFAULT_BACKEND})",
     )
     parser.add_argument(
-        "--lang", type=str, default=DEFAULT_LANG,
+        "--lang",
+        type=str,
+        default=DEFAULT_LANG,
         help=f"OCR language: ch, en, latin, etc. (default: {DEFAULT_LANG})",
     )
     parser.add_argument(
-        "--parse-method", type=str, default="auto",
+        "--parse-method",
+        type=str,
+        default="auto",
         choices=["auto", "txt", "ocr"],
         help="PDF parse method (default: auto)",
     )
     parser.add_argument(
-        "--no-formula", action="store_true",
+        "--no-formula",
+        action="store_true",
         help="Disable formula parsing",
     )
     parser.add_argument(
-        "--no-table", action="store_true",
+        "--no-table",
+        action="store_true",
         help="Disable table parsing",
     )
     parser.add_argument(
-        "--save-content-list", action="store_true",
+        "--save-content-list",
+        action="store_true",
         help="Also save content_list JSON from MinerU",
     )
     parser.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Preview what would be done, without writing files",
     )
 
@@ -1083,7 +1146,9 @@ def main() -> None:
     # --- status ---
     p_status = sub.add_parser("status", help="Check MinerU server status")
     p_status.add_argument(
-        "--api-url", type=str, default=DEFAULT_API_URL,
+        "--api-url",
+        type=str,
+        default=DEFAULT_API_URL,
         help=f"MinerU server URL (default: {DEFAULT_API_URL})",
     )
 
@@ -1091,11 +1156,15 @@ def main() -> None:
     p_convert = sub.add_parser("convert", help="Convert a single PDF to Markdown")
     p_convert.add_argument("file", type=str, help="Path to PDF file")
     p_convert.add_argument(
-        "--start-page", type=int, default=None,
+        "--start-page",
+        type=int,
+        default=None,
         help="Start page (0-indexed, default: 0)",
     )
     p_convert.add_argument(
-        "--end-page", type=int, default=None,
+        "--end-page",
+        type=int,
+        default=None,
         help="End page (0-indexed, default: all pages)",
     )
     _add_common_args(p_convert)
@@ -1104,11 +1173,14 @@ def main() -> None:
     p_batch = sub.add_parser("batch", help="Batch-convert all PDFs in a directory")
     p_batch.add_argument("directory", type=str, help="Directory containing PDF files")
     p_batch.add_argument(
-        "-r", "--recursive", action="store_true",
+        "-r",
+        "--recursive",
+        action="store_true",
         help="Recurse into subdirectories",
     )
     p_batch.add_argument(
-        "--force", action="store_true",
+        "--force",
+        action="store_true",
         help="Reconvert PDFs that already have .md output",
     )
     _add_common_args(p_batch)

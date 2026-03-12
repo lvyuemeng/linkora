@@ -62,12 +62,15 @@ def _meta_path(name: str, cfg: Config | None = None) -> Path:
 #  Fetch from OpenAlex
 # ============================================================================
 
+
 def _is_boilerplate(abstract: str) -> bool:
     """Detect publisher boilerplate instead of real abstract."""
     low = abstract.lower()
-    return ("abstract is not available" in low or
-            "preview has been provided" in low or
-            "access link" in low)
+    return (
+        "abstract is not available" in low
+        or "preview has been provided" in low
+        or "access link" in low
+    )
 
 
 _OA_WORKS = "https://api.openalex.org/works"
@@ -86,8 +89,9 @@ def _reconstruct_abstract(inverted_index: dict | None) -> str:
     return " ".join(w for _, w in word_positions)
 
 
-def _fetch_page(issn: str, page: int, year_range: str | None = None,
-                cursor: str = "*") -> tuple[list[dict], str | None]:
+def _fetch_page(
+    issn: str, page: int, year_range: str | None = None, cursor: str = "*"
+) -> tuple[list[dict], str | None]:
     """Fetch one page of results from OpenAlex."""
     filt = f"primary_location.source.issn:{issn}"
     if year_range:
@@ -98,17 +102,21 @@ def _fetch_page(issn: str, page: int, year_range: str | None = None,
         "per_page": _PER_PAGE,
         "cursor": cursor,
         "select": "id,title,publication_year,doi,authorships,abstract_inverted_index,"
-                  "primary_location,cited_by_count,type",
+        "primary_location,cited_by_count,type",
         "sort": "publication_year:asc",
     }
     # Retry with exponential backoff for transient errors
     last_exc: Exception | None = None
     for attempt in range(3):
         try:
-            resp = requests.get(_OA_WORKS, params=params, timeout=30,
-                                proxies={"http": None, "https": None})
+            resp = requests.get(
+                _OA_WORKS,
+                params=params,
+                timeout=30,
+                proxies={"http": None, "https": None},
+            )
             if resp.status_code == 429:
-                wait = 2 ** attempt
+                wait = 2**attempt
                 _log.warning("OpenAlex 429 rate limit, retrying in %ds", wait)
                 time.sleep(wait)
                 continue
@@ -117,9 +125,13 @@ def _fetch_page(issn: str, page: int, year_range: str | None = None,
             break
         except (requests.ConnectionError, requests.Timeout) as e:
             last_exc = e
-            wait = 2 ** attempt
-            _log.warning("OpenAlex request failed (attempt %d/3): %s, retrying in %ds",
-                         attempt + 1, e, wait)
+            wait = 2**attempt
+            _log.warning(
+                "OpenAlex request failed (attempt %d/3): %s, retrying in %ds",
+                attempt + 1,
+                e,
+                wait,
+            )
             time.sleep(wait)
     else:
         if last_exc:
@@ -132,7 +144,7 @@ def _fetch_page(issn: str, page: int, year_range: str | None = None,
         doi = doi_raw.replace("https://doi.org/", "") if doi_raw else ""
 
         authors = []
-        for a in (item.get("authorships") or []):
+        for a in item.get("authorships") or []:
             name = (a.get("author") or {}).get("display_name")
             if name:
                 authors.append(name)
@@ -143,16 +155,18 @@ def _fetch_page(issn: str, page: int, year_range: str | None = None,
         raw_title = item.get("title") or ""
         clean_title = re.sub(r"<[^>]+>", "", raw_title)
 
-        papers.append({
-            "openalex_id": item.get("id", ""),
-            "doi": doi,
-            "title": clean_title,
-            "abstract": abstract,
-            "authors": authors,
-            "year": item.get("publication_year"),
-            "cited_by_count": item.get("cited_by_count", 0),
-            "type": item.get("type", ""),
-        })
+        papers.append(
+            {
+                "openalex_id": item.get("id", ""),
+                "doi": doi,
+                "title": clean_title,
+                "abstract": abstract,
+                "authors": authors,
+                "year": item.get("publication_year"),
+                "cited_by_count": item.get("cited_by_count", 0),
+                "type": item.get("type", ""),
+            }
+        )
 
     next_cursor = data.get("meta", {}).get("next_cursor")
     return papers, next_cursor
@@ -201,7 +215,13 @@ def fetch_journal(
                 for p in papers:
                     f.write(json.dumps(p, ensure_ascii=False) + "\n")
                 total += len(papers)
-                _log.info("page %d: +%d papers (total %d, %.0fs)", page, len(papers), total, t.elapsed)
+                _log.info(
+                    "page %d: +%d papers (total %d, %.0fs)",
+                    page,
+                    len(papers),
+                    total,
+                    t.elapsed,
+                )
         tmp_file.replace(papers_file)
 
     meta = {
@@ -213,8 +233,9 @@ def fetch_journal(
         "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "elapsed_seconds": round(t.elapsed, 1),
     }
-    meta_file.write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n",
-                         encoding="utf-8")
+    meta_file.write_text(
+        json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
     ui(f"Done: {total} papers, {t.elapsed:.0f}s -> {papers_file}")
     return total
 
@@ -246,7 +267,10 @@ def count_papers(name: str, cfg: Config | None = None) -> int:
 #  Embedding
 # ============================================================================
 
-def build_explore_vectors(name: str, *, rebuild: bool = False, cfg: Config | None = None) -> int:
+
+def build_explore_vectors(
+    name: str, *, rebuild: bool = False, cfg: Config | None = None
+) -> int:
     """为探索库生成语义向量。
 
     复用主库的 Qwen3-Embedding 模型，向量存入探索库自己的
@@ -261,7 +285,11 @@ def build_explore_vectors(name: str, *, rebuild: bool = False, cfg: Config | Non
         本次新嵌入的论文数量。
     """
     from scholaraio.vectors import (
-        _append_faiss_files, _embed_batch, _ensure_schema, _load_model, _pack,
+        _append_faiss_files,
+        _embed_batch,
+        _ensure_schema,
+        _load_model,
+        _pack,
     )
 
     _load_model(cfg)
@@ -276,8 +304,10 @@ def build_explore_vectors(name: str, *, rebuild: bool = False, cfg: Config | Non
 
         existing = set()
         if not rebuild:
-            existing = {row[0] for row in conn.execute(
-                "SELECT paper_id FROM paper_vectors").fetchall()}
+            existing = {
+                row[0]
+                for row in conn.execute("SELECT paper_id FROM paper_vectors").fetchall()
+            }
 
         to_embed: list[tuple[str, str]] = []
         for p in iter_papers(name, cfg):
@@ -303,7 +333,7 @@ def build_explore_vectors(name: str, *, rebuild: bool = False, cfg: Config | Non
         all_new_ids: list[str] = []
         all_new_vecs: list[list[float]] = []
         for i in range(0, len(to_embed), batch_size):
-            batch = to_embed[i:i + batch_size]
+            batch = to_embed[i : i + batch_size]
             texts = [t for _, t in batch]
             vecs = _embed_batch(texts, cfg)
             for (pid, _), vec in zip(batch, vecs):
@@ -328,7 +358,8 @@ def build_explore_vectors(name: str, *, rebuild: bool = False, cfg: Config | Non
         _append_faiss_files(
             explore_dir / "faiss.index",
             explore_dir / "faiss_ids.json",
-            all_new_ids, all_new_vecs,
+            all_new_ids,
+            all_new_vecs,
         )
 
     return len(to_embed)
@@ -357,10 +388,14 @@ def build_papers_map(name: str, cfg: Config | None = None) -> dict[str, dict]:
     return pm
 
 
-def build_explore_topics(name: str, *, rebuild: bool = False,
-                         min_topic_size: int = 30,
-                         nr_topics: int | str | None = None,
-                         cfg: Config | None = None) -> dict:
+def build_explore_topics(
+    name: str,
+    *,
+    rebuild: bool = False,
+    min_topic_size: int = 30,
+    nr_topics: int | str | None = None,
+    cfg: Config | None = None,
+) -> dict:
     """对探索库运行 BERTopic 主题建模。
 
     复用主库的 ``build_topics()`` 流程，但参数针对大规模数据调整
@@ -387,7 +422,9 @@ def build_explore_topics(name: str, *, rebuild: bool = False,
 
     db = _db_path(name, cfg)
     if not db.exists():
-        raise FileNotFoundError(f"向量库不存在: {db}\n请先运行 explore embed --name {name}")
+        raise FileNotFoundError(
+            f"向量库不存在: {db}\n请先运行 explore embed --name {name}"
+        )
 
     papers_map = build_papers_map(name, cfg)
 
@@ -440,8 +477,9 @@ def _build_faiss_index(name: str, cfg: Config | None = None):
     )
 
 
-def explore_vsearch(name: str, query: str, *, top_k: int = 10,
-                    cfg: Config | None = None) -> list[dict]:
+def explore_vsearch(
+    name: str, query: str, *, top_k: int = 10, cfg: Config | None = None
+) -> list[dict]:
     """在探索库中进行语义搜索（FAISS 加速）。
 
     Args:
@@ -469,5 +507,3 @@ def explore_vsearch(name: str, query: str, *, top_k: int = 10,
         p = paper_map.get(pid, {})
         results.append({**p, "score": score})
     return results
-
-

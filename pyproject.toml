@@ -6,12 +6,21 @@ build-backend = "setuptools.build_meta"
 name = "scholaraio"
 version = "0.1.0"
 description = "Scholar All-In-One — local academic literature explorer powered by AI"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = "MIT"
 authors = [
-    {name = "Zimo Liao", email = "zimoliao@mail.ustc.edu.cn"},
+    { name = "Zimo Liao", email = "zimoliao@mail.ustc.edu.cn" },
+    { name = "nostalgia", email = "lv15623448685@gmail.com" },
 ]
-keywords = ["academic", "literature", "research", "knowledge-base", "semantic-search", "mcp", "claude"]
+keywords = [
+    "academic",
+    "literature",
+    "research",
+    "knowledge-base",
+    "semantic-search",
+    "mcp",
+    "claude",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
@@ -19,13 +28,11 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
     "Topic :: Text Processing :: Indexing",
 ]
-dependencies = [
-    "requests>=2.28",
-    "pyyaml>=6.0",
-]
+dependencies = ["requests>=2.28", "pyyaml>=6.0"]
 
 [project.urls]
 Homepage = "https://github.com/zimoliao/scholaraio"
@@ -33,23 +40,10 @@ Repository = "https://github.com/zimoliao/scholaraio"
 Issues = "https://github.com/zimoliao/scholaraio/issues"
 
 [project.optional-dependencies]
-embed = [
-    "sentence-transformers>=3.0",
-    "numpy>=1.24",
-    "faiss-cpu>=1.7",
-]
-topics = [
-    "scholaraio[embed]",
-    "bertopic>=0.16",
-    "pandas>=2.0",
-]
-import = [
-    "endnote-utils>=1.0",
-    "pyzotero>=1.5",
-]
-mcp = [
-    "mcp>=1.0",
-]
+embed = ["sentence-transformers>=3.0", "numpy>=1.24", "faiss-cpu>=1.7"]
+topics = ["scholaraio[embed]", "bertopic>=0.16", "pandas>=2.0"]
+import = ["endnote-utils>=1.0", "pyzotero>=1.5"]
+mcp = ["mcp>=1.0"]
 full = [
     "scholaraio[embed]",
     "scholaraio[topics]",
@@ -57,11 +51,16 @@ full = [
     "modelscope>=1.10",
     "curl-cffi>=0.5",
 ]
-dev = ["pytest>=7.0"]
 
 [project.scripts]
 scholaraio = "scholaraio.cli:main"
 scholaraio-mcp = "scholaraio.mcp_server:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.15.5",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

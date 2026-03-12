@@ -46,6 +46,7 @@ _log = logging.getLogger(__name__)
 
 class StepResult(Enum):
     """流水线步骤返回值。"""
+
     OK = "ok"
     SKIP = "skip"
     FAIL = "fail"
@@ -60,6 +61,7 @@ class StepDef:
         scope: 作用域，``"inbox"`` | ``"papers"`` | ``"global"``。
         desc: 步骤描述（用于 ``--list`` 输出）。
     """
+
     fn: Callable
     scope: str
     desc: str
@@ -82,6 +84,7 @@ class InboxCtx:
         status: 当前状态，``"pending"`` | ``"ingested"`` | ``"duplicate"``
             | ``"needs_review"`` | ``"failed"`` | ``"skipped"``。
     """
+
     pdf_path: Path | None
     inbox_dir: Path
     papers_dir: Path
@@ -92,7 +95,9 @@ class InboxCtx:
     pending_dir: Path | None = None
     md_path: Path | None = None
     meta: Any = None  # PaperMeta instance after extraction
-    status: str = "pending"  # pending | ingested | duplicate | needs_review | failed | skipped
+    status: str = (
+        "pending"  # pending | ingested | duplicate | needs_review | failed | skipped
+    )
     ingested_json: Path | None = None  # set by step_ingest on success
     is_thesis: bool = False  # thesis inbox or LLM-detected thesis
 
@@ -147,15 +152,17 @@ def step_mineru(ctx: InboxCtx) -> StepResult:
     if check_server(ctx.cfg.ingest.mineru_endpoint):
         result = convert_pdf(pdf_path, mineru_opts)
     else:
-        api_key = ctx.cfg.resolved_mineru_api_key()
+        api_key = ctx.cfg.api_key("mineru")
         if not api_key:
             _log.error("MinerU unreachable and no cloud API key")
             ctx.status = "failed"
             return StepResult.FAIL
         from scholaraio.ingest.mineru import convert_pdf_cloud
+
         _log.debug("local MinerU unreachable, using cloud API")
         result = convert_pdf_cloud(
-            pdf_path, mineru_opts,
+            pdf_path,
+            mineru_opts,
             api_key=api_key,
             cloud_url=ctx.cfg.ingest.mineru_cloud_url,
         )
@@ -183,7 +190,9 @@ def step_extract(ctx: InboxCtx) -> StepResult:
     from scholaraio.ingest.extractor import get_extractor
 
     if ctx.opts.get("dry_run"):
-        _log.debug("would extract metadata from: %s", ctx.md_path.name if ctx.md_path else "?")
+        _log.debug(
+            "would extract metadata from: %s", ctx.md_path.name if ctx.md_path else "?"
+        )
         return StepResult.OK
 
     if not ctx.md_path or not ctx.md_path.exists():
@@ -194,7 +203,9 @@ def step_extract(ctx: InboxCtx) -> StepResult:
     extractor = get_extractor(ctx.cfg)
     meta = extractor.extract(ctx.md_path)
     ui(f"Title: {meta.title[:80]}")
-    ui(f"Author: {meta.first_author_lastname or '?'} | Year: {meta.year or '?'} | DOI: {meta.doi or 'none'}")
+    ui(
+        f"Author: {meta.first_author_lastname or '?'} | Year: {meta.year or '?'} | DOI: {meta.doi or 'none'}"
+    )
     ctx.meta = meta
     return StepResult.OK
 
@@ -273,12 +284,17 @@ def step_dedup(ctx: InboxCtx) -> StepResult:
             _cleanup_assets(ctx.inbox_dir, pdf_stem, md_stem)
         else:
             # Normal duplicate: move to pending for user review
-            _log.debug("duplicate: DOI %s exists -> %s", ctx.meta.doi, existing_json.parent.name)
-            _move_to_pending(ctx,
-                             issue="duplicate",
-                             message="DOI 与已入库论文重复，如需覆盖请手动处理",
-                             extra={"duplicate_of": existing_json.parent.name,
-                                    "doi": doi_key})
+            _log.debug(
+                "duplicate: DOI %s exists -> %s",
+                ctx.meta.doi,
+                existing_json.parent.name,
+            )
+            _move_to_pending(
+                ctx,
+                issue="duplicate",
+                message="DOI 与已入库论文重复，如需覆盖请手动处理",
+                extra={"duplicate_of": existing_json.parent.name, "doi": doi_key},
+            )
         ctx.status = "duplicate"
         return StepResult.FAIL
 
@@ -319,6 +335,7 @@ def step_ingest(ctx: InboxCtx) -> StepResult:
     # Abstract fallback: extract from MD when API didn't return one
     if not ctx.meta.abstract and ctx.md_path and ctx.md_path.exists():
         from scholaraio.ingest.metadata import extract_abstract_from_md
+
         abstract = extract_abstract_from_md(ctx.md_path, ctx.cfg)
         if abstract:
             ctx.meta.abstract = abstract
@@ -351,10 +368,10 @@ def step_ingest(ctx: InboxCtx) -> StepResult:
         pdf_stem = ctx.pdf_path.stem if ctx.pdf_path else ""
         _move_assets(ctx.inbox_dir, paper_d, pdf_stem or md_stem, md_stem)
         ui(f"Ingested: {paper_d.name}/")
-        ui(f"  meta.json + paper.md")
+        ui("  meta.json + paper.md")
     else:
         ui(f"Ingested (metadata only): {paper_d.name}/")
-        ui(f"  meta.json")
+        ui("  meta.json")
 
     if ctx.meta.doi and ctx.meta.doi.strip():
         ctx.existing_dois[ctx.meta.doi.lower().strip()] = new_json
@@ -384,7 +401,6 @@ def step_toc(json_path: Path, cfg: Config, opts: dict) -> StepResult:
     Returns:
         ``StepResult.OK`` 成功, ``StepResult.FAIL`` 失败, ``StepResult.SKIP`` 跳过。
     """
-    from scholaraio.loader import enrich_toc
 
     md_path = json_path.parent / "paper.md"
     if not md_path.exists():
@@ -395,11 +411,11 @@ def step_toc(json_path: Path, cfg: Config, opts: dict) -> StepResult:
         _log.debug("would run toc: %s", json_path.stem)
         return StepResult.OK
 
-    ok = enrich_toc(
-        json_path, md_path, cfg,
-        force=opts.get("force", False),
-        inspect=opts.get("inspect", False),
-    )
+    from scholaraio.loader import PaperEnricher
+
+    paper_id = json_path.parent.name
+    enricher = PaperEnricher(cfg.papers_dir)
+    ok = enricher.enrich_toc(paper_id, cfg, force=opts.get("force", False))
     return StepResult.OK if ok else StepResult.FAIL
 
 
@@ -414,8 +430,6 @@ def step_l3(json_path: Path, cfg: Config, opts: dict) -> StepResult:
     Returns:
         ``StepResult.OK`` 成功, ``StepResult.FAIL`` 失败, ``StepResult.SKIP`` 跳过。
     """
-    from scholaraio.loader import enrich_l3
-
     md_path = json_path.parent / "paper.md"
     if not md_path.exists():
         _log.debug("skipping (no paper.md): %s", json_path.parent.name)
@@ -425,12 +439,11 @@ def step_l3(json_path: Path, cfg: Config, opts: dict) -> StepResult:
         _log.debug("would run l3: %s", json_path.stem)
         return StepResult.OK
 
-    ok = enrich_l3(
-        json_path, md_path, cfg,
-        force=opts.get("force", False),
-        max_retries=opts.get("max_retries", 2),
-        inspect=opts.get("inspect", False),
-    )
+    from scholaraio.loader import PaperEnricher
+
+    paper_id = json_path.parent.name
+    enricher = PaperEnricher(cfg.papers_dir)
+    ok = enricher.enrich_conclusion(paper_id, cfg, force=opts.get("force", False))
     return StepResult.OK if ok else StepResult.FAIL
 
 
@@ -460,7 +473,12 @@ def step_embed(papers_dir: Path, cfg: Config, opts: dict) -> StepResult:
     rebuild = opts.get("rebuild", False)
 
     if opts.get("dry_run"):
-        _log.debug("would %s vectors: %s -> %s", "rebuild" if rebuild else "update", papers_dir, db_path)
+        _log.debug(
+            "would %s vectors: %s -> %s",
+            "rebuild" if rebuild else "update",
+            papers_dir,
+            db_path,
+        )
         return StepResult.OK
 
     count = build_vectors(papers_dir, db_path, rebuild=rebuild, cfg=cfg)
@@ -485,7 +503,12 @@ def step_index(papers_dir: Path, cfg: Config, opts: dict) -> StepResult:
     rebuild = opts.get("rebuild", False)
 
     if opts.get("dry_run"):
-        _log.debug("would %s index: %s -> %s", "rebuild" if rebuild else "update", papers_dir, db_path)
+        _log.debug(
+            "would %s index: %s -> %s",
+            "rebuild" if rebuild else "update",
+            papers_dir,
+            db_path,
+        )
         return StepResult.OK
 
     ui(f"{'Rebuild' if rebuild else 'Update'} index: {papers_dir} -> {db_path}")
@@ -543,21 +566,23 @@ def step_refetch(json_path: Path, cfg: Config, opts: dict) -> StepResult:
 
 
 STEPS: dict[str, StepDef] = {
-    "mineru":  StepDef(fn=step_mineru,  scope="inbox",  desc="PDF → Markdown（MinerU）"),
-    "extract": StepDef(fn=step_extract, scope="inbox",  desc="Markdown → 元数据提取"),
-    "dedup":   StepDef(fn=step_dedup,   scope="inbox",  desc="API 查询 + DOI 去重"),
-    "ingest":  StepDef(fn=step_ingest,  scope="inbox",  desc="写入 data/papers/"),
-    "toc":     StepDef(fn=step_toc,     scope="papers", desc="LLM 提取 TOC 写入 JSON"),
-    "l3":      StepDef(fn=step_l3,      scope="papers", desc="LLM 提取结论写入 JSON"),
-    "refetch": StepDef(fn=step_refetch, scope="papers", desc="重新查询 API 补全引用量等字段"),
-    "embed":   StepDef(fn=step_embed,   scope="global", desc="生成语义向量写入 index.db"),
-    "index":   StepDef(fn=step_index,   scope="global", desc="更新 SQLite FTS5 索引"),
+    "mineru": StepDef(fn=step_mineru, scope="inbox", desc="PDF → Markdown（MinerU）"),
+    "extract": StepDef(fn=step_extract, scope="inbox", desc="Markdown → 元数据提取"),
+    "dedup": StepDef(fn=step_dedup, scope="inbox", desc="API 查询 + DOI 去重"),
+    "ingest": StepDef(fn=step_ingest, scope="inbox", desc="写入 data/papers/"),
+    "toc": StepDef(fn=step_toc, scope="papers", desc="LLM 提取 TOC 写入 JSON"),
+    "l3": StepDef(fn=step_l3, scope="papers", desc="LLM 提取结论写入 JSON"),
+    "refetch": StepDef(
+        fn=step_refetch, scope="papers", desc="重新查询 API 补全引用量等字段"
+    ),
+    "embed": StepDef(fn=step_embed, scope="global", desc="生成语义向量写入 index.db"),
+    "index": StepDef(fn=step_index, scope="global", desc="更新 SQLite FTS5 索引"),
 }
 
 PRESETS: dict[str, list[str]] = {
-    "full":    ["mineru", "extract", "dedup", "ingest", "toc", "l3", "embed", "index"],
-    "ingest":  ["mineru", "extract", "dedup", "ingest", "embed", "index"],
-    "enrich":  ["toc", "l3", "embed", "index"],
+    "full": ["mineru", "extract", "dedup", "ingest", "toc", "l3", "embed", "index"],
+    "ingest": ["mineru", "extract", "dedup", "ingest", "embed", "index"],
+    "enrich": ["toc", "l3", "embed", "index"],
     "reindex": ["embed", "index"],
 }
 
@@ -617,16 +642,22 @@ def _process_inbox(
     use_cloud_batch = False
     if needs_mineru and not dry_run:
         from scholaraio.ingest.mineru import check_server
+
         if not check_server(cfg.ingest.mineru_endpoint):
-            if cfg.resolved_mineru_api_key():
+            if cfg.api_key("mineru"):
                 _log.debug("local MinerU unreachable, will use cloud API")
                 use_cloud_batch = True
             else:
-                _log.error("MinerU unreachable (local: %s, no cloud API key)", cfg.ingest.mineru_endpoint)
+                _log.error(
+                    "MinerU unreachable (local: %s, no cloud API key)",
+                    cfg.ingest.mineru_endpoint,
+                )
                 sys.exit(1)
 
-    ui(f"{label_prefix}Found {len(entries)} items" +
-       (f" ({md_only_count} md-only)" if md_only_count else ""))
+    ui(
+        f"{label_prefix}Found {len(entries)} items"
+        + (f" ({md_only_count} md-only)" if md_only_count else "")
+    )
     if not is_thesis:
         ui(f"data/papers/ has {len(existing_dois)} papers (by DOI)")
 
@@ -634,16 +665,22 @@ def _process_inbox(
     mineru_time = 0.0
     if use_cloud_batch and needs_mineru and not dry_run:
         pdfs_to_convert = [
-            e["pdf"] for e in entries.values()
+            e["pdf"]
+            for e in entries.values()
             if e["pdf"] and not (inbox_dir / (e["pdf"].stem + ".md")).exists()
         ]
         if pdfs_to_convert:
-            from scholaraio.ingest.mineru import ConvertOptions, convert_pdfs_cloud_batch
+            from scholaraio.ingest.mineru import (
+                ConvertOptions,
+                convert_pdfs_cloud_batch,
+            )
+
             mineru_opts = ConvertOptions(output_dir=inbox_dir)
             t_batch_start = time.time()
             batch_results = convert_pdfs_cloud_batch(
-                pdfs_to_convert, mineru_opts,
-                api_key=cfg.resolved_mineru_api_key(),
+                pdfs_to_convert,
+                mineru_opts,
+                api_key=cfg.api_key("mineru"),
                 cloud_url=cfg.ingest.mineru_cloud_url,
             )
             mineru_time = time.time() - t_batch_start
@@ -656,7 +693,9 @@ def _process_inbox(
                     target = inbox_dir / f"{did}_mineru_images"
                     namespaced_images.rename(target)
                 if not br.success:
-                    _log.error("MinerU batch failed for %s: %s", br.pdf_path.name, br.error)
+                    _log.error(
+                        "MinerU batch failed for %s: %s", br.pdf_path.name, br.error
+                    )
             # Update entries with generated .md paths
             for stem, e in entries.items():
                 md_check = inbox_dir / (stem + ".md")
@@ -669,17 +708,30 @@ def _process_inbox(
     if use_cloud_batch and "mineru" in per_file_steps:
         per_file_steps = [s for s in per_file_steps if s != "mineru"]
 
-    has_api = "dedup" in per_file_steps and not dry_run and not opts.get("no_api") and not is_thesis
+    has_api = (
+        "dedup" in per_file_steps
+        and not dry_run
+        and not opts.get("no_api")
+        and not is_thesis
+    )
     api_delay = 2.0 if has_api else 0
 
-    stats: dict[str, int] = {"ingested": 0, "duplicate": 0, "needs_review": 0, "failed": 0, "skipped": 0}
+    stats: dict[str, int] = {
+        "ingested": 0,
+        "duplicate": 0,
+        "needs_review": 0,
+        "failed": 0,
+        "skipped": 0,
+    }
     step_times: dict[str, float] = {}
     if mineru_time:
         step_times["mineru"] = mineru_time
     sorted_entries = sorted(entries.items())
     for idx, (stem, paths) in enumerate(sorted_entries):
         file_label = paths["pdf"].name if paths["pdf"] else paths["md"].name
-        ui(f"\n{label_prefix}[{idx+1}/{len(sorted_entries)}] {'PDF' if paths['pdf'] else 'MD'}: {file_label}")
+        ui(
+            f"\n{label_prefix}[{idx + 1}/{len(sorted_entries)}] {'PDF' if paths['pdf'] else 'MD'}: {file_label}"
+        )
         ctx = InboxCtx(
             pdf_path=paths["pdf"],
             inbox_dir=inbox_dir,
@@ -708,7 +760,12 @@ def _process_inbox(
             time.sleep(api_delay)
 
     # Clean up stray MinerU artifacts left in inbox
-    for pattern in ["*_layout.json", "*_content_list.json", "*_origin.pdf", "layout.json"]:
+    for pattern in [
+        "*_layout.json",
+        "*_content_list.json",
+        "*_origin.pdf",
+        "layout.json",
+    ]:
         for stray in list(inbox_dir.glob(pattern)):
             stray.unlink(missing_ok=True)
             _log.debug("stray cleanup: %s", stray.name)
@@ -717,7 +774,9 @@ def _process_inbox(
             shutil.rmtree(stray_dir)
             _log.debug("stray cleanup dir: %s", stray_dir.name)
 
-    ui(f"\n{label_prefix}inbox done: {stats['ingested']} ingested | {stats['duplicate']} duplicate | {stats['needs_review']} review | {stats['failed']} failed | {stats['skipped']} skipped")
+    ui(
+        f"\n{label_prefix}inbox done: {stats['ingested']} ingested | {stats['duplicate']} duplicate | {stats['needs_review']} review | {stats['failed']} failed | {stats['skipped']} skipped"
+    )
     if step_times:
         ui("Step timing:")
         for sn, st in step_times.items():
@@ -762,7 +821,7 @@ def run_pipeline(
     papers_dir: Path = opts.get("papers_dir", cfg.papers_dir)
     pending_dir: Path = cfg._root / "data" / "pending"
 
-    inbox_steps  = [n for n in step_names if STEPS[n].scope == "inbox"]
+    inbox_steps = [n for n in step_names if STEPS[n].scope == "inbox"]
     papers_steps = [n for n in step_names if STEPS[n].scope == "papers"]
     global_steps = [n for n in step_names if STEPS[n].scope == "global"]
 
@@ -775,8 +834,15 @@ def run_pipeline(
 
         # Process regular inbox
         _result = _process_inbox(
-            inbox_dir, papers_dir, pending_dir, existing_dois,
-            inbox_steps, cfg, opts, dry_run, ingested_jsons,
+            inbox_dir,
+            papers_dir,
+            pending_dir,
+            existing_dois,
+            inbox_steps,
+            cfg,
+            opts,
+            dry_run,
+            ingested_jsons,
             is_thesis=False,
         )
 
@@ -784,8 +850,15 @@ def run_pipeline(
         thesis_inbox = cfg._root / "data" / "inbox-thesis"
         if thesis_inbox.exists():
             _process_inbox(
-                thesis_inbox, papers_dir, pending_dir, existing_dois,
-                inbox_steps, cfg, opts, dry_run, ingested_jsons,
+                thesis_inbox,
+                papers_dir,
+                pending_dir,
+                existing_dois,
+                inbox_steps,
+                cfg,
+                opts,
+                dry_run,
+                ingested_jsons,
                 is_thesis=True,
             )
 
@@ -801,6 +874,7 @@ def run_pipeline(
         else:
             # No inbox steps (e.g. `pipeline enrich`) — process all
             from scholaraio.papers import iter_paper_dirs
+
             json_paths = sorted(d / "meta.json" for d in iter_paper_dirs(papers_dir))
         if not json_paths:
             if not inbox_steps:
@@ -832,7 +906,9 @@ def run_pipeline(
                 else:
                     fail_total += 1
 
-            ui(f"\nPapers done: {ok_total} ok | {fail_total} failed | {skip_total} skipped")
+            ui(
+                f"\nPapers done: {ok_total} ok | {fail_total} failed | {skip_total} skipped"
+            )
             if step_times:
                 ui("Step timing:")
                 for sn, st in step_times.items():
@@ -875,13 +951,19 @@ def import_external(
     existing_dois = _collect_existing_dois(papers_dir)
 
     opts: dict[str, Any] = {"dry_run": dry_run, "no_api": no_api}
-    stats: dict[str, int] = {"ingested": 0, "duplicate": 0, "needs_review": 0, "failed": 0, "skipped": 0}
+    stats: dict[str, int] = {
+        "ingested": 0,
+        "duplicate": 0,
+        "needs_review": 0,
+        "failed": 0,
+        "skipped": 0,
+    }
     ingested_jsons: list[Path] = []
 
     has_api = not no_api and not dry_run
 
     for idx, meta in enumerate(records):
-        ui(f"\n[{idx+1}/{len(records)}] {meta.title[:60]}...")
+        ui(f"\n[{idx + 1}/{len(records)}] {meta.title[:60]}...")
 
         # Fast DOI dedup check before expensive API calls
         doi = meta.doi.lower().strip() if meta.doi else ""
@@ -928,7 +1010,9 @@ def import_external(
         if has_api and idx < len(records) - 1:
             time.sleep(1.0)
 
-    ui(f"\n导入完成: {stats['ingested']} 入库 | {stats['duplicate']} 重复 | {stats['needs_review']} 待审 | {stats['failed']} 失败")
+    ui(
+        f"\n导入完成: {stats['ingested']} 入库 | {stats['duplicate']} 重复 | {stats['needs_review']} 待审 | {stats['failed']} 失败"
+    )
 
     # Batch embed + index
     if not dry_run and ingested_jsons:
@@ -984,15 +1068,23 @@ def _detect_thesis(ctx: InboxCtx) -> bool:
 
     # Fast heuristic: title/metadata already hints thesis
     title = (ctx.meta.title or "").lower() if ctx.meta else ""
-    for keyword in ("thesis", "dissertation", "学位论文", "硕士论文", "博士论文",
-                    "毕业论文", "master's thesis", "doctoral dissertation"):
+    for keyword in (
+        "thesis",
+        "dissertation",
+        "学位论文",
+        "硕士论文",
+        "博士论文",
+        "毕业论文",
+        "master's thesis",
+        "doctoral dissertation",
+    ):
         if keyword in title:
             _log.debug("thesis detected by title keyword: %s", keyword)
             return True
 
     # LLM detection
     try:
-        api_key = ctx.cfg.resolved_api_key()
+        api_key = ctx.cfg.api_key("llm")
     except Exception as e:
         _log.debug("failed to resolve API key: %s", e)
         api_key = None
@@ -1008,15 +1100,16 @@ def _detect_thesis(ctx: InboxCtx) -> bool:
         "Look for indicators such as: degree awarding institution, "
         "advisor/supervisor, thesis committee, degree type (PhD/Master/Bachelor), "
         "declaration of originality, or thesis-specific formatting.\n\n"
-        "Respond in JSON: {\"is_thesis\": true/false, \"reason\": \"brief explanation\"}\n\n"
+        'Respond in JSON: {"is_thesis": true/false, "reason": "brief explanation"}\n\n'
         f"--- DOCUMENT START ---\n{text}\n--- DOCUMENT END ---"
     )
     try:
         result = call_llm(prompt, ctx.cfg, purpose="detect_thesis", max_tokens=200)
         import re
+
         # Extract JSON from response
         content = result.content.strip()
-        match = re.search(r'\{[^}]+\}', content)
+        match = re.search(r"\{[^}]+\}", content)
         if match:
             data = json.loads(match.group())
             is_thesis = bool(data.get("is_thesis", False))
@@ -1030,8 +1123,9 @@ def _detect_thesis(ctx: InboxCtx) -> bool:
     return False
 
 
-def _find_assets(inbox_dir: Path, asset_prefix: str, md_stem: str
-                  ) -> tuple[Path | None, list[Path], list[Path]]:
+def _find_assets(
+    inbox_dir: Path, asset_prefix: str, md_stem: str
+) -> tuple[Path | None, list[Path], list[Path]]:
     """Locate MinerU artifacts in inbox.
 
     Returns:
@@ -1056,8 +1150,9 @@ def _find_assets(inbox_dir: Path, asset_prefix: str, md_stem: str
     return images_dir, json_files, origin_pdfs
 
 
-def _move_assets(inbox_dir: Path, dest_dir: Path,
-                  asset_prefix: str, md_stem: str) -> None:
+def _move_assets(
+    inbox_dir: Path, dest_dir: Path, asset_prefix: str, md_stem: str
+) -> None:
     """Move MinerU assets (images, layout.json, etc.) from inbox to dest."""
     images_dir, json_files, origin_pdfs = _find_assets(inbox_dir, asset_prefix, md_stem)
     if images_dir:
@@ -1072,10 +1167,13 @@ def _move_assets(inbox_dir: Path, dest_dir: Path,
         shutil.move(str(f), str(dest_dir / dest_name))
 
 
-def _move_to_pending(ctx: InboxCtx, *,
-                     issue: str = "no_doi",
-                     message: str = "API 查询后仍无 DOI，需人工确认后补充 DOI 再入库",
-                     extra: dict | None = None) -> None:
+def _move_to_pending(
+    ctx: InboxCtx,
+    *,
+    issue: str = "no_doi",
+    message: str = "API 查询后仍无 DOI，需人工确认后补充 DOI 再入库",
+    extra: dict | None = None,
+) -> None:
     """将文件移入 pending 目录（每篇一个子目录）。
 
     Args:
@@ -1095,6 +1193,7 @@ def _move_to_pending(ctx: InboxCtx, *,
     dir_name = pdf_stem or md_stem
     if not dir_name and ctx.meta and ctx.meta.title:
         from scholaraio.ingest.metadata import generate_new_stem
+
         dir_name = generate_new_stem(ctx.meta)
     if not dir_name:
         dir_name = "unknown"
@@ -1135,11 +1234,13 @@ def _move_to_pending(ctx: InboxCtx, *,
 def _repair_abstract(json_path: Path, md_path: Path, cfg: Config) -> None:
     """已入库论文 MD 补全后，检查并补写 abstract。"""
     from scholaraio.papers import read_meta, write_meta
+
     paper_d = json_path.parent
     data = read_meta(paper_d)
     if data.get("abstract"):
         return
     from scholaraio.ingest.metadata import extract_abstract_from_md
+
     abstract = extract_abstract_from_md(md_path, cfg)
     if abstract:
         data["abstract"] = abstract
@@ -1150,6 +1251,7 @@ def _repair_abstract(json_path: Path, md_path: Path, cfg: Config) -> None:
 def _update_registry(cfg, meta, dir_name: str) -> None:
     """Insert/update papers_registry so UUID lookup works immediately."""
     import sqlite3
+
     db_path = cfg.index_db
     if not db_path.exists():
         return
@@ -1159,8 +1261,14 @@ def _update_registry(cfg, meta, dir_name: str) -> None:
             """INSERT OR REPLACE INTO papers_registry
                (id, dir_name, title, doi, year, first_author)
                VALUES (?, ?, ?, ?, ?, ?)""",
-            (meta.id, dir_name, meta.title or "", meta.doi or "",
-             meta.year, meta.first_author_lastname or ""),
+            (
+                meta.id,
+                dir_name,
+                meta.title or "",
+                meta.doi or "",
+                meta.year,
+                meta.first_author_lastname or "",
+            ),
         )
         conn.commit()
         conn.close()

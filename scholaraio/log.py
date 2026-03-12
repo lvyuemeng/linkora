@@ -1,11 +1,9 @@
-"""
-log.py -- ScholarAIO 日志初始化
-=================================
+"""ScholarAIO Logging Module.
 
-提供三层输出：
-  1. 文件日志（RotatingFileHandler）— DEBUG 级别，完整记录
-  2. 控制台输出（StreamHandler）— INFO 级别，格式等同 print
-  3. ``ui()`` 函数 — print() 的 drop-in 替代，同时写文件和控制台
+Three-layer output:
+  1. File log (RotatingFileHandler) - DEBUG level, complete records
+  2. Console output (StreamHandler) - INFO level, print-like format
+  3. ui() function - print() drop-in replacement, writes to both
 """
 
 from __future__ import annotations
@@ -14,14 +12,46 @@ import logging
 import logging.handlers
 import sys
 import uuid
-from pathlib import Path
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from .config import Config
+    from pathlib import Path
 
-_session_id: str = ""
-_initialized: bool = False
+# Explicit level mapping - no getattr metaprogramming
+_LOG_LEVELS: dict[str, int] = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+    "critical": logging.CRITICAL,
+}
+
+
+class HasLogConfig(Protocol):
+    """Protocol for log configuration."""
+
+    @property
+    def log_file(self) -> Path: ...
+
+    @property
+    def level(self) -> str: ...
+
+    @property
+    def max_bytes(self) -> int: ...
+
+    @property
+    def backup_count(self) -> int: ...
+
+
+@dataclass
+class LogSettings:
+    """Log configuration dataclass."""
+
+    level: str = "INFO"
+    max_bytes: int = 10 * 1024 * 1024  # 10MB
+    backup_count: int = 3
+
 
 # Format: file handler gets timestamp+module+level; console gets bare message
 _FILE_FMT = "%(asctime)s %(name)-24s %(levelname)-5s %(message)s"
@@ -29,90 +59,145 @@ _FILE_DATEFMT = "%Y-%m-%d %H:%M:%S"
 _CONSOLE_FMT = "%(message)s"
 
 
-def setup(cfg: "Config") -> str:
-    """初始化 root logger，返回本次会话的 session_id。
+def _resolve_level(level: str) -> int:
+    """Resolve string level to logging constant."""
+    return _LOG_LEVELS.get(level.lower(), logging.INFO)
 
-    Args:
-        cfg: ScholarAIO 全局配置。
 
-    Returns:
-        UUID4 格式的 session_id，用于关联本次所有 metrics 事件。
+class LoggerManager:
+    """Singleton logger manager with session tracking.
+
+    Encapsulates all logging state - no global mutable state.
     """
-    global _session_id, _initialized
-    if _initialized:
-        return _session_id
 
-    _session_id = uuid.uuid4().hex[:12]
+    _instance: "LoggerManager | None" = None
+    _session_id: str = ""
+    _initialized: bool = False
 
-    root = logging.getLogger()
-    root.setLevel(logging.DEBUG)
+    def __new__(cls) -> "LoggerManager":
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
 
-    # -- File handler (DEBUG, rotating) --
-    log_path = cfg.log_file
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    fh = logging.handlers.RotatingFileHandler(
-        log_path,
-        maxBytes=cfg.log.max_bytes,
-        backupCount=cfg.log.backup_count,
-        encoding="utf-8",
-    )
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(logging.Formatter(_FILE_FMT, datefmt=_FILE_DATEFMT))
-    root.addHandler(fh)
+    @property
+    def session_id(self) -> str:
+        """Current session ID (empty before setup)."""
+        return self._session_id
 
-    # -- Console handler (INFO, bare message) --
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(getattr(logging, cfg.log.level.upper(), logging.INFO))
-    ch.setFormatter(logging.Formatter(_CONSOLE_FMT))
-    root.addHandler(ch)
+    @property
+    def is_initialized(self) -> bool:
+        """Whether logger has been initialized."""
+        return self._initialized
 
-    # Suppress noisy third-party loggers
-    for name in ("httpx", "urllib3", "modelscope", "httpcore", "sentence_transformers"):
-        logging.getLogger(name).setLevel(logging.WARNING)
+    def setup(self, cfg: HasLogConfig) -> str:
+        """Initialize root logger, return session_id for this session.
 
-    _initialized = True
-    logging.getLogger(__name__).debug("session %s started", _session_id)
-    return _session_id
+        Args:
+            cfg: ScholarAIO configuration with log settings.
+
+        Returns:
+            UUID4 session_id for associating metrics events.
+        """
+        if self._initialized:
+            return self._session_id
+
+        self._session_id = uuid.uuid4().hex[:12]
+
+        root = logging.getLogger()
+        root.setLevel(logging.DEBUG)
+
+        # -- File handler (DEBUG, rotating) --
+        log_path = cfg.log_file
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        fh = logging.handlers.RotatingFileHandler(
+            log_path,
+            maxBytes=cfg.max_bytes,
+            backupCount=cfg.backup_count,
+            encoding="utf-8",
+        )
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter(_FILE_FMT, datefmt=_FILE_DATEFMT))
+        root.addHandler(fh)
+
+        # -- Console handler (INFO, bare message) --
+        ch = logging.StreamHandler(sys.stdout)
+        ch.setLevel(_resolve_level(cfg.level))
+        ch.setFormatter(logging.Formatter(_CONSOLE_FMT))
+        root.addHandler(ch)
+
+        # Suppress noisy third-party loggers
+        for name in (
+            "httpx",
+            "urllib3",
+            "modelscope",
+            "httpcore",
+            "sentence_transformers",
+        ):
+            logging.getLogger(name).setLevel(logging.WARNING)
+
+        self._initialized = True
+        logging.getLogger(__name__).debug("session %s started", self._session_id)
+        return self._session_id
+
+    def get_logger(self, name: str) -> logging.Logger:
+        """Get logger instance by name.
+
+        Args:
+            name: Logger name, typically __name__.
+
+        Returns:
+            Logger instance.
+        """
+        return logging.getLogger(name)
+
+    def ui(self, msg: str = "", *args, logger: logging.Logger | None = None) -> None:
+        """User interface output - print() drop-in replacement.
+
+        Writes to both console and log file.
+
+        Args:
+            msg: Message string with % formatting placeholders.
+            *args: Format arguments.
+            logger: Specific logger, defaults to scholaraio.ui.
+        """
+        _logger = logger or logging.getLogger("scholaraio.ui")
+        _logger.info(msg, *args)
+
+    def reset(self) -> None:
+        """Reset logger state (for testing only)."""
+        root = logging.getLogger()
+        for h in root.handlers[:]:
+            root.removeHandler(h)
+            h.close()
+        self._session_id = ""
+        self._initialized = False
+
+
+# Singleton instance for module-level functions
+_logger_manager = LoggerManager()
+
+
+# Module-level convenience functions (delegated to singleton)
+def setup(cfg: HasLogConfig) -> str:
+    """Initialize root logger, return session_id for this session."""
+    return _logger_manager.setup(cfg)
 
 
 def get_session_id() -> str:
-    """返回当前会话 ID（setup 之前为空字符串）。"""
-    return _session_id
+    """Return current session ID (empty before setup)."""
+    return _logger_manager.session_id
 
 
 def get_logger(name: str) -> logging.Logger:
-    """``logging.getLogger(name)`` 的快捷方式。
-
-    Args:
-        name: logger 名称，通常传 ``__name__``。
-
-    Returns:
-        对应的 Logger 实例。
-    """
-    return logging.getLogger(name)
+    """Shortcut for logging.getLogger(name)."""
+    return _logger_manager.get_logger(name)
 
 
 def ui(msg: str = "", *args, logger: logging.Logger | None = None) -> None:
-    """用户界面输出 — ``print()`` 的 drop-in 替代。
-
-    同时写入控制台和日志文件。迁移时将 ``print(x)`` 改为
-    ``ui(x)`` 即可，行为不变。支持无参调用 ``ui()`` 输出空行。
-
-    Args:
-        msg: 消息字符串，支持 ``%`` 格式化占位符。默认空字符串。
-        *args: 格式化参数。
-        logger: 指定 logger，默认使用 ``scholaraio.ui``。
-    """
-    _logger = logger or logging.getLogger("scholaraio.ui")
-    _logger.info(msg, *args)
+    """User interface output - print() drop-in replacement."""
+    _logger_manager.ui(msg, *args, logger=logger)
 
 
 def reset() -> None:
-    """重置日志状态（仅供测试使用）。"""
-    global _session_id, _initialized
-    root = logging.getLogger()
-    for h in root.handlers[:]:
-        root.removeHandler(h)
-        h.close()
-    _session_id = ""
-    _initialized = False
+    """Reset logger state (for testing only)."""
+    _logger_manager.reset()

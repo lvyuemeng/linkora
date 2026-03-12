@@ -41,8 +41,7 @@ def migrate_to_dirs(papers_dir: Path, *, dry_run: bool = True) -> dict[str, int]
 
     # Find flat JSON files (not inside subdirectories)
     flat_jsons = sorted(
-        p for p in papers_dir.glob("*.json")
-        if p.is_file() and p.parent == papers_dir
+        p for p in papers_dir.glob("*.json") if p.is_file() and p.parent == papers_dir
     )
 
     if not flat_jsons:
@@ -78,7 +77,9 @@ def migrate_to_dirs(papers_dir: Path, *, dry_run: bool = True) -> dict[str, int]
 
         if dry_run:
             has_md = "+" if md_path.exists() else "-"
-            ui(f"  [dry-run] {stem}/ (meta.json{has_md}paper.md) id={data['id'][:8]}...")
+            ui(
+                f"  [dry-run] {stem}/ (meta.json{has_md}paper.md) id={data['id'][:8]}..."
+            )
             stats["migrated"] += 1
             continue
 
@@ -87,6 +88,7 @@ def migrate_to_dirs(papers_dir: Path, *, dry_run: bool = True) -> dict[str, int]
 
         # Write meta.json with UUID
         from scholaraio.papers import write_meta
+
         write_meta(target_dir, data)
 
         # Move .md if exists

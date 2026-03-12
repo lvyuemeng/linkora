@@ -1,42 +1,4 @@
-"""
-cli.py — scholaraio 命令行入口
-================================
-
-命令：
-    scholaraio index [--rebuild]
-    scholaraio embed [--rebuild]
-    scholaraio search <query> [--top N] [--year Y] [--journal J] [--type T]
-    scholaraio search-author <query> [--top N] [--year Y] [--journal J] [--type T]
-    scholaraio vsearch <query> [--top N] [--year Y] [--journal J] [--type T]
-    scholaraio usearch <query> [--top N] [--year Y] [--journal J] [--type T]
-    scholaraio show <paper-id> [--layer 1|2|3|4]
-    scholaraio enrich-toc [<paper-id> | --all] [--force] [--inspect]
-    scholaraio enrich-l3 [<paper-id> | --all] [--force] [--inspect] [--max-retries N]
-    scholaraio top-cited [--top N] [--year Y] [--journal J] [--type T]
-    scholaraio refs <paper-id>
-    scholaraio citing <paper-id>
-    scholaraio shared-refs <id1> <id2> ... [--min N]
-    scholaraio refetch [<paper-id> | --all] [--force]
-    scholaraio rename [<paper-id> | --all] [--dry-run]
-    scholaraio audit [--severity error|warning|info]
-    scholaraio repair <paper-id> --title "..." [--doi DOI] [--author NAME] [--year Y] [--no-api] [--dry-run]
-    scholaraio backfill-abstract [--dry-run]
-    scholaraio topics [--build] [--rebuild] [--viz] [--topic ID]
-    scholaraio pipeline <preset> | --steps <s1,s2,...> [--list] [--dry-run] ...
-    scholaraio metrics [--summary] [--last N] [--category CAT] [--since DATE]
-    scholaraio setup [check] [--lang en|zh]
-    scholaraio migrate-dirs [--execute]
-    scholaraio explore fetch --issn <ISSN> [--name NAME] [--year-range Y]
-    scholaraio explore embed --name <NAME> [--rebuild]
-    scholaraio explore topics --name <NAME> [--build] [--rebuild] [--topic ID]
-    scholaraio explore search --name <NAME> <query> [--top N]
-    scholaraio explore viz --name <NAME>
-    scholaraio explore info [--name NAME]
-    scholaraio export bibtex [<paper-id> ...] [--all] [--year Y] [--journal J] [-o FILE]
-    scholaraio import-endnote <file.xml|file.ris> [--no-api] [--dry-run] [--no-convert]
-    scholaraio import-zotero [--api-key KEY] [--library-id ID] [--local PATH] [--list-collections] ...
-    scholaraio attach-pdf <paper-id> <path/to/paper.pdf>
-"""
+"""ScholarAIO CLI - AI-powered research terminal command-line interface."""
 
 from __future__ import annotations
 
@@ -45,8 +7,68 @@ import logging
 import sys
 from pathlib import Path
 
-from scholaraio.config import load_config
+from scholaraio.config import (
+    load_config,
+    resolve_mineru,
+    resolve_zotero_api_key,
+    resolve_zotero_library_id,
+)
 from scholaraio.log import ui
+from scholaraio.skills import get_all_skills, build_skills_dict
+
+# Backward compatibility alias - SKILLS dict from skills module
+SKILLS = build_skills_dict()
+
+
+def _build_skills_epilog() -> str:
+    """Build Skills help text for CLI epilog."""
+    lines = ["\n## Skills (AI Agent Commands)\n", "Available skills:\n"]
+    for skill in get_all_skills():
+        lines.append(f"### {skill.name}")
+        lines.append(f"  {skill.description}")
+        lines.append(f"  Usage: {skill.usage}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _show_philosophy() -> str:
+    """Display project design philosophy."""
+    return """
++=========================================================================+
+|                         ScholarAIO Design Philosophy                        |
++=========================================================================+
+|
+|  1. Local-First                                                              |
+|     * All data stored locally (privacy, offline capability)                 |
+|     * No cloud sync, no external dependencies for core features            |
+|
+|  2. AI-Native                                                                |
+|     * Designed for AI coding agents, not end users                          |
+|     * Machine-friendly output (JSON)                                        |
+|     * MCP server integrated for agent workflows                             |
+|
+|  3. Minimal but Complete                                                     |
+|     * PDF parsing (MinerU) -> structured Markdown                           |
+|     * Hybrid search (FTS5 + Vector + RRF fusion)                           |
+|     * Topic modeling (BERTopic)                                             |
+|     * Citation graph analysis                                               |
+|
+|  4. Zero Config                                                             |
+|     * Environment variables auto-detected                                    |
+|     * Smart defaults for all settings                                       |
+|     * Cross-platform (Linux / macOS / Windows)                              |
+|
++=========================================================================+
+
+Quick Start:
+  1. Install: uv tool install -e .  (or pip install -e .)
+  2. Configure: export SCHOLARAIO_LLM_API_KEY=your-key
+  3. Ingest: echo "*.pdf" -> data/inbox/ && scholaraio pipeline full
+  4. Search: scholaraio search "your topic"
+
+For more: scholaraio --help
+"""
+
 
 _log = logging.getLogger(__name__)
 
@@ -61,12 +83,19 @@ def _resolve_top(args: argparse.Namespace, default: int) -> int:
 
 
 def _add_filter_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--year", type=str, default=None,
-                        help="年份过滤：2023 / 2020-2024 / 2020-")
-    parser.add_argument("--journal", type=str, default=None,
-                        help="期刊名过滤（模糊匹配）")
-    parser.add_argument("--type", type=str, default=None, dest="paper_type",
-                        help="论文类型过滤：review / journal-article 等（模糊匹配）")
+    parser.add_argument(
+        "--year", type=str, default=None, help="年份过滤：2023 / 2020-2024 / 2020-"
+    )
+    parser.add_argument(
+        "--journal", type=str, default=None, help="期刊名过滤（模糊匹配）"
+    )
+    parser.add_argument(
+        "--type",
+        type=str,
+        default=None,
+        dest="paper_type",
+        help="论文类型过滤：review / journal-article 等（模糊匹配）",
+    )
 
 
 def _resolve_ws_paper_ids(args: argparse.Namespace, cfg) -> set[str] | None:
@@ -74,6 +103,7 @@ def _resolve_ws_paper_ids(args: argparse.Namespace, cfg) -> set[str] | None:
     if not ws_name:
         return None
     from scholaraio import workspace
+
     ws_dir = cfg._root / "workspace" / ws_name
     pids = workspace.read_paper_ids(ws_dir)
     if not pids:
@@ -110,6 +140,65 @@ def _check_import_error(e: ImportError) -> None:
 
 
 # ============================================================================
+#  Command builder helpers (reduce argparse boilerplate)
+# ============================================================================
+
+
+def _add_command(
+    sub,
+    name: str,
+    func,
+    help_zh: str,
+    args: list,
+    with_filters: bool = False,
+):
+    """Helper to reduce subcommand boilerplate.
+
+    Args:
+        sub: The subparsers object from argparse
+        name: Command name
+        func: Handler function for this command
+        help_zh: Chinese help text for argparse
+        args: List of argument configs. Each config is a dict with:
+            - For positional args: {"name": "xxx", ...other kwargs...}
+            - For optional args: {"--xxx": {"action": ..., "help": ...}}
+        with_filters: Whether to add --year/--journal/--type filters
+
+    Returns:
+        The created subparser for further customization
+    """
+    p = sub.add_parser(name, help=help_zh)
+    p.set_defaults(func=func)
+    for arg in args:
+        if "name" in arg:
+            # Positional argument: {"name": "query", "nargs": "+", ...}
+            positional_name = arg.pop("name")
+            p.add_argument(positional_name, **arg)
+        else:
+            # Optional argument: {"--rebuild": {"action": "store_true"}}
+            for flag, kwargs in arg.items():
+                p.add_argument(flag, **kwargs)
+    if with_filters:
+        _add_filter_args(p)
+    return p
+
+
+def _add_subcommand(
+    parent_sub,
+    name: str,
+    func,
+    help_zh: str,
+    args: list,
+):
+    """Helper for nested subcommands (e.g., explore fetch, ws add)."""
+    p = parent_sub.add_parser(name, help=help_zh)
+    p.set_defaults(func=func)
+    for arg in args:
+        p.add_argument(**arg)
+    return p
+
+
+# ============================================================================
 #  Commands
 # ============================================================================
 
@@ -135,8 +224,14 @@ def cmd_search_author(args: argparse.Namespace, cfg) -> None:
 
     query = " ".join(args.query)
     try:
-        results = search_author(query, cfg.index_db, top_k=_resolve_top(args, cfg.search.top_k),
-                                year=args.year, journal=args.journal, paper_type=args.paper_type)
+        results = search_author(
+            query,
+            cfg.index_db,
+            top_k=_resolve_top(args, cfg.search.top_k),
+            year=args.year,
+            journal=args.journal,
+            paper_type=args.paper_type,
+        )
     except FileNotFoundError as e:
         _log.error("%s", e)
         sys.exit(1)
@@ -155,8 +250,14 @@ def cmd_search(args: argparse.Namespace, cfg) -> None:
 
     query = " ".join(args.query)
     try:
-        results = search(query, cfg.index_db, top_k=_resolve_top(args, cfg.search.top_k),
-                         year=args.year, journal=args.journal, paper_type=args.paper_type)
+        results = search(
+            query,
+            cfg.index_db,
+            top_k=_resolve_top(args, cfg.search.top_k),
+            year=args.year,
+            journal=args.journal,
+            paper_type=args.paper_type,
+        )
     except FileNotFoundError as e:
         _log.error("%s", e)
         sys.exit(1)
@@ -173,39 +274,39 @@ def cmd_search(args: argparse.Namespace, cfg) -> None:
 
 
 def cmd_show(args: argparse.Namespace, cfg) -> None:
-    from scholaraio.loader import load_l1, load_l2, load_l3, load_l4
+    from scholaraio.loader import PaperData
 
     paper_d = _resolve_paper(args.paper_id, cfg)
-    json_path = paper_d / "meta.json"
-    md_path = paper_d / "paper.md"
+    paper = PaperData.from_dir(paper_d)
 
-    l1 = load_l1(json_path)
-    _print_header(l1)
+    _print_header(paper)
 
     if args.layer == 1:
         return
 
     if args.layer == 2:
-        abstract = load_l2(json_path)
         ui("\n--- Abstract ---\n")
-        ui(abstract)
+        ui(paper.abstract)
         return
 
     if args.layer == 3:
-        conclusion = load_l3(json_path)
+        conclusion = paper.conclusion
         if conclusion is None:
-            _log.error("L3 not extracted yet. Run: scholaraio enrich-l3 %s", args.paper_id)
+            _log.error(
+                "L3 not extracted yet. Run: scholaraio enrich-l3 %s", args.paper_id
+            )
             sys.exit(1)
         ui("\n--- Conclusion ---\n")
         ui(conclusion)
         return
 
     if args.layer == 4:
-        if not md_path.exists():
-            _log.error("paper.md not found: %s", md_path)
+        content = paper.content
+        if content is None:
+            _log.error("paper.md not found: %s", paper_d / "paper.md")
             sys.exit(1)
         ui("\n--- Full Text ---\n")
-        ui(load_l4(md_path))
+        ui(content)
         return
 
 
@@ -235,8 +336,15 @@ def cmd_vsearch(args: argparse.Namespace, cfg) -> None:
 
     query = " ".join(args.query)
     try:
-        results = vsearch(query, cfg.index_db, top_k=_resolve_top(args, cfg.embed.top_k), cfg=cfg,
-                          year=args.year, journal=args.journal, paper_type=args.paper_type)
+        results = vsearch(
+            query,
+            cfg.index_db,
+            top_k=_resolve_top(args, cfg.embed.top_k),
+            cfg=cfg,
+            year=args.year,
+            journal=args.journal,
+            paper_type=args.paper_type,
+        )
     except FileNotFoundError as e:
         _log.error("%s", e)
         sys.exit(1)
@@ -256,10 +364,13 @@ def cmd_usearch(args: argparse.Namespace, cfg) -> None:
 
     query = " ".join(args.query)
     results = unified_search(
-        query, cfg.index_db,
+        query,
+        cfg.index_db,
         top_k=_resolve_top(args, cfg.search.top_k),
         cfg=cfg,
-        year=args.year, journal=args.journal, paper_type=args.paper_type,
+        year=args.year,
+        journal=args.journal,
+        paper_type=args.paper_type,
     )
 
     if not results:
@@ -292,8 +403,12 @@ def cmd_audit(args: argparse.Namespace, cfg) -> None:
 
 def cmd_repair(args: argparse.Namespace, cfg) -> None:
     from scholaraio.ingest.metadata import (
-        PaperMetadata, enrich_metadata, write_metadata_json,
-        generate_new_stem, rename_files, _extract_lastname,
+        PaperMetadata,
+        enrich_metadata,
+        write_metadata_json,
+        generate_new_stem,
+        rename_files,
+        _extract_lastname,
     )
     import json
 
@@ -331,7 +446,9 @@ def cmd_repair(args: argparse.Namespace, cfg) -> None:
 
     ui(f"Repair: {paper_id}")
     ui(f"  Title:  {meta.title}")
-    ui(f"  Author: {meta.first_author or '?'} | Year: {meta.year or '?'} | DOI: {meta.doi or 'none'}")
+    ui(
+        f"  Author: {meta.first_author or '?'} | Year: {meta.year or '?'} | DOI: {meta.doi or 'none'}"
+    )
 
     # API enrichment
     if not args.no_api:
@@ -372,39 +489,36 @@ def cmd_repair(args: argparse.Namespace, cfg) -> None:
 
 
 def cmd_enrich_toc(args: argparse.Namespace, cfg) -> None:
-    from scholaraio.loader import enrich_toc
+    from scholaraio.loader import PaperEnricher
     from scholaraio.papers import iter_paper_dirs
 
     papers_dir = cfg.papers_dir
+    enricher = PaperEnricher(papers_dir)
 
     if args.all:
-        targets = sorted(d / "meta.json" for d in iter_paper_dirs(papers_dir))
+        paper_ids = [d.name for d in iter_paper_dirs(papers_dir)]
     elif args.paper_id:
-        targets = [papers_dir / args.paper_id / "meta.json"]
+        paper_ids = [args.paper_id]
     else:
         _log.error("Please specify <paper-id> or --all")
         sys.exit(1)
 
     ok = fail = skip = 0
-    for json_path in targets:
-        md_path = json_path.parent / "paper.md"
-        if not md_path.exists():
-            _log.error("Skipped (no paper.md): %s", json_path.parent.name)
+    for paper_id in paper_ids:
+        paper_dir = papers_dir / paper_id
+        if not (paper_dir / "paper.md").exists():
+            _log.error("Skipped (no paper.md): %s", paper_id)
             skip += 1
             continue
 
-        ui(f"\n{json_path.parent.name}")
-        success = enrich_toc(
-            json_path, md_path, cfg,
-            force=args.force,
-            inspect=args.inspect,
-        )
+        ui(f"\n{paper_id}")
+        success = enricher.enrich_toc(paper_id, cfg, force=args.force)
         if success:
             ok += 1
         else:
             fail += 1
 
-    if args.all or len(targets) > 1:
+    if args.all or len(paper_ids) > 1:
         ui(f"\nDone: {ok} ok | {fail} failed | {skip} skipped")
 
 
@@ -423,7 +537,9 @@ def cmd_pipeline(args: argparse.Namespace, cfg) -> None:
     # Resolve step list
     if args.preset:
         if args.preset not in PRESETS:
-            _log.error("Unknown preset '%s'. Available: %s", args.preset, ', '.join(PRESETS))
+            _log.error(
+                "Unknown preset '%s'. Available: %s", args.preset, ", ".join(PRESETS)
+            )
             sys.exit(1)
         step_names = PRESETS[args.preset]
     elif args.steps:
@@ -433,12 +549,12 @@ def cmd_pipeline(args: argparse.Namespace, cfg) -> None:
         sys.exit(1)
 
     opts = {
-        "dry_run":     args.dry_run,
-        "no_api":      args.no_api,
-        "force":       args.force,
-        "inspect":     args.inspect,
+        "dry_run": args.dry_run,
+        "no_api": args.no_api,
+        "force": args.force,
+        "inspect": args.inspect,
         "max_retries": args.max_retries,
-        "rebuild":     args.rebuild,
+        "rebuild": args.rebuild,
     }
     if args.inbox:
         opts["inbox_dir"] = Path(args.inbox).resolve()
@@ -449,42 +565,36 @@ def cmd_pipeline(args: argparse.Namespace, cfg) -> None:
 
 
 def cmd_enrich_l3(args: argparse.Namespace, cfg) -> None:
-    from scholaraio.loader import enrich_l3
+    from scholaraio.loader import PaperEnricher
     from scholaraio.papers import iter_paper_dirs
 
     papers_dir = cfg.papers_dir
+    enricher = PaperEnricher(papers_dir)
 
     if args.all:
-        targets = sorted(d / "meta.json" for d in iter_paper_dirs(papers_dir))
+        paper_ids = [d.name for d in iter_paper_dirs(papers_dir)]
     elif args.paper_id:
-        targets = [papers_dir / args.paper_id / "meta.json"]
+        paper_ids = [args.paper_id]
     else:
         _log.error("Please specify <paper-id> or --all")
         sys.exit(1)
 
     ok = fail = skip = 0
-    for json_path in targets:
-        md_path = json_path.parent / "paper.md"
-        if not md_path.exists():
-            _log.error("Skipped (no paper.md): %s", json_path.parent.name)
+    for paper_id in paper_ids:
+        paper_dir = papers_dir / paper_id
+        if not (paper_dir / "paper.md").exists():
+            _log.error("Skipped (no paper.md): %s", paper_id)
             skip += 1
             continue
 
-        ui(f"\n{json_path.parent.name}")
-        success = enrich_l3(
-            json_path,
-            md_path,
-            cfg,
-            force=args.force,
-            max_retries=args.max_retries,
-            inspect=args.inspect,
-        )
+        ui(f"\n{paper_id}")
+        success = enricher.enrich_conclusion(paper_id, cfg, force=args.force)
         if success:
             ok += 1
         else:
             fail += 1
 
-    if args.all or len(targets) > 1:
+    if args.all or len(paper_ids) > 1:
         ui(f"\nDone: {ok} ok | {fail} failed | {skip} skipped")
 
 
@@ -492,8 +602,13 @@ def cmd_top_cited(args: argparse.Namespace, cfg) -> None:
     from scholaraio.index import top_cited
 
     try:
-        results = top_cited(cfg.index_db, top_k=_resolve_top(args, cfg.search.top_k),
-                            year=args.year, journal=args.journal, paper_type=args.paper_type)
+        results = top_cited(
+            cfg.index_db,
+            top_k=_resolve_top(args, cfg.search.top_k),
+            year=args.year,
+            journal=args.journal,
+            paper_type=args.paper_type,
+        )
     except FileNotFoundError as e:
         _log.error("%s", e)
         sys.exit(1)
@@ -525,7 +640,9 @@ def cmd_refs(args: argparse.Namespace, cfg) -> None:
     out_lib = [r for r in refs if not r.get("target_id")]
 
     scope = f"工作区 {args.ws}" if getattr(args, "ws", None) else "库内"
-    ui(f"参考文献共 {len(refs)} 篇（{scope} {len(in_lib)} 篇，库外 {len(out_lib)} 篇）\n")
+    ui(
+        f"参考文献共 {len(refs)} 篇（{scope} {len(in_lib)} 篇，库外 {len(out_lib)} 篇）\n"
+    )
 
     if in_lib:
         ui("── 库内 ──")
@@ -583,7 +700,9 @@ def cmd_shared_refs(args: argparse.Namespace, cfg) -> None:
 
     min_shared = args.min or 2
     pids = _resolve_ws_paper_ids(args, cfg)
-    results = get_shared_references(paper_uuids, cfg.index_db, min_shared=min_shared, paper_ids=pids)
+    results = get_shared_references(
+        paper_uuids, cfg.index_db, min_shared=min_shared, paper_ids=pids
+    )
     if not results:
         ui(f"没有找到被 ≥{min_shared} 篇论文共同引用的参考文献。")
         return
@@ -690,6 +809,7 @@ def _write_all_viz(model, viz_dir: Path) -> None:
         visualize_topics_2d,
         visualize_topics_over_time,
     )
+
     viz_dir.mkdir(parents=True, exist_ok=True)
     _log.debug("generating visualizations")
 
@@ -734,7 +854,11 @@ def cmd_topics(args: argparse.Namespace, cfg) -> None:
         return {0: "auto", -1: None}.get(raw, raw)
 
     if args.build or args.rebuild:
-        min_ts = args.min_topic_size if args.min_topic_size is not None else cfg.topics.min_topic_size
+        min_ts = (
+            args.min_topic_size
+            if args.min_topic_size is not None
+            else cfg.topics.min_topic_size
+        )
         ui(f"{'Rebuilding' if args.rebuild else 'Building'} topic model...")
         model = build_topics(
             cfg.index_db,
@@ -759,6 +883,7 @@ def cmd_topics(args: argparse.Namespace, cfg) -> None:
     # Manual merge
     if args.merge:
         from scholaraio.topics import merge_topics_by_ids
+
         # Parse "1,6,14+3,5" → [[1,6,14],[3,5]]
         groups = []
         for group_str in args.merge.split("+"):
@@ -792,7 +917,10 @@ def cmd_topics(args: argparse.Namespace, cfg) -> None:
             papers = papers[:top_n]
         for i, p in enumerate(papers, 1):
             cc = p.get("citation_count", {})
-            best = max((v for v in (cc or {}).values() if isinstance(v, (int, float))), default=0)
+            best = max(
+                (v for v in (cc or {}).values() if isinstance(v, (int, float))),
+                default=0,
+            )
             cite_str = f"  [cited: {best}]" if best else ""
             authors = p.get("authors", "")
             first_author = authors.split(",")[0].strip() if authors else ""
@@ -808,7 +936,9 @@ def cmd_topics(args: argparse.Namespace, cfg) -> None:
     # Default: show overview
     overview = get_topic_overview(model)
     if not overview:
-        ui("No valid topics found. Try reducing topics.min_topic_size or adding more papers.")
+        ui(
+            "No valid topics found. Try reducing topics.min_topic_size or adding more papers."
+        )
         return
 
     outliers = get_outliers(model)
@@ -839,10 +969,14 @@ def cmd_backfill_abstract(args: argparse.Namespace, cfg) -> None:
     doi_fetch = getattr(args, "doi_fetch", False)
     source = "DOI official source" if doi_fetch else "local .md + LLM fallback"
     ui(f"{action} abstract ({source})...\n")
-    stats = backfill_abstracts(papers_dir, dry_run=args.dry_run,
-                               doi_fetch=doi_fetch, cfg=cfg)
-    parts = [f"{stats['filled']} filled", f"{stats['skipped']} skipped",
-             f"{stats['failed']} failed"]
+    stats = backfill_abstracts(
+        papers_dir, dry_run=args.dry_run, doi_fetch=doi_fetch, cfg=cfg
+    )
+    parts = [
+        f"{stats['filled']} filled",
+        f"{stats['skipped']} skipped",
+        f"{stats['failed']} failed",
+    ]
     if stats.get("updated"):
         parts.insert(1, f"{stats['updated']} updated from official")
     ui(f"\nDone: {' | '.join(parts)}")
@@ -856,6 +990,7 @@ def cmd_explore(args: argparse.Namespace, cfg) -> None:
     if action == "fetch":
         name = args.name or args.issn.replace("-", "")
         from scholaraio.explore import fetch_journal
+
         total = fetch_journal(name, args.issn, year_range=args.year_range, cfg=cfg)
         ui(f"\nFetched {total} papers")
 
@@ -873,7 +1008,11 @@ def cmd_explore(args: argparse.Namespace, cfg) -> None:
         except ImportError as e:
             _check_import_error(e)
         try:
-            from scholaraio.topics import get_topic_overview, get_topic_papers, load_model
+            from scholaraio.topics import (
+                get_topic_overview,
+                get_topic_papers,
+                load_model,
+            )
         except ImportError as e:
             _check_import_error(e)
 
@@ -882,19 +1021,24 @@ def cmd_explore(args: argparse.Namespace, cfg) -> None:
         if args.build or args.rebuild:
             nr_topics = args.nr_topics
             info = build_explore_topics(
-                args.name, rebuild=args.rebuild,
+                args.name,
+                rebuild=args.rebuild,
                 min_topic_size=args.min_topic_size or 30,
                 nr_topics=nr_topics,
                 cfg=cfg,
             )
-            ui(f"\nClustering done: {info['n_topics']} topics, "
-                  f"{info['n_outliers']} outliers, "
-                  f"{info['n_papers']} papers")
+            ui(
+                f"\nClustering done: {info['n_topics']} topics, "
+                f"{info['n_outliers']} outliers, "
+                f"{info['n_papers']} papers"
+            )
 
         try:
             model = load_model(model_dir)
         except FileNotFoundError:
-            ui("No topic model. Run scholaraio explore topics --name <name> --build first.")
+            ui(
+                "No topic model. Run scholaraio explore topics --name <name> --build first."
+            )
             return
 
         if args.topic is not None:
@@ -904,7 +1048,10 @@ def cmd_explore(args: argparse.Namespace, cfg) -> None:
             ui(f"Topic {args.topic}: {len(papers)} papers\n")
             for i, p in enumerate(papers, 1):
                 cc = p.get("citation_count", {})
-                best = max((v for v in (cc or {}).values() if isinstance(v, (int, float))), default=0)
+                best = max(
+                    (v for v in (cc or {}).values() if isinstance(v, (int, float))),
+                    default=0,
+                )
                 cite_str = f"  [cited: {best}]" if best else ""
                 authors = p.get("authors", "")
                 first_author = authors.split(",")[0].strip() if authors else ""
@@ -917,9 +1064,12 @@ def cmd_explore(args: argparse.Namespace, cfg) -> None:
 
         overview = get_topic_overview(model)
         if not overview:
-            ui("No valid topics. Run scholaraio explore topics --name <name> --build first.")
+            ui(
+                "No valid topics. Run scholaraio explore topics --name <name> --build first."
+            )
             return
         from scholaraio.topics import get_outliers
+
         outliers = get_outliers(model)
         total = sum(t["count"] for t in overview) + len(outliers)
         ui(f"\n{len(overview)} topics, {total} papers, {len(outliers)} outliers\n")
@@ -931,7 +1081,10 @@ def cmd_explore(args: argparse.Namespace, cfg) -> None:
                 if len(title) > 65:
                     title = title[:62] + "..."
                 cc = p.get("citation_count", {})
-                best = max((v for v in (cc or {}).values() if isinstance(v, (int, float))), default=0)
+                best = max(
+                    (v for v in (cc or {}).values() if isinstance(v, (int, float))),
+                    default=0,
+                )
                 cite_str = f"  [cited: {best}]" if best else ""
                 ui(f"    [{p.get('year', '?')}] {title}{cite_str}")
             ui()
@@ -942,7 +1095,9 @@ def cmd_explore(args: argparse.Namespace, cfg) -> None:
             from scholaraio.explore import explore_vsearch
         except ImportError as e:
             _check_import_error(e)
-        results = explore_vsearch(args.name, query, top_k=_resolve_top(args, 10), cfg=cfg)
+        results = explore_vsearch(
+            args.name, query, top_k=_resolve_top(args, 10), cfg=cfg
+        )
         if not results:
             ui("No results found.")
             return
@@ -952,7 +1107,9 @@ def cmd_explore(args: argparse.Namespace, cfg) -> None:
             cited = r.get("cited_by_count", 0)
             cite_str = f"  [cited: {cited}]" if cited else ""
             ui(f"[{i}] [{r.get('year', '?')}] {r.get('title', '')}")
-            ui(f"     {first} | {r.get('doi', '')}  (score: {r['score']:.3f}){cite_str}")
+            ui(
+                f"     {first} | {r.get('doi', '')}  (score: {r['score']:.3f}){cite_str}"
+            )
             ui()
 
     elif action == "viz":
@@ -965,27 +1122,35 @@ def cmd_explore(args: argparse.Namespace, cfg) -> None:
         try:
             model = load_model(model_dir)
         except FileNotFoundError:
-            ui("No topic model. Run scholaraio explore topics --name <name> --build first.")
+            ui(
+                "No topic model. Run scholaraio explore topics --name <name> --build first."
+            )
             return
         _write_all_viz(model, model_dir / "viz")
 
     elif action == "info":
         import json as _json
+
         if not args.name:
             # List all explore libraries
             explore_root = cfg._root / "data" / "explore"
             if not explore_root.exists():
-                ui("No explore libraries. Use scholaraio explore fetch --issn <ISSN> to create one.")
+                ui(
+                    "No explore libraries. Use scholaraio explore fetch --issn <ISSN> to create one."
+                )
                 return
             for d in sorted(explore_root.iterdir()):
                 meta_file = d / "meta.json"
                 if meta_file.exists():
                     meta = _json.loads(meta_file.read_text("utf-8"))
-                    ui(f"  {d.name}: {meta.get('count', '?')} papers "
-                          f"(ISSN {meta.get('issn', '?')}, "
-                          f"fetched {meta.get('fetched_at', '?')})")
+                    ui(
+                        f"  {d.name}: {meta.get('count', '?')} papers "
+                        f"(ISSN {meta.get('issn', '?')}, "
+                        f"fetched {meta.get('fetched_at', '?')})"
+                    )
             return
         from scholaraio.explore import count_papers
+
         meta_file = cfg._root / "data" / "explore" / args.name / "meta.json"
         if meta_file.exists():
             meta = _json.loads(meta_file.read_text("utf-8"))
@@ -1133,17 +1298,21 @@ def cmd_ws(args: argparse.Namespace, cfg) -> None:
             return
         query = " ".join(args.query)
         from scholaraio.index import unified_search
+
         results = unified_search(
-            query, cfg.index_db,
+            query,
+            cfg.index_db,
             top_k=_resolve_top(args, cfg.search.top_k),
             cfg=cfg,
-            year=args.year, journal=args.journal, paper_type=args.paper_type,
+            year=args.year,
+            journal=args.journal,
+            paper_type=args.paper_type,
             paper_ids=pids,
         )
         if not results:
             ui(f'工作区 {args.name} 中未找到 "{query}" 的结果')
             return
-        ui(f'工作区 {args.name} 中找到 {len(results)} 篇:\n')
+        ui(f"工作区 {args.name} 中找到 {len(results)} 篇:\n")
         for i, r in enumerate(results, 1):
             _print_search_result(i, r, extra=f" [{r.get('match', '')}]")
 
@@ -1154,10 +1323,12 @@ def cmd_ws(args: argparse.Namespace, cfg) -> None:
             ui("工作区为空")
             return
         from scholaraio.export import export_bibtex
+
         bib = export_bibtex(
             cfg.papers_dir,
             paper_ids=list(dir_names),
-            year=args.year, journal=args.journal,
+            year=args.year,
+            journal=args.journal,
         )
         if not bib:
             ui("未找到匹配的论文")
@@ -1178,6 +1349,7 @@ def cmd_ws(args: argparse.Namespace, cfg) -> None:
 
 def cmd_metrics(args: argparse.Namespace, cfg) -> None:
     from scholaraio.metrics import get_store
+
     store = get_store()
     if not store:
         _log.error("Metrics database not initialized.")
@@ -1204,7 +1376,9 @@ def cmd_metrics(args: argparse.Namespace, cfg) -> None:
 
     # Header
     if args.category == "llm":
-        ui(f"{'time':<20s} {'purpose':<24s} {'prompt':>8s} {'compl':>8s} {'total':>8s} {'time':>7s} {'status':<5s}")
+        ui(
+            f"{'time':<20s} {'purpose':<24s} {'prompt':>8s} {'compl':>8s} {'total':>8s} {'time':>7s} {'status':<5s}"
+        )
         ui("-" * 82)
         total_in = total_out = 0
         for r in reversed(rows):
@@ -1215,9 +1389,13 @@ def cmd_metrics(args: argparse.Namespace, cfg) -> None:
             dur = r["duration_s"] or 0
             total_in += t_in
             total_out += t_out
-            ui(f"{ts:<20s} {name:<24s} {t_in:>8,d} {t_out:>8,d} {t_in+t_out:>8,d} {dur:>6.1f}s {r['status']:<5s}")
+            ui(
+                f"{ts:<20s} {name:<24s} {t_in:>8,d} {t_out:>8,d} {t_in + t_out:>8,d} {dur:>6.1f}s {r['status']:<5s}"
+            )
         ui("-" * 82)
-        ui(f"{'total':<20s} {'':<24s} {total_in:>8,d} {total_out:>8,d} {total_in+total_out:>8,d}")
+        ui(
+            f"{'total':<20s} {'':<24s} {total_in:>8,d} {total_out:>8,d} {total_in + total_out:>8,d}"
+        )
     else:
         ui(f"{'time':<20s} {'name':<32s} {'time':>7s} {'status':<5s}")
         ui("-" * 66)
@@ -1242,10 +1420,13 @@ def cmd_setup(args: argparse.Namespace, cfg) -> None:
 
 def cmd_migrate_dirs(args: argparse.Namespace, cfg) -> None:
     from scholaraio.migrate import migrate_to_dirs
+
     dry_run = not args.execute
     stats = migrate_to_dirs(cfg.papers_dir, dry_run=dry_run)
     mode = "dry-run" if dry_run else "executed"
-    ui(f"\n迁移完成 ({mode}): {stats['migrated']} 迁移 | {stats['skipped']} 跳过 | {stats['failed']} 失败")
+    ui(
+        f"\n迁移完成 ({mode}): {stats['migrated']} 迁移 | {stats['skipped']} 跳过 | {stats['failed']} 失败"
+    )
     if dry_run and stats["migrated"]:
         ui("添加 --execute 以实际执行迁移")
     if not dry_run and stats["migrated"]:
@@ -1278,7 +1459,8 @@ def cmd_import_endnote(args: argparse.Namespace, cfg) -> None:
         ui(f"解析到 {len(records)} 条记录")
 
     stats = import_external(
-        records, cfg,
+        records,
+        cfg,
         pdf_paths=pdf_paths,
         no_api=args.no_api,
         dry_run=args.dry_run,
@@ -1291,7 +1473,6 @@ def cmd_import_endnote(args: argparse.Namespace, cfg) -> None:
 
 def _batch_convert_pdfs(cfg) -> None:
     """Convert all unprocessed PDFs in papers_dir to paper.md via MinerU."""
-    import json
     import shutil
 
     from scholaraio.papers import iter_paper_dirs
@@ -1313,7 +1494,7 @@ def _batch_convert_pdfs(cfg) -> None:
     use_local = check_server(cfg.ingest.mineru_endpoint)
     api_key = None
     if not use_local:
-        api_key = cfg.resolved_mineru_api_key()
+        api_key = resolve_mineru(cfg)
         if not api_key:
             ui("错误：MinerU 不可达且无云 API key，无法批量转换")
             return
@@ -1322,7 +1503,7 @@ def _batch_convert_pdfs(cfg) -> None:
 
     converted = 0
     for idx, (pdir, pdf_path) in enumerate(to_convert):
-        ui(f"[{idx+1}/{len(to_convert)}] {pdir.name}")
+        ui(f"[{idx + 1}/{len(to_convert)}] {pdir.name}")
 
         mineru_opts = ConvertOptions(
             api_url=cfg.ingest.mineru_endpoint,
@@ -1333,8 +1514,10 @@ def _batch_convert_pdfs(cfg) -> None:
             result = convert_pdf(pdf_path, mineru_opts)
         else:
             from scholaraio.ingest.mineru import convert_pdf_cloud
+
             result = convert_pdf_cloud(
-                pdf_path, mineru_opts,
+                pdf_path,
+                mineru_opts,
                 api_key=api_key,
                 cloud_url=cfg.ingest.mineru_cloud_url,
             )
@@ -1368,9 +1551,11 @@ def _batch_convert_pdfs(cfg) -> None:
         # Backfill abstract if missing
         try:
             from scholaraio.papers import read_meta, write_meta
+
             data = read_meta(pdir)
             if not data.get("abstract") and paper_md.exists():
                 from scholaraio.ingest.metadata import extract_abstract_from_md
+
                 abstract = extract_abstract_from_md(paper_md, cfg)
                 if abstract:
                     data["abstract"] = abstract
@@ -1385,6 +1570,7 @@ def _batch_convert_pdfs(cfg) -> None:
     # Re-embed + re-index once
     if converted:
         from scholaraio.ingest.pipeline import step_embed, step_index
+
         step_embed(cfg.papers_dir, cfg, {"dry_run": False, "rebuild": False})
         step_index(cfg.papers_dir, cfg, {"dry_run": False, "rebuild": False})
 
@@ -1393,8 +1579,8 @@ def cmd_import_zotero(args: argparse.Namespace, cfg) -> None:
     import tempfile
 
     # Resolve credentials
-    api_key = args.api_key or cfg.resolved_zotero_api_key()
-    library_id = args.library_id or cfg.resolved_zotero_library_id()
+    api_key = args.api_key or resolve_zotero_api_key(cfg)
+    library_id = args.library_id or resolve_zotero_library_id(cfg)
     library_type = args.library_type or cfg.zotero.library_type
 
     # Local SQLite mode
@@ -1425,10 +1611,14 @@ def cmd_import_zotero(args: argparse.Namespace, cfg) -> None:
     else:
         # Web API mode
         if not api_key:
-            ui("错误：需要 Zotero API key（--api-key 或 config.local.yaml zotero.api_key 或 ZOTERO_API_KEY 环境变量）")
+            ui(
+                "错误：需要 Zotero API key（--api-key 或 config.local.yaml zotero.api_key 或 ZOTERO_API_KEY 环境变量）"
+            )
             sys.exit(1)
         if not library_id:
-            ui("错误：需要 Zotero library ID（--library-id 或 config.local.yaml zotero.library_id 或 ZOTERO_LIBRARY_ID 环境变量）")
+            ui(
+                "错误：需要 Zotero library ID（--library-id 或 config.local.yaml zotero.library_id 或 ZOTERO_LIBRARY_ID 环境变量）"
+            )
             sys.exit(1)
 
         try:
@@ -1437,7 +1627,9 @@ def cmd_import_zotero(args: argparse.Namespace, cfg) -> None:
             _check_import_error(e)
 
         if args.list_collections:
-            collections = list_collections_api(library_id, api_key, library_type=library_type)
+            collections = list_collections_api(
+                library_id, api_key, library_type=library_type
+            )
             if not collections:
                 ui("没有找到 collections")
                 return
@@ -1448,10 +1640,15 @@ def cmd_import_zotero(args: argparse.Namespace, cfg) -> None:
             return
 
         download_pdfs = not args.no_pdf
-        pdf_dir = Path(tempfile.mkdtemp(prefix="scholaraio_zotero_")) if download_pdfs else None
+        pdf_dir = (
+            Path(tempfile.mkdtemp(prefix="scholaraio_zotero_"))
+            if download_pdfs
+            else None
+        )
 
         records, pdf_paths = fetch_zotero_api(
-            library_id, api_key,
+            library_id,
+            api_key,
             library_type=library_type,
             collection_key=args.collection,
             item_types=args.item_type,
@@ -1472,7 +1669,8 @@ def cmd_import_zotero(args: argparse.Namespace, cfg) -> None:
     from scholaraio.ingest.pipeline import import_external
 
     stats = import_external(
-        records, cfg,
+        records,
+        cfg,
         pdf_paths=pdf_paths,
         no_api=args.no_api,
         dry_run=args.dry_run,
@@ -1484,25 +1682,33 @@ def cmd_import_zotero(args: argparse.Namespace, cfg) -> None:
 
     # Import collections as workspaces
     if args.import_collections and not args.dry_run:
-        _import_zotero_collections_as_workspaces(args, cfg, api_key, library_id, library_type)
+        _import_zotero_collections_as_workspaces(
+            args, cfg, api_key, library_id, library_type
+        )
 
 
-def _import_zotero_collections_as_workspaces(args, cfg, api_key, library_id, library_type):
+def _import_zotero_collections_as_workspaces(
+    args, cfg, api_key, library_id, library_type
+):
     """Create workspaces from Zotero collections after import."""
-    import json
 
     from scholaraio import workspace
     from scholaraio.papers import iter_paper_dirs
 
     if args.local:
         from scholaraio.sources.zotero import list_collections_local, parse_zotero_local
+
         collections = list_collections_local(Path(args.local))
     else:
         from scholaraio.sources.zotero import list_collections_api
-        collections = list_collections_api(library_id, api_key, library_type=library_type)
+
+        collections = list_collections_api(
+            library_id, api_key, library_type=library_type
+        )
 
     # Build DOI → UUID map from existing papers
     from scholaraio.papers import read_meta
+
     doi_to_uuid: dict[str, str] = {}
     for pdir in iter_paper_dirs(cfg.papers_dir):
         try:
@@ -1520,12 +1726,15 @@ def _import_zotero_collections_as_workspaces(args, cfg, api_key, library_id, lib
         # Get papers in this collection
         if args.local:
             coll_records, _ = parse_zotero_local(
-                Path(args.local), collection_key=coll["key"],
+                Path(args.local),
+                collection_key=coll["key"],
             )
         else:
             from scholaraio.sources.zotero import fetch_zotero_api
+
             coll_records, _ = fetch_zotero_api(
-                library_id, api_key,
+                library_id,
+                api_key,
                 library_type=library_type,
                 collection_key=coll["key"],
                 download_pdfs=False,
@@ -1546,7 +1755,6 @@ def _import_zotero_collections_as_workspaces(args, cfg, api_key, library_id, lib
 
 
 def cmd_attach_pdf(args: argparse.Namespace, cfg) -> None:
-    import json
     import shutil
 
     paper_d = _resolve_paper(args.paper_id, cfg)
@@ -1576,13 +1784,15 @@ def cmd_attach_pdf(args: argparse.Namespace, cfg) -> None:
     if check_server(cfg.ingest.mineru_endpoint):
         result = convert_pdf(dest_pdf, mineru_opts)
     else:
-        api_key = cfg.resolved_mineru_api_key()
+        api_key = resolve_mineru(cfg)
         if not api_key:
             ui("错误：MinerU 不可达且无云 API key")
             sys.exit(1)
         from scholaraio.ingest.mineru import convert_pdf_cloud
+
         result = convert_pdf_cloud(
-            dest_pdf, mineru_opts,
+            dest_pdf,
+            mineru_opts,
             api_key=api_key,
             cloud_url=cfg.ingest.mineru_cloud_url,
         )
@@ -1617,9 +1827,11 @@ def cmd_attach_pdf(args: argparse.Namespace, cfg) -> None:
 
     # Backfill abstract if missing
     from scholaraio.papers import read_meta, write_meta
+
     data = read_meta(paper_d)
     if not data.get("abstract"):
         from scholaraio.ingest.metadata import extract_abstract_from_md
+
         abstract = extract_abstract_from_md(existing_md, cfg)
         if abstract:
             data["abstract"] = abstract
@@ -1628,6 +1840,7 @@ def cmd_attach_pdf(args: argparse.Namespace, cfg) -> None:
 
     # Incremental re-embed + re-index
     from scholaraio.ingest.pipeline import step_embed, step_index
+
     step_embed(cfg.papers_dir, cfg, {"dry_run": False, "rebuild": False})
     step_index(cfg.papers_dir, cfg, {"dry_run": False, "rebuild": False})
 
@@ -1639,17 +1852,20 @@ def cmd_attach_pdf(args: argparse.Namespace, cfg) -> None:
 
 def _print_search_result(idx: int, r: dict, extra: str = "") -> None:
     authors = r.get("authors") or ""
-    author_display = authors.split(",")[0].strip() + (" et al." if "," in authors else "")
+    author_display = authors.split(",")[0].strip() + (
+        " et al." if "," in authors else ""
+    )
     cite = r.get("citation_count") or ""
     cite_suffix = f"  [cited: {cite}]" if cite else ""
     extra_suffix = f"  ({extra})" if extra else ""
     # Prefer dir_name for display, fall back to paper_id (UUID)
     display_id = r.get("dir_name") or r["paper_id"]
     ui(f"[{idx}] {display_id}{extra_suffix}")
-    ui(f"     {author_display} | {r.get('year', '?')} | {r.get('journal', '?')}{cite_suffix}")
+    ui(
+        f"     {author_display} | {r.get('year', '?')} | {r.get('journal', '?')}{cite_suffix}"
+    )
     ui(f"     {r['title']}")
     ui()
-
 
 
 def _format_citations(cc: dict) -> str:
@@ -1682,6 +1898,7 @@ def _resolve_paper(paper_id: str, cfg) -> Path:
         return paper_d
     # 2. Registry lookup (fast, but may be stale)
     from scholaraio.index import lookup_paper
+
     reg = lookup_paper(cfg.index_db, paper_id)
     if reg:
         paper_d = papers_dir / reg["dir_name"]
@@ -1689,6 +1906,7 @@ def _resolve_paper(paper_id: str, cfg) -> Path:
             return paper_d
     # 3. Filesystem scan fallback (handles stale registry / pre-index state)
     from scholaraio.papers import read_meta as _read_meta
+
     for pdir in iter_paper_dirs(papers_dir):
         try:
             data = _read_meta(pdir)
@@ -1701,20 +1919,26 @@ def _resolve_paper(paper_id: str, cfg) -> Path:
     sys.exit(1)
 
 
-def _print_header(l1: dict) -> None:
+def _print_header(paper_data) -> None:
+    """Print paper header info from PaperData object.
+
+    Args:
+        paper_data: PaperData instance.
+    """
+    l1 = paper_data.to_dict()
     authors = l1.get("authors") or []
     author_str = ", ".join(authors[:3])
     if len(authors) > 3:
         author_str += f" et al. ({len(authors)} total)"
-    ui(f"paper_id : {l1['paper_id']}")
-    ui(f"title    : {l1['title']}")
+    ui(f"paper_id : {paper_data.paper_id}")
+    ui(f"title    : {paper_data.title}")
     ui(f"authors  : {author_str}")
-    ui(f"year     : {l1.get('year') or '?'}  |  journal: {l1.get('journal') or '?'}")
-    if l1.get("doi"):
-        ui(f"doi      : {l1['doi']}")
-    if l1.get("paper_type"):
-        ui(f"type     : {l1['paper_type']}")
-    cite_str = _format_citations(l1.get("citation_count") or {})
+    ui(f"year     : {paper_data.year or '?'}  |  journal: {paper_data.journal or '?'}")
+    if paper_data.DOI:
+        ui(f"doi      : {paper_data.DOI}")
+    if paper_data.paper_type:
+        ui(f"type     : {paper_data.paper_type}")
+    cite_str = _format_citations(paper_data.citation_count)
     if cite_str:
         ui(f"cited    : {cite_str}")
     ids = l1.get("ids") or {}
@@ -1730,81 +1954,198 @@ def _print_header(l1: dict) -> None:
 
 
 def main() -> None:
+    # Early parse for --philosophy flag (before full parser)
+    early_parser = argparse.ArgumentParser(add_help=False)
+    early_parser.add_argument(
+        "--philosophy", action="store_true", help="Show design philosophy"
+    )
+    early_args, _ = early_parser.parse_known_args()
+
+    if early_args.philosophy:
+        print(_show_philosophy())
+        return 0
+
+    # Build skills epilog
+    skills_epilog = _build_skills_epilog()
+
     parser = argparse.ArgumentParser(
         prog="scholaraio",
-        description="本地学术文献检索工具",
+        description="ScholarAIO - AI Research Terminal\n\n"
+        "ScholarAIO is designed for AI coding agents to manage local academic "
+        "knowledge bases. All data is stored locally for privacy.",
+        epilog=skills_epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--philosophy", action="store_true", help="Show design philosophy"
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
     # --- index ---
-    p_index = sub.add_parser("index", help="构建 FTS5 检索索引")
-    p_index.set_defaults(func=cmd_index)
-    p_index.add_argument("--rebuild", action="store_true", help="清空后重建")
+    _add_command(
+        sub,
+        "index",
+        cmd_index,
+        "构建 FTS5 检索索引",
+        [
+            {"--rebuild": {"action": "store_true", "help": "清空后重建"}},
+        ],
+    )
 
     # --- search ---
-    p_search = sub.add_parser("search", help="关键词检索")
-    p_search.set_defaults(func=cmd_search)
-    p_search.add_argument("query", nargs="+", help="检索词")
-    p_search.add_argument("--top", type=int, default=None, help="最多返回 N 条（默认读 config search.top_k）")
-    _add_filter_args(p_search)
+    _add_command(
+        sub,
+        "search",
+        cmd_search,
+        "关键词检索",
+        [
+            {"name": "query", "nargs": "+", "help": "检索词"},
+            {
+                "name": "--top",
+                "type": int,
+                "default": None,
+                "help": "最多返回 N 条（默认读 config search.top_k）",
+            },
+        ],
+        with_filters=True,
+    )
 
     # --- search-author ---
-    p_sa = sub.add_parser("search-author", help="按作者名搜索")
-    p_sa.set_defaults(func=cmd_search_author)
-    p_sa.add_argument("query", nargs="+", help="作者名（模糊匹配）")
-    p_sa.add_argument("--top", type=int, default=None, help="最多返回 N 条（默认读 config search.top_k）")
-    _add_filter_args(p_sa)
+    _add_command(
+        sub,
+        "search-author",
+        cmd_search_author,
+        "按作者名搜索",
+        [
+            {"name": "query", "nargs": "+", "help": "作者名（模糊匹配）"},
+            {
+                "name": "--top",
+                "type": int,
+                "default": None,
+                "help": "最多返回 N 条（默认读 config search.top_k）",
+            },
+        ],
+        with_filters=True,
+    )
 
     # --- show ---
     p_show = sub.add_parser("show", help="查看论文内容")
     p_show.set_defaults(func=cmd_show)
     p_show.add_argument("paper_id", help="论文目录名（search 结果中显示）")
     p_show.add_argument(
-        "--layer", type=int, default=2, choices=[1, 2, 3, 4],
+        "--layer",
+        type=int,
+        default=2,
+        choices=[1, 2, 3, 4],
         help="加载层级：1=元数据, 2=摘要, 3=结论, 4=全文（默认 2）",
     )
 
     # --- embed ---
-    p_embed = sub.add_parser("embed", help="生成语义向量写入 index.db")
-    p_embed.set_defaults(func=cmd_embed)
-    p_embed.add_argument("--rebuild", action="store_true", help="清空后重建")
+    _add_command(
+        sub,
+        "embed",
+        cmd_embed,
+        "生成语义向量写入 index.db",
+        [
+            {"--rebuild": {"action": "store_true", "help": "清空后重建"}},
+        ],
+    )
 
     # --- vsearch ---
-    p_vsearch = sub.add_parser("vsearch", help="语义向量检索")
-    p_vsearch.set_defaults(func=cmd_vsearch)
-    p_vsearch.add_argument("query", nargs="+", help="检索词")
-    p_vsearch.add_argument("--top", type=int, default=None, help="最多返回 N 条（默认读 config embed.top_k）")
-    _add_filter_args(p_vsearch)
+    _add_command(
+        sub,
+        "vsearch",
+        cmd_vsearch,
+        "语义向量检索",
+        [
+            {"name": "query", "nargs": "+", "help": "检索词"},
+            {
+                "name": "--top",
+                "type": int,
+                "default": None,
+                "help": "最多返回 N 条（默认读 config embed.top_k）",
+            },
+        ],
+        with_filters=True,
+    )
 
     # --- usearch (unified) ---
-    p_usearch = sub.add_parser("usearch", help="融合检索（关键词 + 语义向量）")
-    p_usearch.set_defaults(func=cmd_usearch)
-    p_usearch.add_argument("query", nargs="+", help="检索词")
-    p_usearch.add_argument("--top", type=int, default=None, help="最多返回 N 条（默认读 config search.top_k）")
-    _add_filter_args(p_usearch)
+    _add_command(
+        sub,
+        "usearch",
+        cmd_usearch,
+        "融合检索（关键词 + 语义向量）",
+        [
+            {"name": "query", "nargs": "+", "help": "检索词"},
+            {
+                "name": "--top",
+                "type": int,
+                "default": None,
+                "help": "最多返回 N 条（默认读 config search.top_k）",
+            },
+        ],
+        with_filters=True,
+    )
 
     # --- enrich-toc ---
-    p_toc = sub.add_parser("enrich-toc", help="LLM 过滤标题噪声，提取论文 TOC 写入 JSON")
-    p_toc.set_defaults(func=cmd_enrich_toc)
-    p_toc.add_argument("paper_id", nargs="?", help="论文 ID（省略则需 --all）")
-    p_toc.add_argument("--all", action="store_true", help="处理 papers_dir 中所有论文")
-    p_toc.add_argument("--force", action="store_true", help="强制重新提取")
-    p_toc.add_argument("--inspect", action="store_true", help="展示过滤过程")
+    _add_command(
+        sub,
+        "enrich-toc",
+        cmd_enrich_toc,
+        "LLM 过滤标题噪声，提取论文 TOC 写入 JSON",
+        [
+            {"name": "paper_id", "nargs": "?", "help": "论文 ID（省略则需 --all）"},
+            {"--all": {"action": "store_true", "help": "处理 papers_dir 中所有论文"}},
+            {"--force": {"action": "store_true", "help": "强制重新提取"}},
+            {"--inspect": {"action": "store_true", "help": "展示过滤过程"}},
+        ],
+    )
+
+    # --- enrich-l3 ---
+    _add_command(
+        sub,
+        "enrich-l3",
+        cmd_enrich_l3,
+        "LLM 提取结论段写入 JSON",
+        [
+            {"name": "paper_id", "nargs": "?", "help": "论文 ID（省略则需 --all）"},
+            {"--all": {"action": "store_true", "help": "处理 papers_dir 中所有论文"}},
+            {
+                "--force": {
+                    "action": "store_true",
+                    "help": "强制重新提取（覆盖已有结果）",
+                }
+            },
+            {"--inspect": {"action": "store_true", "help": "展示提取过程详情"}},
+            {
+                "--max-retries": {
+                    "type": int,
+                    "default": 2,
+                    "help": "最大重试次数（默认 2）",
+                }
+            },
+        ],
+    )
 
     # --- pipeline ---
     p_pipe = sub.add_parser("pipeline", help="组合步骤流水线（可任意组装）")
     p_pipe.set_defaults(func=cmd_pipeline)
     p_pipe.add_argument(
-        "preset", nargs="?",
+        "preset",
+        nargs="?",
         help="预设名称：full | ingest | enrich | reindex",
     )
     p_pipe.add_argument("--steps", help="自定义步骤序列（逗号分隔），如 toc,l3,index")
-    p_pipe.add_argument("--list", dest="list_steps", action="store_true", help="列出所有步骤和预设")
+    p_pipe.add_argument(
+        "--list", dest="list_steps", action="store_true", help="列出所有步骤和预设"
+    )
     p_pipe.add_argument("--dry-run", action="store_true", help="预览，不写文件")
     p_pipe.add_argument("--no-api", action="store_true", help="离线模式，跳过外部 API")
     p_pipe.add_argument("--force", action="store_true", help="强制重新处理（toc/l3）")
     p_pipe.add_argument("--inspect", action="store_true", help="展示处理详情")
-    p_pipe.add_argument("--max-retries", type=int, default=2, help="l3 最大重试次数（默认 2）")
+    p_pipe.add_argument(
+        "--max-retries", type=int, default=2, help="l3 最大重试次数（默认 2）"
+    )
     p_pipe.add_argument("--rebuild", action="store_true", help="重建索引（index 步骤）")
     p_pipe.add_argument("--inbox", help="inbox 目录（默认 data/inbox）")
     p_pipe.add_argument("--papers", help="papers 目录（默认配置值）")
@@ -1813,85 +2154,158 @@ def main() -> None:
     p_refetch = sub.add_parser("refetch", help="重新查询 API 补全引用量等字段")
     p_refetch.set_defaults(func=cmd_refetch)
     p_refetch.add_argument("paper_id", nargs="?", help="论文 ID（省略则需 --all）")
-    p_refetch.add_argument("--all", action="store_true", help="补查所有缺失引用量的论文")
-    p_refetch.add_argument("--force", action="store_true", help="强制重新查询（包括已有引用量的论文）")
+    p_refetch.add_argument(
+        "--all", action="store_true", help="补查所有缺失引用量的论文"
+    )
+    p_refetch.add_argument(
+        "--force", action="store_true", help="强制重新查询（包括已有引用量的论文）"
+    )
     p_refetch.add_argument("--jobs", "-j", type=int, default=5, help="并发数（默认 5）")
 
     # --- top-cited ---
-    p_tc = sub.add_parser("top-cited", help="按引用量排序查看论文")
-    p_tc.set_defaults(func=cmd_top_cited)
-    p_tc.add_argument("--top", type=int, default=None, help="最多返回 N 条（默认读 config search.top_k）")
-    _add_filter_args(p_tc)
+    _add_command(
+        sub,
+        "top-cited",
+        cmd_top_cited,
+        "按引用量排序查看论文",
+        [
+            {
+                "--top": {
+                    "type": int,
+                    "default": None,
+                    "help": "最多返回 N 条（默认读 config search.top_k）",
+                }
+            },
+        ],
+        with_filters=True,
+    )
 
     # --- refs ---
-    p_refs = sub.add_parser("refs", help="查看论文的参考文献列表")
-    p_refs.set_defaults(func=cmd_refs)
-    p_refs.add_argument("paper_id", help="论文 ID（目录名 / UUID / DOI）")
-    p_refs.add_argument("--ws", type=str, default=None, help="限定工作区范围")
+    _add_command(
+        sub,
+        "refs",
+        cmd_refs,
+        "查看论文的参考文献列表",
+        [
+            {"name": "paper_id", "help": "论文 ID（目录名 / UUID / DOI）"},
+            {"--ws": {"type": str, "default": None, "help": "限定工作区范围"}},
+        ],
+    )
 
     # --- citing ---
-    p_citing = sub.add_parser("citing", help="查看哪些本地论文引用了此论文")
-    p_citing.set_defaults(func=cmd_citing)
-    p_citing.add_argument("paper_id", help="论文 ID（目录名 / UUID / DOI）")
-    p_citing.add_argument("--ws", type=str, default=None, help="限定工作区范围")
+    _add_command(
+        sub,
+        "citing",
+        cmd_citing,
+        "查看哪些本地论文引用了此论文",
+        [
+            {"name": "paper_id", "help": "论文 ID（目录名 / UUID / DOI）"},
+            {"--ws": {"type": str, "default": None, "help": "限定工作区范围"}},
+        ],
+    )
 
     # --- shared-refs ---
-    p_sr = sub.add_parser("shared-refs", help="共同参考文献分析")
-    p_sr.set_defaults(func=cmd_shared_refs)
-    p_sr.add_argument("paper_ids", nargs="+", help="论文 ID（至少 2 个）")
-    p_sr.add_argument("--min", type=int, default=None, help="最少共引次数（默认 2）")
-    p_sr.add_argument("--ws", type=str, default=None, help="限定工作区范围")
+    _add_command(
+        sub,
+        "shared-refs",
+        cmd_shared_refs,
+        "共同参考文献分析",
+        [
+            {"name": "paper_ids", "nargs": "+", "help": "论文 ID（至少 2 个）"},
+            {"--min": {"type": int, "default": None, "help": "最少共引次数（默认 2）"}},
+            {"--ws": {"type": str, "default": None, "help": "限定工作区范围"}},
+        ],
+    )
 
     # --- topics ---
     p_topics = sub.add_parser("topics", help="BERTopic 主题建模与探索")
     p_topics.set_defaults(func=cmd_topics)
     p_topics.add_argument("--build", action="store_true", help="构建主题模型（增量）")
     p_topics.add_argument("--rebuild", action="store_true", help="清空后重建主题模型")
-    p_topics.add_argument("--reduce", type=int, default=None, metavar="N",
-                          help="快速合并主题到 N 个（不重新聚类）")
-    p_topics.add_argument("--merge", type=str, default=None, metavar="IDS",
-                          help="手动合并主题，格式: 1,6,14+3,5（用+分隔组）")
-    p_topics.add_argument("--topic", type=int, default=None, metavar="ID",
-                          help="查看指定主题的论文（-1 查看 outlier）")
+    p_topics.add_argument(
+        "--reduce",
+        type=int,
+        default=None,
+        metavar="N",
+        help="快速合并主题到 N 个（不重新聚类）",
+    )
+    p_topics.add_argument(
+        "--merge",
+        type=str,
+        default=None,
+        metavar="IDS",
+        help="手动合并主题，格式: 1,6,14+3,5（用+分隔组）",
+    )
+    p_topics.add_argument(
+        "--topic",
+        type=int,
+        default=None,
+        metavar="ID",
+        help="查看指定主题的论文（-1 查看 outlier）",
+    )
     p_topics.add_argument("--top", type=int, default=None, help="返回条数")
-    p_topics.add_argument("--min-topic-size", type=int, default=None,
-                          help="最小聚类大小（覆盖 config）")
-    p_topics.add_argument("--nr-topics", type=int, default=None,
-                          help="目标主题数（覆盖 config，0=auto, -1=不合并）")
-    p_topics.add_argument("--viz", action="store_true", help="生成 HTML 可视化图表（6 张）")
+    p_topics.add_argument(
+        "--min-topic-size", type=int, default=None, help="最小聚类大小（覆盖 config）"
+    )
+    p_topics.add_argument(
+        "--nr-topics",
+        type=int,
+        default=None,
+        help="目标主题数（覆盖 config，0=auto, -1=不合并）",
+    )
+    p_topics.add_argument(
+        "--viz", action="store_true", help="生成 HTML 可视化图表（6 张）"
+    )
 
     # --- backfill-abstract ---
-    p_bf = sub.add_parser("backfill-abstract", help="补全缺失的 abstract（支持 DOI 官方抓取）")
+    p_bf = sub.add_parser(
+        "backfill-abstract", help="补全缺失的 abstract（支持 DOI 官方抓取）"
+    )
     p_bf.set_defaults(func=cmd_backfill_abstract)
     p_bf.add_argument("--dry-run", action="store_true", help="预览，不写文件")
-    p_bf.add_argument("--doi-fetch", action="store_true", help="从出版商网页抓取官方 abstract（覆盖现有）")
+    p_bf.add_argument(
+        "--doi-fetch",
+        action="store_true",
+        help="从出版商网页抓取官方 abstract（覆盖现有）",
+    )
 
     # --- rename ---
     p_rename = sub.add_parser("rename", help="根据 JSON 元数据重命名论文文件")
     p_rename.set_defaults(func=cmd_rename)
     p_rename.add_argument("paper_id", nargs="?", help="论文 ID（省略则需 --all）")
-    p_rename.add_argument("--all", action="store_true", help="重命名所有文件名不正确的论文")
+    p_rename.add_argument(
+        "--all", action="store_true", help="重命名所有文件名不正确的论文"
+    )
     p_rename.add_argument("--dry-run", action="store_true", help="预览，不实际重命名")
 
     # --- audit ---
     p_audit = sub.add_parser("audit", help="审计已入库论文的数据质量")
     p_audit.set_defaults(func=cmd_audit)
-    p_audit.add_argument("--severity", choices=["error", "warning", "info"],
-                         help="只显示指定严重级别的问题")
+    p_audit.add_argument(
+        "--severity",
+        choices=["error", "warning", "info"],
+        help="只显示指定严重级别的问题",
+    )
 
     # --- repair ---
-    p_repair = sub.add_parser("repair", help="修复论文元数据（手动指定 title/DOI，跳过 MD 解析）")
+    p_repair = sub.add_parser(
+        "repair", help="修复论文元数据（手动指定 title/DOI，跳过 MD 解析）"
+    )
     p_repair.set_defaults(func=cmd_repair)
     p_repair.add_argument("paper_id", help="论文 ID（文件名 stem）")
     p_repair.add_argument("--title", required=True, help="正确的论文标题")
     p_repair.add_argument("--doi", default="", help="已知 DOI（加速 API 查询）")
     p_repair.add_argument("--author", default="", help="一作全名")
     p_repair.add_argument("--year", type=int, default=None, help="发表年份")
-    p_repair.add_argument("--no-api", action="store_true", help="跳过 API 查询，仅用提供的信息")
+    p_repair.add_argument(
+        "--no-api", action="store_true", help="跳过 API 查询，仅用提供的信息"
+    )
     p_repair.add_argument("--dry-run", action="store_true", help="预览，不实际修改")
 
     # --- explore ---
-    p_explore = sub.add_parser("explore", help="期刊全量探索（OpenAlex 拉取 + 嵌入 + 聚类）")
+    p_explore = sub.add_parser(
+        "explore", help="期刊全量探索（OpenAlex 拉取 + 嵌入 + 聚类）"
+    )
     p_explore.set_defaults(func=cmd_explore)
     p_explore_sub = p_explore.add_subparsers(dest="explore_action", required=True)
 
@@ -1910,10 +2324,12 @@ def main() -> None:
     p_et.add_argument("--rebuild", action="store_true", help="重建主题模型")
     p_et.add_argument("--topic", type=int, default=None, help="查看指定主题的论文")
     p_et.add_argument("--top", type=int, default=None, help="返回条数")
-    p_et.add_argument("--min-topic-size", type=int, default=None,
-                       help="最小聚类大小（默认 30）")
-    p_et.add_argument("--nr-topics", type=int, default=None,
-                       help="目标主题数（默认自然聚类）")
+    p_et.add_argument(
+        "--min-topic-size", type=int, default=None, help="最小聚类大小（默认 30）"
+    )
+    p_et.add_argument(
+        "--nr-topics", type=int, default=None, help="目标主题数（默认自然聚类）"
+    )
 
     p_es = p_explore_sub.add_parser("search", help="探索库语义搜索")
     p_es.add_argument("--name", required=True, help="探索库名称")
@@ -1934,9 +2350,19 @@ def main() -> None:
     p_eb = p_export_sub.add_parser("bibtex", help="导出 BibTeX 格式")
     p_eb.add_argument("paper_ids", nargs="*", help="论文目录名（可多个）")
     p_eb.add_argument("--all", action="store_true", help="导出全部论文")
-    p_eb.add_argument("--year", type=str, default=None, help="年份过滤：2023 / 2020-2024")
-    p_eb.add_argument("--journal", type=str, default=None, help="期刊名过滤（模糊匹配）")
-    p_eb.add_argument("-o", "--output", type=str, default=None, help="输出文件路径（省略则输出到屏幕）")
+    p_eb.add_argument(
+        "--year", type=str, default=None, help="年份过滤：2023 / 2020-2024"
+    )
+    p_eb.add_argument(
+        "--journal", type=str, default=None, help="期刊名过滤（模糊匹配）"
+    )
+    p_eb.add_argument(
+        "-o",
+        "--output",
+        type=str,
+        default=None,
+        help="输出文件路径（省略则输出到屏幕）",
+    )
 
     # --- ws (workspace) ---
     p_ws = sub.add_parser("ws", help="工作区论文子集管理")
@@ -1948,13 +2374,17 @@ def main() -> None:
 
     p_ws_add = p_ws_sub.add_parser("add", help="添加论文到工作区")
     p_ws_add.add_argument("name", help="工作区名称")
-    p_ws_add.add_argument("paper_refs", nargs="+", help="论文引用（UUID / 目录名 / DOI）")
+    p_ws_add.add_argument(
+        "paper_refs", nargs="+", help="论文引用（UUID / 目录名 / DOI）"
+    )
 
     p_ws_rm = p_ws_sub.add_parser("remove", help="从工作区移除论文")
     p_ws_rm.add_argument("name", help="工作区名称")
-    p_ws_rm.add_argument("paper_refs", nargs="+", help="论文引用（UUID / 目录名 / DOI）")
+    p_ws_rm.add_argument(
+        "paper_refs", nargs="+", help="论文引用（UUID / 目录名 / DOI）"
+    )
 
-    p_ws_list = p_ws_sub.add_parser("list", help="列出所有工作区")
+    p_ws_sub.add_parser("list", help="列出所有工作区")
 
     p_ws_show = p_ws_sub.add_parser("show", help="查看工作区中的论文")
     p_ws_show.add_argument("name", help="工作区名称")
@@ -1967,16 +2397,24 @@ def main() -> None:
 
     p_ws_export = p_ws_sub.add_parser("export", help="导出工作区论文 BibTeX")
     p_ws_export.add_argument("name", help="工作区名称")
-    p_ws_export.add_argument("-o", "--output", type=str, default=None, help="输出文件路径")
+    p_ws_export.add_argument(
+        "-o", "--output", type=str, default=None, help="输出文件路径"
+    )
     _add_filter_args(p_ws_export)
 
     # --- import-endnote ---
     p_ie = sub.add_parser("import-endnote", help="从 Endnote XML/RIS 导入论文元数据")
     p_ie.set_defaults(func=cmd_import_endnote)
     p_ie.add_argument("files", nargs="+", help="Endnote 导出文件（.xml 或 .ris）")
-    p_ie.add_argument("--no-api", action="store_true", help="跳过 API 查询，仅用文件中的元数据")
+    p_ie.add_argument(
+        "--no-api", action="store_true", help="跳过 API 查询，仅用文件中的元数据"
+    )
     p_ie.add_argument("--dry-run", action="store_true", help="预览，不实际导入")
-    p_ie.add_argument("--no-convert", action="store_true", help="跳过 PDF → paper.md 转换（默认自动转换）")
+    p_ie.add_argument(
+        "--no-convert",
+        action="store_true",
+        help="跳过 PDF → paper.md 转换（默认自动转换）",
+    )
 
     # --- import-zotero ---
     p_iz = sub.add_parser("import-zotero", help="从 Zotero 导入论文元数据和 PDF")
@@ -1984,15 +2422,29 @@ def main() -> None:
     p_iz.add_argument("--local", metavar="SQLITE_PATH", help="使用本地 zotero.sqlite")
     p_iz.add_argument("--api-key", help="Zotero API key")
     p_iz.add_argument("--library-id", help="Zotero library ID")
-    p_iz.add_argument("--library-type", choices=["user", "group"], help="Library 类型（默认 user）")
+    p_iz.add_argument(
+        "--library-type", choices=["user", "group"], help="Library 类型（默认 user）"
+    )
     p_iz.add_argument("--collection", metavar="KEY", help="仅导入指定 collection")
-    p_iz.add_argument("--item-type", nargs="+", help="限定 item 类型（如 journalArticle conferencePaper）")
-    p_iz.add_argument("--list-collections", action="store_true", help="列出所有 collections 后退出")
+    p_iz.add_argument(
+        "--item-type",
+        nargs="+",
+        help="限定 item 类型（如 journalArticle conferencePaper）",
+    )
+    p_iz.add_argument(
+        "--list-collections", action="store_true", help="列出所有 collections 后退出"
+    )
     p_iz.add_argument("--no-pdf", action="store_true", help="跳过 PDF 下载/复制")
     p_iz.add_argument("--no-api", action="store_true", help="跳过学术 API 查询")
     p_iz.add_argument("--dry-run", action="store_true", help="预览，不实际导入")
-    p_iz.add_argument("--no-convert", action="store_true", help="跳过 PDF → paper.md 转换")
-    p_iz.add_argument("--import-collections", action="store_true", help="将 Zotero collections 创建为工作区")
+    p_iz.add_argument(
+        "--no-convert", action="store_true", help="跳过 PDF → paper.md 转换"
+    )
+    p_iz.add_argument(
+        "--import-collections",
+        action="store_true",
+        help="将 Zotero collections 创建为工作区",
+    )
 
     # --- attach-pdf ---
     p_ap = sub.add_parser("attach-pdf", help="为已入库论文补充 PDF 并生成 paper.md")
@@ -2004,38 +2456,50 @@ def main() -> None:
     p_setup = sub.add_parser("setup", help="环境检测与安装向导 / Setup wizard")
     p_setup.set_defaults(func=cmd_setup)
     p_setup_sub = p_setup.add_subparsers(dest="setup_action")
-    p_setup_check = p_setup_sub.add_parser("check", help="检查环境状态 / Check environment status")
-    p_setup_check.add_argument("--lang", choices=["en", "zh"], default="zh",
-                               help="输出语言 / Output language (default: zh)")
+    p_setup_check = p_setup_sub.add_parser(
+        "check", help="检查环境状态 / Check environment status"
+    )
+    p_setup_check.add_argument(
+        "--lang",
+        choices=["en", "zh"],
+        default="zh",
+        help="输出语言 / Output language (default: zh)",
+    )
 
     # --- migrate-dirs ---
-    p_migrate = sub.add_parser("migrate-dirs", help="迁移 data/papers/ 从平铺结构到每篇一目录")
+    p_migrate = sub.add_parser(
+        "migrate-dirs", help="迁移 data/papers/ 从平铺结构到每篇一目录"
+    )
     p_migrate.set_defaults(func=cmd_migrate_dirs)
-    p_migrate.add_argument("--execute", action="store_true", help="实际执行迁移（默认 dry-run）")
+    p_migrate.add_argument(
+        "--execute", action="store_true", help="实际执行迁移（默认 dry-run）"
+    )
 
     # --- metrics ---
     p_metrics = sub.add_parser("metrics", help="查看 LLM token 用量和调用统计")
     p_metrics.set_defaults(func=cmd_metrics)
     p_metrics.add_argument("--last", type=int, default=20, help="最近 N 条记录")
-    p_metrics.add_argument("--category", default="llm", help="事件类别（llm/api/step，默认 llm）")
-    p_metrics.add_argument("--since", default=None, help="起始时间（ISO 格式，如 2026-03-01）")
+    p_metrics.add_argument(
+        "--category", default="llm", help="事件类别（llm/api/step，默认 llm）"
+    )
+    p_metrics.add_argument(
+        "--since", default=None, help="起始时间（ISO 格式，如 2026-03-01）"
+    )
     p_metrics.add_argument("--summary", action="store_true", help="仅显示汇总统计")
 
-    # --- enrich-l3 ---
-    p_l3 = sub.add_parser("enrich-l3", help="LLM 提取结论段写入 JSON")
-    p_l3.set_defaults(func=cmd_enrich_l3)
-    p_l3.add_argument("paper_id", nargs="?", help="论文 ID（省略则需 --all）")
-    p_l3.add_argument("--all", action="store_true", help="处理 papers_dir 中所有论文")
-    p_l3.add_argument("--force", action="store_true", help="强制重新提取（覆盖已有结果）")
-    p_l3.add_argument("--inspect", action="store_true", help="展示提取过程详情")
-    p_l3.add_argument("--max-retries", type=int, default=2, help="最大重试次数（默认 2）")
-
     args = parser.parse_args()
+
+    # Handle --philosophy flag
+    if args.philosophy:
+        print(_show_philosophy())
+        return
+
     cfg = load_config()
     cfg.ensure_dirs()
 
     from scholaraio import log as _log, metrics as _metrics
     from scholaraio.ingest.metadata._models import configure_session
+
     session_id = _log.setup(cfg)
     _metrics.init(cfg.metrics_db_path, session_id)
     configure_session(cfg.ingest.contact_email)

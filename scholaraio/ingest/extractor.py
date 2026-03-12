@@ -69,6 +69,7 @@ class RegexExtractor:
 
     def extract(self, filepath: Path) -> "PaperMetadata":
         from scholaraio.ingest.metadata import extract_metadata_from_markdown
+
         return extract_metadata_from_markdown(filepath)
 
 
@@ -138,6 +139,7 @@ class LLMExtractor:
         except Exception as e:
             _log.debug("[LLM] extraction failed: %s, falling back to regex", e)
             from scholaraio.ingest.metadata import extract_metadata_from_markdown
+
             return extract_metadata_from_markdown(filepath)
 
         meta = PaperMetadata(source_file=filepath.name)
@@ -167,6 +169,7 @@ class LLMExtractor:
     def _call_api(self, header_text: str) -> str:
         """POST to OpenAI-compatible chat completions endpoint."""
         from scholaraio.metrics import call_llm
+
         result = call_llm(
             _EXTRACT_PROMPT.format(header=header_text),
             self._config,
@@ -298,7 +301,7 @@ class RobustExtractor:
 
         # Step 2: scan full text for distinct DOIs (detect multi-paper PDFs)
         text = filepath.read_text(encoding="utf-8", errors="replace")
-        all_dois = set(re.findall(r'10\.\d{4,}/[^\s)]+', text))
+        all_dois = set(re.findall(r"10\.\d{4,}/[^\s)]+", text))
         multi_doi = len(all_dois) > 1
 
         # Step 3: LLM with regex results + paper content (up to 50k chars)
@@ -306,7 +309,9 @@ class RobustExtractor:
 
         prompt = _ROBUST_PROMPT.format(
             regex_title=regex_meta.title or "(未提取到)",
-            regex_authors=", ".join(regex_meta.authors) if regex_meta.authors else "(未提取到)",
+            regex_authors=", ".join(regex_meta.authors)
+            if regex_meta.authors
+            else "(未提取到)",
             regex_year=regex_meta.year or "(未提取到)",
             regex_doi=regex_meta.doi or "(未提取到)",
             regex_journal=regex_meta.journal or "(未提取到)",
@@ -323,20 +328,26 @@ class RobustExtractor:
         # Build metadata from LLM response (with null-string cleanup)
         meta = PaperMetadata(source_file=filepath.name)
         meta.title = _clean_llm_str(data.get("title")) or regex_meta.title or ""
-        meta.authors = [a for a in (data.get("authors") or []) if a] or regex_meta.authors
+        meta.authors = [
+            a for a in (data.get("authors") or []) if a
+        ] or regex_meta.authors
         llm_year = data.get("year")
         meta.year = (llm_year if isinstance(llm_year, int) else None) or regex_meta.year
         # DOI: multi-DOI or hallucination guard
         if multi_doi:
-            _log.debug("[robust] found %d different DOIs in fulltext, discarding for title search",
-                       len(all_dois))
+            _log.debug(
+                "[robust] found %d different DOIs in fulltext, discarding for title search",
+                len(all_dois),
+            )
             meta.doi = ""
         else:
             llm_doi = _clean_llm_str(data.get("doi")) or ""
             # If LLM produced a DOI that doesn't exist in the text and regex
             # didn't find it either, it's likely a hallucination — discard
             if llm_doi and not regex_meta.doi and llm_doi not in text:
-                _log.debug("[robust] LLM DOI not found in source text, suspected hallucination, discarding")
+                _log.debug(
+                    "[robust] LLM DOI not found in source text, suspected hallucination, discarding"
+                )
                 meta.doi = ""
             else:
                 meta.doi = llm_doi or regex_meta.doi or ""
@@ -361,6 +372,7 @@ class RobustExtractor:
 
     def _call_api(self, prompt: str) -> str:
         from scholaraio.metrics import call_llm
+
         result = call_llm(
             prompt,
             self._llm_config,
@@ -396,13 +408,15 @@ def get_extractor(config: "Config") -> MetadataExtractor:
     mode = config.ingest.extractor
 
     if mode == "llm":
-        api_key = config.resolved_api_key()
+        api_key = config.api_key("llm")
         if not api_key:
-            _log.warning("[LLM] no API key found; set SCHOLARAIO_LLM_API_KEY or llm.api_key in config.local.yaml")
+            _log.warning(
+                "[LLM] no API key found; set SCHOLARAIO_LLM_API_KEY or llm.api_key in config.local.yaml"
+            )
         return LLMExtractor(config.llm, api_key=api_key)
 
     if mode == "robust":
-        api_key = config.resolved_api_key()
+        api_key = config.api_key("llm")
         if not api_key:
             raise RuntimeError(
                 "robust 模式需要 LLM API key。\n"
@@ -412,6 +426,6 @@ def get_extractor(config: "Config") -> MetadataExtractor:
         return RobustExtractor(config.llm, api_key=api_key)
 
     if mode == "auto":
-        return FallbackExtractor(config.llm, api_key=config.resolved_api_key())
+        return FallbackExtractor(config.llm, api_key=config.api_key("llm"))
 
     return RegexExtractor()
