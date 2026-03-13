@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     import numpy as np
     from bertopic import BERTopic
 
-    from scholaraio.vectors import Embedder
+    from scholaraio.index import Embedder
 
 _log = logging.getLogger(__name__)
 
@@ -439,7 +439,7 @@ class TopicTrainer:
         """Load input data from database."""
         import numpy as np
 
-        from scholaraio.vectors import _unpack
+        from scholaraio.index import _unpack
 
         conn = sqlite3.connect(db_path)
         try:

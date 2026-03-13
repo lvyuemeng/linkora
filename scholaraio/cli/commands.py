@@ -8,7 +8,7 @@ import logging
 from scholaraio.cli.args import add_filter_args, resolve_top_k
 from scholaraio.cli.output import ui, print_results_list
 from scholaraio.cli.errors import IndexNotFoundError
-from scholaraio.index import SearchIndex
+from scholaraio.index import SearchIndex, VectorIndex
 from scholaraio.papers import PaperStore
 
 
@@ -58,7 +58,7 @@ def cmd_vsearch(args: argparse.Namespace, cfg) -> None:
     """Semantic vector search."""
     query = " ".join(args.query)
     try:
-        from scholaraio.vectors import VectorIndex
+        from scholaraio.index import VectorIndex
 
         with VectorIndex(cfg.index_db) as vidx:
             results = vidx.search(
@@ -130,7 +130,7 @@ def cmd_embed(args: argparse.Namespace, cfg) -> None:
         _log.error("papers_dir does not exist: %s", papers_dir)
         return
     try:
-        from scholaraio.vectors import VectorIndex
+        from scholaraio.index import VectorIndex
 
         action = "Rebuilding" if args.rebuild else "Building"
         ui(f"{action} vectors: {papers_dir} -> {cfg.index_db}")

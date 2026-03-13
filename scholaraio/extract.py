@@ -26,9 +26,8 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 _log = logging.getLogger(__name__)
 
-if TYPE_CHECKING:
-    from scholaraio.config import Config, LLMConfig
-    from scholaraio.papers import PaperMetadata
+from scholaraio.config import Config, LLMConfig
+from scholaraio.papers import PaperMetadata
 
 
 # ============================================================================

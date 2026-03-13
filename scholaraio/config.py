@@ -10,6 +10,8 @@ Config file search:
 1. Explicit config_path
 2. SCHOLARAIO_CONFIG env var
 3. Walk up from cwd (max 6 levels)
+
+Workspace: Storage paths are derived from workspace identity in config.
 """
 
 from __future__ import annotations
@@ -17,103 +19,54 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
 
 
 ENV_PREFIX = "SCHOLARAIO_"
-
-
-# Protocols (Interfaces)
-
-
-class ConfigProtocol(Protocol):
-    """Protocol for Config - enables dependency injection."""
-
-    @property
-    def papers_dir(self) -> Path: ...
-
-    @property
-    def index_db(self) -> Path: ...
-
-    @property
-    def log_file(self) -> Path: ...
-
-    def ensure_dirs(self) -> None: ...
-
-
-# Service-specific protocols for API key resolution
-
-
-class HasLLM(Protocol):
-    """Protocol for LLM service."""
-
-    llm: LLMConfig
-
-
-class HasZotero(Protocol):
-    """Protocol for Zotero service."""
-
-    zotero: ZoteroConfig
-
-
-class HasMinerU(Protocol):
-    """Protocol for MinerU service."""
-
-    ingest: IngestConfig
-
-
-# API key resolution - explicit functions, no getattr
-
-
-def resolve_llm(cfg: HasLLM) -> str:
-    """Resolve LLM API key: config > SCHOLARAIO_LLM_API_KEY > DEEPSEEK_API_KEY > OPENAI_API_KEY."""
-    if cfg.llm.api_key:
-        return cfg.llm.api_key
-    if key := os.environ.get("SCHOLARAIO_LLM_API_KEY"):
-        return key
-    if key := os.environ.get("DEEPSEEK_API_KEY"):
-        return key
-    if key := os.environ.get("OPENAI_API_KEY"):
-        return key
-    return ""
-
-
-def resolve_zotero_api_key(cfg: HasZotero) -> str:
-    """Resolve Zotero API key."""
-    if cfg.zotero.api_key:
-        return cfg.zotero.api_key
-    if key := os.environ.get("ZOTERO_API_KEY"):
-        return key
-    return ""
-
-
-def resolve_zotero_library_id(cfg: HasZotero) -> str:
-    """Resolve Zotero library ID."""
-    if cfg.zotero.library_id:
-        return cfg.zotero.library_id
-    if key := os.environ.get("ZOTERO_LIBRARY_ID"):
-        return key
-    return ""
-
-
-def resolve_mineru(cfg: HasMinerU) -> str:
-    """Resolve MinerU API key."""
-    if cfg.ingest.mineru_api_key:
-        return cfg.ingest.mineru_api_key
-    if key := os.environ.get("MINERU_API_KEY"):
-        return key
-    return ""
 
 
 # Config Dataclasses
 
 
 @dataclass(frozen=True)
-class PathsConfig:
-    """Path configuration."""
+class WorkspaceConfig:
+    """Workspace identity - determines storage location."""
 
-    papers_dir: str = "data/papers"
-    index_db: str = "data/index.db"
+    name: str = "default"
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class IndexConfig:
+    """Index module configuration (FTS + Vector)."""
+
+    # FTS
+    top_k: int = 20
+    # Vector
+    embed_model: str = "Qwen/Qwen3-Embedding-0.6B"
+    embed_device: str = "auto"
+    embed_cache: str = "~/.cache/modelscope/hub/models"
+    embed_top_k: int = 10
+    embed_source: str = "modelscope"
+    # Chunking (for L3 content)
+    chunk_size: int = 800
+    chunk_overlap: int = 150
+
+
+@dataclass(frozen=True)
+class SourcesConfig:
+    """Data source configuration."""
+
+    # Local
+    local_enabled: bool = True
+    # OpenAlex
+    openalex_enabled: bool = True
+    # Zotero
+    zotero_enabled: bool = False
+    zotero_library_id: str = ""
+    zotero_api_key: str = ""
+    zotero_library_type: str = "user"
+    # Endnote
+    endnote_enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -130,21 +83,18 @@ class LLMConfig:
 
 
 @dataclass(frozen=True)
-class SearchConfig:
-    """FTS5 search configuration."""
+class IngestConfig:
+    """PDF ingestion configuration."""
 
-    top_k: int = 20
-
-
-@dataclass(frozen=True)
-class EmbedConfig:
-    """Embedding configuration."""
-
-    model: str = "Qwen/Qwen3-Embedding-0.6B"
-    cache_dir: str = "~/.cache/modelscope/hub/models"
-    device: str = "auto"
-    top_k: int = 10
-    source: str = "modelscope"
+    # Extractor
+    extractor: str = "robust"  # regex | auto | llm | robust
+    # MinerU
+    mineru_endpoint: str = "http://localhost:8000"
+    mineru_cloud_url: str = "https://mineru.net/api/v4"
+    mineru_api_key: str = ""
+    # LLM Abstract
+    abstract_llm_mode: str = "verify"  # off | fallback | verify
+    contact_email: str = ""
 
 
 @dataclass(frozen=True)
@@ -167,27 +117,6 @@ class LogConfig:
     metrics_db: str = "data/metrics.db"
 
 
-@dataclass(frozen=True)
-class IngestConfig:
-    """Ingestion pipeline configuration."""
-
-    extractor: str = "robust"  # regex | auto | llm | robust
-    mineru_endpoint: str = "http://localhost:8000"
-    mineru_cloud_url: str = "https://mineru.net/api/v4"
-    mineru_api_key: str = ""
-    abstract_llm_mode: str = "verify"  # off | fallback | verify
-    contact_email: str = ""
-
-
-@dataclass(frozen=True)
-class ZoteroConfig:
-    """Zotero integration."""
-
-    api_key: str = ""
-    library_id: str = ""
-    library_type: str = "user"
-
-
 # Main Config
 
 
@@ -195,26 +124,38 @@ class ZoteroConfig:
 class Config:
     """ScholarAIO global configuration."""
 
-    paths: PathsConfig = field(default_factory=PathsConfig)
-    llm: LLMConfig = field(default_factory=LLMConfig)
+    workspace: WorkspaceConfig = field(default_factory=WorkspaceConfig)
+    index: IndexConfig = field(default_factory=IndexConfig)
+    sources: SourcesConfig = field(default_factory=SourcesConfig)
     ingest: IngestConfig = field(default_factory=IngestConfig)
-    embed: EmbedConfig = field(default_factory=EmbedConfig)
-    search: SearchConfig = field(default_factory=SearchConfig)
+    llm: LLMConfig = field(default_factory=LLMConfig)
     topics: TopicsConfig = field(default_factory=TopicsConfig)
     log: LogConfig = field(default_factory=LogConfig)
-    zotero: ZoteroConfig = field(default_factory=ZoteroConfig)
 
     _root: Path = field(default_factory=Path.cwd, repr=False, compare=False)
 
-    # Path Properties
+    # Path Properties (derived from workspace)
+
+    @property
+    def workspace_dir(self) -> Path:
+        """Workspace directory - derived from workspace identity."""
+        return (self._root / "workspace" / self.workspace.name).resolve()
 
     @property
     def papers_dir(self) -> Path:
-        return (self._root / self.paths.papers_dir).resolve()
+        return (self.workspace_dir / "papers").resolve()
 
     @property
     def index_db(self) -> Path:
-        return (self._root / self.paths.index_db).resolve()
+        return (self.workspace_dir / "index.db").resolve()
+
+    @property
+    def vectors_file(self) -> Path:
+        return (self.workspace_dir / "vectors.faiss").resolve()
+
+    @property
+    def vector_ids_file(self) -> Path:
+        return (self.workspace_dir / "vector_ids.json").resolve()
 
     @property
     def log_file(self) -> Path:
@@ -228,17 +169,56 @@ class Config:
     def topics_model_dir(self) -> Path:
         return (self._root / self.topics.model_dir).resolve()
 
+    # API key resolution
+
+    def resolve_llm_api_key(self) -> str:
+        """Resolve LLM API key: config > SCHOLARAIO_LLM_API_KEY > DEEPSEEK_API_KEY > OPENAI_API_KEY."""
+        if self.llm.api_key:
+            return self.llm.api_key
+        if key := os.environ.get("SCHOLARAIO_LLM_API_KEY"):
+            return key
+        if key := os.environ.get("DEEPSEEK_API_KEY"):
+            return key
+        if key := os.environ.get("OPENAI_API_KEY"):
+            return key
+        return ""
+
+    def resolve_zotero_api_key(self) -> str:
+        """Resolve Zotero API key."""
+        if self.sources.zotero_api_key:
+            return self.sources.zotero_api_key
+        if key := os.environ.get("ZOTERO_API_KEY"):
+            return key
+        return ""
+
+    def resolve_zotero_library_id(self) -> str:
+        """Resolve Zotero library ID."""
+        if self.sources.zotero_library_id:
+            return self.sources.zotero_library_id
+        if key := os.environ.get("ZOTERO_LIBRARY_ID"):
+            return key
+        return ""
+
+    def resolve_mineru_api_key(self) -> str:
+        """Resolve MinerU API key."""
+        if self.ingest.mineru_api_key:
+            return self.ingest.mineru_api_key
+        if key := os.environ.get("MINERU_API_KEY"):
+            return key
+        return ""
+
     # Directory Management
 
     def ensure_dirs(self) -> None:
         """Create required directories."""
         for d in (
+            self.workspace_dir,
             self.papers_dir,
             self._root / "data" / "inbox",
             self._root / "data" / "pending",
-            self._root / "workspace",
             self.log_file.parent,
             self.metrics_db_path.parent,
+            self.topics_model_dir.parent,
         ):
             d.mkdir(parents=True, exist_ok=True)
 
@@ -247,10 +227,11 @@ class Config:
 
 
 _ENV_OVERRIDES: dict[str, tuple[str, list[str]]] = {
-    "paths": ("PATH", ["papers_dir", "index_db"]),
+    "workspace": ("WORKSPACE", ["name", "description"]),
+    "index": ("INDEX", ["top_k", "embed_model", "embed_device", "chunk_size", "chunk_overlap"]),
+    "sources": ("SOURCES", ["zotero_api_key", "zotero_library_id"]),
     "llm": ("LLM", ["api_key", "backend", "model", "base_url"]),
     "ingest": ("MINERU", ["mineru_api_key", "mineru_endpoint"]),
-    "embed": ("EMBED", ["model", "source"]),
     "log": ("LOG", ["level"]),
 }
 
@@ -338,13 +319,12 @@ def _apply_env_overrides(cfg: Config) -> None:
 def _build_config(data: dict, root: Path) -> Config:
     """Build Config from dict."""
     return Config(
-        paths=PathsConfig(**data.get("paths", {})),
-        llm=LLMConfig(**data.get("llm", {})),
+        workspace=WorkspaceConfig(**data.get("workspace", {})),
+        index=IndexConfig(**data.get("index", {})),
+        sources=SourcesConfig(**data.get("sources", {})),
         ingest=IngestConfig(**data.get("ingest", {})),
-        embed=EmbedConfig(**data.get("embed", {})),
-        search=SearchConfig(**data.get("search", {})),
+        llm=LLMConfig(**data.get("llm", {})),
         topics=TopicsConfig(**data.get("topics", {})),
         log=LogConfig(**data.get("logging", {})),
-        zotero=ZoteroConfig(**data.get("zotero", {})),
         _root=root,
     )

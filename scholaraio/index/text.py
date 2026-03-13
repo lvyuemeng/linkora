@@ -1,5 +1,5 @@
 """
-index.py — SQLite FTS5 Full-Text Search Index
+index/text.py — SQLite FTS5 Full-Text Search Index
 ==============================================
 
 Indexed fields: title + abstract + conclusion (all searchable).

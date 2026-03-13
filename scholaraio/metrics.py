@@ -389,7 +389,8 @@ def call_llm(
         resolved_key = api_key or llm_cfg.api_key
     else:
         llm_cfg = config.llm
-        resolved_key = api_key or resolve_llm(config)
+        # BROKEN: resolve_llm function removed - will be refactored to use config.resolve_llm_api_key()
+        resolved_key = api_key or config.llm.api_key
 
     if not resolved_key:
         raise RuntimeError("未配置 LLM API key。")

@@ -248,7 +248,7 @@ def vsearch(
         workspace: Optional workspace name.
     """
     try:
-        from scholaraio.vectors import vsearch as _vsearch
+        from scholaraio.index import vsearch as _vsearch
     except ImportError:
         return _error(
             "missing_dependency",
@@ -1058,9 +1058,10 @@ def import_zotero(
         cfg = _get_cfg()
 
         # Resolve credentials
-        _api_key = api_key or cfg.api_key("zotero")
-        _library_id = library_id or cfg.api_key("zotero", "library_id")
-        _library_type = library_type or cfg.zotero.library_type
+        # BROKEN: cfg.api_key() removed - will be refactored to use cfg.resolve_zotero_api_key()
+        _api_key = api_key or cfg.sources.zotero_api_key
+        _library_id = library_id or cfg.sources.zotero_library_id
+        _library_type = library_type or cfg.sources.zotero_library_type
 
         if local:
             db_path = Path(local)
@@ -1184,7 +1185,8 @@ def attach_pdf(paper_ref: str, pdf_path: str) -> str:
         if check_server(cfg.ingest.mineru_endpoint):
             result = convert_pdf(dest_pdf, mineru_opts)
         else:
-            api_key = cfg.api_key("mineru")
+            # BROKEN: cfg.api_key() removed - will be refactored to use cfg.resolve_mineru_api_key()
+            api_key = cfg.ingest.mineru_api_key
             if not api_key:
                 return _error(
                     "missing_config",
