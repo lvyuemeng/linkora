@@ -322,7 +322,6 @@ class TopicModelOutput:
 
     def save(self, path: Path) -> None:
         """Save model to path."""
-        import pickle
 
         path.mkdir(parents=True, exist_ok=True)
 
@@ -351,7 +350,6 @@ class TopicModelOutput:
     def load(cls, path: Path) -> "TopicModelOutput":
         """Load model from path."""
         from bertopic import BERTopic
-        import pickle
 
         model_file = path / "bertopic_model.pkl"
         if not model_file.exists():
@@ -453,7 +451,9 @@ class TopicTrainer:
                     "Vector index not found. Run `scholaraio embed` first."
                 )
 
-            rows = conn.execute("SELECT paper_id, embedding FROM paper_vectors").fetchall()
+            rows = conn.execute(
+                "SELECT paper_id, embedding FROM paper_vectors"
+            ).fetchall()
         finally:
             conn.close()
 
@@ -712,8 +712,10 @@ class TopicTrainer:
             )
 
         n_topics = len(set(topics)) - (1 if -1 in topics else 0)
-        n_outliers = topics.count(-1) if isinstance(topics, list) else sum(
-            1 for t in topics if t == -1
+        n_outliers = (
+            topics.count(-1)
+            if isinstance(topics, list)
+            else sum(1 for t in topics if t == -1)
         )
         _log.info("Found %d topics, %d outliers", n_topics, n_outliers)
 

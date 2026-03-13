@@ -1,10 +1,15 @@
-"""sources/endnote.py — 解析 Endnote XML 和 RIS 文件，转换为 PaperMetadata"""
+"""sources/endnote.py — 解析 Endnote XML 和 RIS 文件，转换为 PaperMetadata
+
+Refactored to use EndnoteSource class with PaperSource Protocol.
+"""
 
 from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 
 from endnote_utils.core import (
     iter_records_ris,
@@ -13,8 +18,9 @@ from endnote_utils.core import (
 )
 
 from scholaraio.papers import PaperMetadata, _extract_lastname
+from scholaraio.log import get_logger
 
-_log = logging.getLogger(__name__)
+_log = get_logger(__name__)
 
 # ref_type string → Crossref-style paper_type
 _REF_TYPE_MAP: dict[str, str] = {
@@ -158,13 +164,97 @@ def _record_to_meta(record: dict, source_file: str) -> PaperMetadata:
     )
 
 
+def _record_to_dict(record: dict, source_file: str) -> dict:
+    """Convert endnote record to standardized dict for PaperSource."""
+    meta = _record_to_meta(record, source_file)
+    return {
+        "id": meta.doi or meta.title,
+        "title": meta.title,
+        "authors": meta.authors,
+        "year": meta.year,
+        "doi": meta.doi,
+        "journal": meta.journal,
+        "abstract": meta.abstract,
+        "paper_type": meta.paper_type,
+        "volume": meta.volume,
+        "issue": meta.issue,
+        "pages": meta.pages,
+        "publisher": meta.publisher,
+        "issn": meta.issn,
+        "source_file": meta.source_file,
+        "extraction_method": meta.extraction_method,
+    }
+
+
 # ============================================================================
-#  Public API
+#  EndnoteSource class (PaperSource Protocol)
 # ============================================================================
 
 
+@dataclass(frozen=True)
+class EndnoteSource:
+    """Parse Endnote XML/RIS files as paper source.
+
+    Implements PaperSource Protocol for unified access to Endnote exports.
+
+    Example:
+        source = EndnoteSource()
+        for paper in source.fetch(paths=[Path("export.xml")]):
+            print(paper["title"])
+    """
+
+    @property
+    def name(self) -> str:
+        return "endnote"
+
+    def fetch(self, paths: list[Path] | None = None, **kwargs) -> Iterator[dict]:
+        """Fetch papers from Endnote XML/RIS files.
+
+        Args:
+            paths: List of Endnote export file paths (.xml or .ris)
+
+        Yields:
+            Paper dicts with standardized fields
+        """
+        if not paths:
+            return
+
+        for path in paths:
+            suffix = path.suffix.lower()
+            source_file = path.name
+
+            if suffix == ".xml":
+                _log.info("解析 Endnote XML: %s", path)
+                for elem in iter_records_xml(path):
+                    rec = process_record_xml(elem, "endnote")
+                    yield _record_to_dict(rec, source_file)
+
+            elif suffix == ".ris":
+                _log.info("解析 Endnote RIS: %s", path)
+                for rec in iter_records_ris(path):
+                    yield _record_to_dict(rec, source_file)
+
+            else:
+                _log.warning("不支持的文件格式，跳过: %s", path)
+
+    def count(self, paths: list[Path] | None = None, **kwargs) -> int:
+        """Count papers in Endnote files."""
+        if not paths:
+            return 0
+        return sum(1 for _ in self.fetch(paths=paths))
+
+
+# ============================================================================
+#  Legacy API (kept for backward compatibility)
+# ============================================================================
+
+
+# BROKEN: Use EndnoteSource class instead - kept for backward compatibility
 def parse_endnote(paths: list[Path]) -> list[PaperMetadata]:
     """解析 Endnote 导出文件（XML 或 RIS），返回 PaperMetadata 列表。
+
+    .. deprecated::
+        Use :class:`EndnoteSource` class instead.
 
     根据文件扩展名自动选择解析器：``.xml`` 使用 XML 解析，
     ``.ris`` 使用 RIS 解析。其他扩展名会被跳过并记录警告。

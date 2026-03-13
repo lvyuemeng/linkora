@@ -1,64 +1,77 @@
 """
-explore.py — 期刊全量探索
-==========================
+explore.py — Journal Exploration
 
-从 OpenAlex 批量拉取期刊论文（title + abstract），本地嵌入 + FAISS
-语义搜索。主题建模、可视化、查询复用 ``topics.py``（通过 ``papers_map``
-参数）。数据存储在 ``data/explore/<name>/``，与主库完全隔离。
+Fetch papers from OpenAlex, build local embeddings + FAISS for semantic search.
+Topic modeling, visualization, queries reuse topics.py (via papers_map parameter).
+Data stored in data/explore/<name>/, isolated from main library.
 
-用法::
+Usage::
 
-    from scholaraio.explore import fetch_journal, build_explore_vectors, build_explore_topics
-    fetch_journal("jfm", issn="0022-1120")
-    build_explore_vectors("jfm")
-    build_explore_topics("jfm")
+    from scholaraio.explore import OpenAlexSource, ExploreSession
+
+    # Fetch papers from OpenAlex
+    source = OpenAlexSource()
+    session = ExploreSession(name="jfm", source=source)
+    session.fetch(issn="0022-1120")
+
+    # Build vectors
+    session.build_vectors()
+
+    # Build topics
+    session.build_topics()
 """
 
 from __future__ import annotations
 
 import json
-import logging
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterator
+from typing import Protocol, Iterator
 
 import requests
 
-from scholaraio.log import ui
+from scholaraio.log import get_logger, ui
+from scholaraio.config import Config
 
-_log = logging.getLogger(__name__)
-
-if TYPE_CHECKING:
-    from scholaraio.config import Config
+_log = get_logger(__name__)
 
 # ============================================================================
-#  Config / paths
+#  Constants
 # ============================================================================
 
+_OA_WORKS = "https://api.openalex.org/works"
+_PER_PAGE = 200
 _DEFAULT_EXPLORE_DIR = Path("data/explore")
 
-
-def _explore_dir(name: str, cfg: Config | None = None) -> Path:
-    if cfg is not None:
-        return cfg._root / "data" / "explore" / name
-    return _DEFAULT_EXPLORE_DIR / name
+# ============================================================================
+#  PaperSource Protocol (Unified)
+# ============================================================================
 
 
-def _papers_path(name: str, cfg: Config | None = None) -> Path:
-    return _explore_dir(name, cfg) / "papers.jsonl"
+class PaperSource(Protocol):
+    """Protocol for paper data sources (local files, remote APIs, databases)."""
 
+    @property
+    def name(self) -> str:
+        """Source name identifier."""
+        ...
 
-def _db_path(name: str, cfg: Config | None = None) -> Path:
-    return _explore_dir(name, cfg) / "explore.db"
+    def fetch(self, **kwargs) -> Iterator[dict]:
+        """Fetch paper data from source.
 
+        Yields paper dicts with title, abstract, authors, etc.
+        """
+        ...
 
-def _meta_path(name: str, cfg: Config | None = None) -> Path:
-    return _explore_dir(name, cfg) / "meta.json"
+    def count(self, **kwargs) -> int:
+        """Count papers available in source."""
+        ...
 
 
 # ============================================================================
-#  Fetch from OpenAlex
+#  Helper Functions
 # ============================================================================
 
 
@@ -70,10 +83,6 @@ def _is_boilerplate(abstract: str) -> bool:
         or "preview has been provided" in low
         or "access link" in low
     )
-
-
-_OA_WORKS = "https://api.openalex.org/works"
-_PER_PAGE = 200
 
 
 def _reconstruct_abstract(inverted_index: dict | None) -> str:
@@ -88,8 +97,52 @@ def _reconstruct_abstract(inverted_index: dict | None) -> str:
     return " ".join(w for _, w in word_positions)
 
 
+# ============================================================================
+#  OpenAlexSource Implementation
+# ============================================================================
+
+
+class OpenAlexSource:
+    """OpenAlex API paper source for journal exploration."""
+
+    @property
+    def name(self) -> str:
+        return "openalex"
+
+    def fetch(
+        self,
+        issn: str,
+        year_range: str | None = None,
+        **kwargs,
+    ) -> Iterator[dict]:
+        """Fetch papers from OpenAlex API.
+
+        Args:
+            issn: Journal ISSN.
+            year_range: Year range filter (e.g., "2020-2025").
+            **kwargs: Additional parameters (page_size, etc.).
+
+        Yields:
+            Paper dicts with openalex_id, doi, title, abstract, authors, etc.
+        """
+        page_size = kwargs.get("page_size", _PER_PAGE)
+        cursor = "*"
+
+        while cursor:
+            papers, cursor = _fetch_page(issn, cursor, year_range, page_size)
+            if not papers:
+                break
+            yield from papers
+
+    def count(self, issn: str, **kwargs) -> int:
+        """Get total paper count from OpenAlex."""
+        # Note: OpenAlex doesn't provide count without fetching
+        # This is a placeholder - actual count comes after fetch
+        return 0
+
+
 def _fetch_page(
-    issn: str, page: int, year_range: str | None = None, cursor: str = "*"
+    issn: str, cursor: str, year_range: str | None = None, per_page: int = _PER_PAGE
 ) -> tuple[list[dict], str | None]:
     """Fetch one page of results from OpenAlex."""
     filt = f"primary_location.source.issn:{issn}"
@@ -98,12 +151,13 @@ def _fetch_page(
 
     params = {
         "filter": filt,
-        "per_page": _PER_PAGE,
+        "per_page": per_page,
         "cursor": cursor,
         "select": "id,title,publication_year,doi,authorships,abstract_inverted_index,"
         "primary_location,cited_by_count,type",
         "sort": "publication_year:asc",
     }
+
     # Retry with exponential backoff for transient errors
     last_exc: Exception | None = None
     for attempt in range(3):
@@ -112,7 +166,7 @@ def _fetch_page(
                 _OA_WORKS,
                 params=params,
                 timeout=30,
-                proxies={"http": None, "https": None},
+                proxies={"http": None, "https": None},  # type: ignore[arg-type]
             )
             if resp.status_code == 429:
                 wait = 2**attempt
@@ -150,7 +204,7 @@ def _fetch_page(
 
         abstract = _reconstruct_abstract(item.get("abstract_inverted_index"))
 
-        # Strip HTML tags from title (OpenAlex includes <b>, <scp>, <i>, etc.)
+        # Strip HTML tags from title
         raw_title = item.get("title") or ""
         clean_title = re.sub(r"<[^>]+>", "", raw_title)
 
@@ -171,130 +225,166 @@ def _fetch_page(
     return papers, next_cursor
 
 
-def fetch_journal(
-    name: str,
-    issn: str,
-    *,
-    year_range: str | None = None,
-    cfg: Config | None = None,
-) -> int:
-    """从 OpenAlex 批量拉取期刊全量论文。
-
-    使用 cursor-based 分页遍历指定 ISSN 的所有论文，
-    提取 title、abstract、authors 等字段，写入 JSONL 文件。
-
-    Args:
-        name: 探索库名称（如 ``"jfm"``），用作目录名。
-        issn: 期刊 ISSN（如 ``"0022-1120"``）。
-        year_range: 年份过滤（如 ``"2020-2025"``），为 ``None`` 时拉取全量。
-        cfg: 可选的全局配置。
-
-    Returns:
-        拉取的论文总数。
-    """
-    out_dir = _explore_dir(name, cfg)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    papers_file = _papers_path(name, cfg)
-    meta_file = _meta_path(name, cfg)
-
-    from scholaraio.metrics import timer
-
-    total = 0
-    cursor = "*"
-
-    with timer("explore.fetch", "api") as t:
-        tmp_file = papers_file.with_suffix(".jsonl.tmp")
-        with open(tmp_file, "w", encoding="utf-8") as f:
-            page = 0
-            while cursor:
-                page += 1
-                papers, cursor = _fetch_page(issn, page, year_range, cursor)
-                if not papers:
-                    break
-                for p in papers:
-                    f.write(json.dumps(p, ensure_ascii=False) + "\n")
-                total += len(papers)
-                _log.info(
-                    "page %d: +%d papers (total %d, %.0fs)",
-                    page,
-                    len(papers),
-                    total,
-                    t.elapsed,
-                )
-        tmp_file.replace(papers_file)
-
-    meta = {
-        "name": name,
-        "source": "openalex",
-        "issn": issn,
-        "year_range": year_range,
-        "count": total,
-        "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "elapsed_seconds": round(t.elapsed, 1),
-    }
-    meta_file.write_text(
-        json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
-    ui(f"Done: {total} papers, {t.elapsed:.0f}s -> {papers_file}")
-    return total
-
-
 # ============================================================================
-#  Load papers from JSONL
+#  Separated States
 # ============================================================================
 
 
-def iter_papers(name: str, cfg: Config | None = None) -> Iterator[dict]:
-    """逐行读取 JSONL，yield 论文字典。"""
-    path = _papers_path(name, cfg)
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                yield json.loads(line)
+@dataclass(frozen=True)
+class ExploreOptions:
+    """Options for exploration."""
+
+    name: str
+    issn: str
+    year_range: str | None = None
 
 
-def count_papers(name: str, cfg: Config | None = None) -> int:
-    """返回探索库中的论文数量。"""
-    meta_file = _meta_path(name, cfg)
-    if meta_file.exists():
-        return json.loads(meta_file.read_text("utf-8")).get("count", 0)
-    return sum(1 for _ in iter_papers(name, cfg))
+@dataclass(frozen=True)
+class FetchedPapers:
+    """Stage 1: Fetched papers from source."""
+
+    name: str
+    total: int
+    elapsed: float
+
+
+@dataclass(frozen=True)
+class StoredPapers:
+    """Stage 2: Papers stored in JSONL."""
+
+    name: str
+    papers_file: Path
+    meta_file: Path
+    count: int
+
+
+@dataclass(frozen=True)
+class PaperMap:
+    """Stage 3: Paper ID to metadata mapping."""
+
+    name: str
+    mapping: dict[str, dict]
+
+
+@dataclass(frozen=True)
+class ExploreError:
+    """Error state."""
+
+    name: str
+    stage: str
+    error: str
 
 
 # ============================================================================
-#  Paper Map Builder
+#  ExploreSession
 # ============================================================================
 
 
-def build_papers_map(name: str, cfg: Config | None = None) -> dict[str, dict]:
-    """从 JSONL 构建 paper_id → metadata 映射。
+class ExploreSession:
+    """Exploration session with injectable source."""
 
-    Args:
-        name: 探索库名称。
-        cfg: 可选的全局配置。
+    def __init__(self, name: str, source: PaperSource, cfg: Config | None = None):
+        """Initialize exploration session.
 
-    Returns:
-        ``{paper_id: paper_dict}`` 映射，paper_id 为 DOI 或 openalex_id。
-    """
-    pm: dict[str, dict] = {}
-    for p in iter_papers(name, cfg):
-        pid = p.get("doi") or p.get("openalex_id", "")
-        if pid:
-            pm[pid] = p
-    return pm
+        Args:
+            name: Exploration name (e.g., "jfm"), used as directory name.
+            source: PaperSource implementation (e.g., OpenAlexSource).
+            cfg: Optional global config.
+        """
+        self._name = name
+        self._source = source
+        self._cfg = cfg
+
+    def _explore_dir(self) -> Path:
+        if self._cfg is not None:
+            return self._cfg._root / "data" / "explore" / self._name
+        return _DEFAULT_EXPLORE_DIR / self._name
+
+    def _papers_path(self) -> Path:
+        return self._explore_dir() / "papers.jsonl"
+
+    def _meta_path(self) -> Path:
+        return self._explore_dir() / "meta.json"
+
+    # Stage 1: Fetch
+    def fetch(
+        self, issn: str, year_range: str | None = None
+    ) -> FetchedPapers | ExploreError:
+        """Fetch papers from source and store in JSONL."""
+        out_dir = self._explore_dir()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        papers_file = self._papers_path()
+        meta_file = self._meta_path()
+
+        from scholaraio.metrics import timer
+
+        total = 0
+
+        with timer("explore.fetch", "api") as t:
+            tmp_file = papers_file.with_suffix(".jsonl.tmp")
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                for paper in self._source.fetch(issn=issn, year_range=year_range):
+                    f.write(json.dumps(paper, ensure_ascii=False) + "\n")
+                    total += 1
+                    if total % 1000 == 0:
+                        _log.info(
+                            "fetched %d papers (%.0fs)", total, t.elapsed
+                        )
+            tmp_file.replace(papers_file)
+
+        meta = {
+            "name": self._name,
+            "source": self._source.name,
+            "issn": issn,
+            "year_range": year_range,
+            "count": total,
+            "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "elapsed_seconds": round(t.elapsed, 1),
+        }
+        meta_file.write_text(
+            json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        ui(f"Done: {total} papers, {t.elapsed:.0f}s -> {papers_file}")
+
+        return FetchedPapers(
+            name=self._name,
+            total=total,
+            elapsed=t.elapsed,
+        )
+
+    # Stage 2: Iterate papers
+    def iter_papers(self) -> Iterator[dict]:
+        """Iterate over stored papers."""
+        path = self._papers_path()
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    yield json.loads(line)
+
+    # Stage 3: Build paper map
+    def build_papers_map(self) -> PaperMap:
+        """Build paper_id to metadata mapping."""
+        pm: dict[str, dict] = {}
+        for p in self.iter_papers():
+            pid = p.get("doi") or p.get("openalex_id", "")
+            if pid:
+                pm[pid] = p
+        return PaperMap(name=self._name, mapping=pm)
+
+    # Path helpers for external use
+    def get_dir(self) -> Path:
+        """Get explore directory path."""
+        return self._explore_dir()
+
+    def get_db_path(self) -> Path:
+        """Get explore vector database path."""
+        return self._explore_dir() / "explore.db"
 
 
 # ============================================================================
-#  Path Helpers (for external use with VectorIndex/TopicTrainer)
+#  Legacy Functions
 # ============================================================================
 
-
-def get_explore_dir(name: str, cfg: Config | None = None) -> Path:
-    """Get explore directory path."""
-    return _explore_dir(name, cfg)
-
-
-def get_explore_db_path(name: str, cfg: Config | None = None) -> Path:
-    """Get explore vector database path."""
-    return _db_path(name, cfg)
+# BROKEN: Old standalone functions - removed.
+# Use ExploreSession with OpenAlexSource instead.

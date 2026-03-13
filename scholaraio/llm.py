@@ -10,7 +10,7 @@ Usage:
 
     # Data initiation
     request = LLMRequest(prompt="your prompt", config=config)
-    
+
     # Consuming flow
     runner = LLMRunner(config)
     result = runner.execute(request)
@@ -20,13 +20,9 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
-
 import requests
-
-if TYPE_CHECKING:
-    from scholaraio.config import Config, LLMConfig
+from dataclasses import dataclass
+from scholaraio.config import Config, LLMConfig
 
 _log = logging.getLogger(__name__)
 
@@ -39,6 +35,7 @@ _log = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class LLMRequest:
     """Immutable LLM request data."""
+
     prompt: str
     config: "Config | LLMConfig"
     system: str | None = None
@@ -52,6 +49,7 @@ class LLMRequest:
 @dataclass
 class LLMResult:
     """LLM call result."""
+
     content: str
     tokens_in: int = 0
     tokens_out: int = 0
@@ -68,6 +66,7 @@ class LLMResult:
 @dataclass(frozen=True)
 class PromptTemplate:
     """Immutable prompt template."""
+
     system: str
     user_template: str
 

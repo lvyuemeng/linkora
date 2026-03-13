@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, Generator
 import requests
 
 if TYPE_CHECKING:
-    from .config import Config, LLMConfig, resolve_llm, resolve_llm
+    from .config import Config, LLMConfig, resolve_llm
 
 _log = logging.getLogger(__name__)
 

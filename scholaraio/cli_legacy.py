@@ -720,9 +720,7 @@ def cmd_shared_refs(args: argparse.Namespace, cfg) -> None:
     min_shared = args.min or 2
     pids = _resolve_ws_paper_ids(args, cfg)
     idx = SearchIndex(cfg.index_db)
-    results = idx.shared_citations(
-        paper_uuids, min_count=min_shared, paper_ids=pids
-    )
+    results = idx.shared_citations(paper_uuids, min_count=min_shared, paper_ids=pids)
     if not results:
         ui(f"没有找到被 ≥{min_shared} 篇论文共同引用的参考文献。")
         return

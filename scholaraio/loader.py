@@ -247,11 +247,13 @@ class ContentExtractor:
         for i, line in enumerate(lines, start=1):
             m = ContentExtractor._HEADER_RE.match(line.rstrip())
             if m:
-                headers.append({
-                    "line": i,
-                    "level": len(m.group(1)),
-                    "text": m.group(2).strip(),
-                })
+                headers.append(
+                    {
+                        "line": i,
+                        "level": len(m.group(1)),
+                        "text": m.group(2).strip(),
+                    }
+                )
         return headers
 
     @staticmethod
@@ -311,7 +313,7 @@ class LLMRunner:
     """LLM execution with unified retry logic (wraps scholaraio.llm)."""
 
     def __init__(self, config: Config) -> None:
-        from scholaraio.llm import LLMRunner as _LLMRunner, create_request
+        from scholaraio.llm import LLMRunner as _LLMRunner
 
         # Get API key for this config
         api_key = config.api_key("llm")
@@ -375,7 +377,9 @@ class PaperEnricher:
 
         # Get prompt template
         prompt_template = StrategyRegistry.get_prompt(strategy_key)
-        prompt = prompt_template.render(**{"headers": prompt_data, "sample": prompt_data, "text": prompt_data})
+        prompt = prompt_template.render(
+            **{"headers": prompt_data, "sample": prompt_data, "text": prompt_data}
+        )
 
         # Execute with retry
         raw, reason = runner.execute(prompt, timeout=timeout)
@@ -466,7 +470,8 @@ class PaperEnricher:
 
         if meta.get("l3_conclusion") and not force:
             _log.debug(
-                "existing L3 (method: %s), skipping", meta.get("l3_extraction_method", "?")
+                "existing L3 (method: %s), skipping",
+                meta.get("l3_extraction_method", "?"),
             )
             return True
 

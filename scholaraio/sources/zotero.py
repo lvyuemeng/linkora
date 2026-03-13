@@ -1,16 +1,21 @@
-"""sources/zotero.py — Zotero Web API / 本地 SQLite 导入，转换为 PaperMetadata"""
+"""sources/zotero.py — Zotero Web API / 本地 SQLite 导入，转换为 PaperMetadata
+
+Refactored to use ZoteroSource class with PaperSource Protocol.
+"""
 
 from __future__ import annotations
 
 import logging
 import re
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 
 from scholaraio.papers import PaperMetadata, _extract_lastname
-from scholaraio.log import ui
+from scholaraio.log import get_logger, ui
 
-_log = logging.getLogger(__name__)
+_log = get_logger(__name__)
 
 _DOI_PREFIX_RE = re.compile(r"^https?://(?:dx\.)?doi\.org/", re.IGNORECASE)
 _YEAR_RE = re.compile(r"\b(1[89]\d{2}|20\d{2})\b")
@@ -112,11 +117,214 @@ def _zotero_item_to_meta(item_data: dict, source_label: str) -> PaperMetadata:
     )
 
 
+def _zotero_item_to_dict(item_data: dict, source_label: str) -> dict:
+    """Convert Zotero item to standardized dict for PaperSource."""
+    meta = _zotero_item_to_meta(item_data, source_label)
+    return {
+        "id": meta.doi or meta.title,
+        "title": meta.title,
+        "authors": meta.authors,
+        "year": meta.year,
+        "doi": meta.doi,
+        "journal": meta.journal,
+        "abstract": meta.abstract,
+        "paper_type": meta.paper_type,
+        "volume": meta.volume,
+        "issue": meta.issue,
+        "pages": meta.pages,
+        "publisher": meta.publisher,
+        "issn": meta.issn,
+        "source_file": meta.source_file,
+        "extraction_method": meta.extraction_method,
+    }
+
+
 # ============================================================================
-#  Web API mode (requires pyzotero)
+#  ZoteroSource class (PaperSource Protocol)
 # ============================================================================
 
 
+@dataclass(frozen=True)
+class ZoteroSource:
+    """Import from Zotero API or local SQLite as paper source.
+
+    Implements PaperSource Protocol for unified access to Zotero data.
+
+    Example:
+        source = ZoteroSource(library_id="123456", api_key="xxx")
+        for paper in source.fetch():
+            print(paper["title"])
+    """
+
+    library_id: str = ""
+    api_key: str = ""
+    library_type: str = "user"
+
+    @property
+    def name(self) -> str:
+        return "zotero"
+
+    def fetch(
+        self,
+        db_path: Path | None = None,
+        collection_key: str | None = None,
+        item_types: list[str] | None = None,
+        **kwargs,
+    ) -> Iterator[dict]:
+        """Fetch papers from Zotero.
+
+        If db_path is provided, use local SQLite mode.
+        Otherwise, use API mode if library_id and api_key are set.
+
+        Args:
+            db_path: Local Zotero SQLite database path
+            collection_key: Filter by collection
+            item_types: Filter by item types
+
+        Yields:
+            Paper dicts with standardized fields
+        """
+        # Local SQLite mode
+        if db_path and db_path.exists():
+            yield from self._fetch_local(db_path, collection_key, item_types)
+        # API mode
+        elif self.library_id and self.api_key:
+            yield from self._fetch_api(collection_key, item_types)
+        else:
+            _log.warning("No db_path or library_id/api_key provided")
+
+    def _fetch_local(
+        self,
+        db_path: Path,
+        collection_key: str | None = None,
+        item_types: list[str] | None = None,
+    ) -> Iterator[dict]:
+        """Fetch from local SQLite database."""
+        storage_dir = db_path.parent / "storage"
+
+        conn = sqlite3.connect(f"file:{db_path}?immutable=1", uri=True)
+        conn.row_factory = sqlite3.Row
+
+        try:
+            # Build item ID filter for collection
+            item_id_filter: set[int] | None = None
+            if collection_key:
+                rows = conn.execute(
+                    "SELECT itemID FROM collectionItems ci "
+                    "JOIN collections c ON ci.collectionID = c.collectionID "
+                    "WHERE c.key = ?",
+                    (collection_key,),
+                ).fetchall()
+                item_id_filter = {r["itemID"] for r in rows}
+
+            # Get all top-level items (not attachments/notes)
+            type_filter = ""
+            if item_types:
+                placeholders = ",".join("?" for _ in item_types)
+                type_filter = f"AND it.typeName IN ({placeholders})"
+
+            query = f"""
+                SELECT i.itemID, i.key, it.typeName
+                FROM items i
+                JOIN itemTypes it ON i.itemTypeID = it.itemTypeID
+                WHERE it.typeName NOT IN ('attachment', 'note')
+                AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
+                {type_filter}
+            """
+            params: list = list(item_types) if item_types else []
+            items_rows = conn.execute(query, params).fetchall()
+
+            for row in items_rows:
+                item_id = row["itemID"]
+                item_type = row["typeName"]
+
+                if item_id_filter is not None and item_id not in item_id_filter:
+                    continue
+
+                # Build item_data dict from itemData tables
+                field_rows = conn.execute(
+                    "SELECT f.fieldName, idv.value "
+                    "FROM itemData id "
+                    "JOIN fields f ON id.fieldID = f.fieldID "
+                    "JOIN itemDataValues idv ON id.valueID = idv.valueID "
+                    "WHERE id.itemID = ?",
+                    (item_id,),
+                ).fetchall()
+                item_data: dict = {r["fieldName"]: r["value"] for r in field_rows}
+                item_data["itemType"] = item_type
+
+                # Get creators
+                creator_rows = conn.execute(
+                    "SELECT c.firstName, c.lastName, ct.creatorType "
+                    "FROM itemCreators ic "
+                    "JOIN creators c ON ic.creatorID = c.creatorID "
+                    "JOIN creatorTypes ct ON ic.creatorTypeID = ct.creatorTypeID "
+                    "WHERE ic.itemID = ? "
+                    "ORDER BY ic.orderIndex",
+                    (item_id,),
+                ).fetchall()
+                item_data["creators"] = [
+                    {
+                        "firstName": r["firstName"] or "",
+                        "lastName": r["lastName"] or "",
+                        "creatorType": r["creatorType"],
+                    }
+                    for r in creator_rows
+                ]
+
+                yield _zotero_item_to_dict(item_data, "zotero.sqlite")
+
+        finally:
+            conn.close()
+
+    def _fetch_api(
+        self,
+        collection_key: str | None = None,
+        item_types: list[str] | None = None,
+    ) -> Iterator[dict]:
+        """Fetch from Zotero Web API."""
+        from pyzotero import zotero as pyzotero
+
+        zot = pyzotero.Zotero(self.library_id, self.library_type, self.api_key)
+
+        # Build query parameters
+        kwargs: dict = {}
+        if item_types:
+            kwargs["itemType"] = " || ".join(item_types)
+
+        # Fetch items
+        if collection_key:
+            items = zot.everything(zot.collection_items(collection_key, **kwargs))
+        else:
+            items = zot.everything(zot.items(**kwargs))
+
+        # Filter out attachments and notes (keep only top-level items)
+        items = [
+            it
+            for it in items
+            if it.get("data", {}).get("itemType")
+            not in ("attachment", "note", "linkAttachment")
+        ]
+
+        for item in items:
+            data = item.get("data", {})
+            yield _zotero_item_to_dict(data, "zotero-api")
+
+    def count(
+        self,
+        db_path: Path | None = None,
+        **kwargs,
+    ) -> int:
+        """Count papers in Zotero source."""
+        return sum(1 for _ in self.fetch(db_path=db_path))
+
+
+# ============================================================================
+#  Legacy API (kept for backward compatibility)
+# ============================================================================
+
+
+# BROKEN: Use ZoteroSource class instead - kept for backward compatibility
 def fetch_zotero_api(
     library_id: str,
     api_key: str,
