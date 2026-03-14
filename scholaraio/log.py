@@ -13,10 +13,10 @@ import logging.handlers
 import sys
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from scholaraio.config import Config
 
 # Explicit level mapping - no getattr metaprogramming
 _LOG_LEVELS: dict[str, int] = {
@@ -28,23 +28,6 @@ _LOG_LEVELS: dict[str, int] = {
 }
 
 
-class HasLogConfig(Protocol):
-    """Protocol for log configuration."""
-
-    @property
-    def log_file(self) -> Path: ...
-
-    @property
-    def level(self) -> str: ...
-
-    @property
-    def max_bytes(self) -> int: ...
-
-    @property
-    def backup_count(self) -> int: ...
-
-
-@dataclass
 class LogSettings:
     """Log configuration dataclass."""
 
@@ -89,7 +72,7 @@ class LoggerManager:
         """Whether logger has been initialized."""
         return self._initialized
 
-    def setup(self, cfg: HasLogConfig) -> str:
+    def setup(self, cfg: "Config") -> str:
         """Initialize root logger, return session_id for this session.
 
         Args:
@@ -111,8 +94,8 @@ class LoggerManager:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         fh = logging.handlers.RotatingFileHandler(
             log_path,
-            maxBytes=cfg.max_bytes,
-            backupCount=cfg.backup_count,
+            maxBytes=cfg.log.max_bytes,
+            backupCount=cfg.log.backup_count,
             encoding="utf-8",
         )
         fh.setLevel(logging.DEBUG)
@@ -121,7 +104,7 @@ class LoggerManager:
 
         # -- Console handler (INFO, bare message) --
         ch = logging.StreamHandler(sys.stdout)
-        ch.setLevel(_resolve_level(cfg.level))
+        ch.setLevel(_resolve_level(cfg.log.level))
         ch.setFormatter(logging.Formatter(_CONSOLE_FMT))
         root.addHandler(ch)
 
@@ -178,7 +161,7 @@ _logger_manager = LoggerManager()
 
 
 # Module-level convenience functions (delegated to singleton)
-def setup(cfg: HasLogConfig) -> str:
+def setup(cfg: "Config") -> str:
     """Initialize root logger, return session_id for this session."""
     return _logger_manager.setup(cfg)
 

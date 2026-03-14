@@ -6,6 +6,7 @@ Refactored to use LocalSource class with PaperSource Protocol.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -40,16 +41,30 @@ class LocalSource:
         Yields:
             Paper dicts with fields: id, title, authors, year, doi, journal, etc.
         """
-        for pdir in iter_paper_dirs(self.papers_dir):
-            md_file = pdir / "paper.md"
-            if not md_file.exists():
-                _log.warning("missing paper.md, skipping: %s", pdir.name)
+        if not self.papers_dir.exists():
+            _log.warning("Papers directory does not exist: %s", self.papers_dir)
+            return
+
+        # Iterate without sorted() - faster for large directories
+        for pdir in self.papers_dir.iterdir():
+            if not pdir.is_dir():
                 continue
+
+            # Single filesystem operation - use exception handling
+            md_path = pdir / "paper.md"
             try:
-                meta = read_meta(pdir)
-            except (ValueError, FileNotFoundError) as e:
+                md_path.read_text()
+            except FileNotFoundError:
+                _log.debug("missing paper.md, skipping: %s", pdir.name)
+                continue
+
+            # Try to read meta.json
+            try:
+                meta = json.loads((pdir / "meta.json").read_text())
+            except (json.JSONDecodeError, FileNotFoundError) as e:
                 _log.debug("failed to read meta.json in %s: %s", pdir.name, e)
                 continue
+
             paper_id = meta.get("id") or pdir.name
             yield {
                 "id": paper_id,
@@ -60,12 +75,14 @@ class LocalSource:
                 "journal": meta.get("journal"),
                 "abstract": meta.get("abstract"),
                 "meta": meta,
-                "md_path": str(md_file),
+                "md_path": str(md_path),
             }
 
     def count(self, **kwargs) -> int:
         """Count total papers in directory."""
-        return sum(1 for _ in iter_paper_dirs(self.papers_dir))
+        if not self.papers_dir.exists():
+            return 0
+        return sum(1 for p in self.papers_dir.iterdir() if p.is_dir())
 
 
 # BROKEN: Use LocalSource class instead - kept for backward compatibility

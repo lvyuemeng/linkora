@@ -35,11 +35,13 @@ uv sync
 
 # Add dependencies
 uv add requests
-uv add -D pytest
+uv add -dev pytest
 
 # Add optional dependencies
-uv add -E embed sentence-transformers faiss-cpu
-uv add -E topics bertopic pandas
+uv add --optional embed sentence-transformers faiss-cpu
+uv add --optional topics bertopic pandas
+# specified dependency group
+uv add --group ...
 
 # Run commands without activation
 uv run python -m scholaraio --help

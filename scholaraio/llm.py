@@ -6,9 +6,10 @@ Unified LLM execution with retry logic.
 Uses data class + flow pattern (no convenience function).
 
 Usage:
-    from scholaraio.llm import LLMRunner, LLMRequest
+    from scholaraio.llm import LLMRunner, LLMRequest, LLMConfig
 
     # Data initiation
+    config = LLMConfig(model="deepseek-chat", api_key="sk-...")
     request = LLMRequest(prompt="your prompt", config=config)
 
     # Consuming flow
@@ -18,13 +19,33 @@ Usage:
 
 from __future__ import annotations
 
-import logging
 import time
-import requests
 from dataclasses import dataclass
-from scholaraio.config import Config, LLMConfig
+from typing import Protocol
 
-_log = logging.getLogger(__name__)
+from scholaraio.config import LLMConfig
+from scholaraio.http import HTTPClient
+from scholaraio.log import get_logger
+
+_log = get_logger(__name__)
+
+
+# ============================================================================
+#  Protocols (Interface-Based Design)
+# ============================================================================
+
+
+class LLMClient(Protocol):
+    """Protocol for LLM client implementations."""
+
+    @property
+    def name(self) -> str:
+        """Client name."""
+        ...
+
+    def complete(self, request: LLMRequest) -> LLMResult:
+        """Execute LLM request and return result."""
+        ...
 
 
 # ============================================================================
@@ -33,11 +54,47 @@ _log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
+class HTTPHeaders:
+    """HTTP headers configuration."""
+
+    authorization: str
+    content_type: str = "application/json"
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "Authorization": self.authorization,
+            "Content-Type": self.content_type,
+        }
+
+
+@dataclass(frozen=True)
+class LLMPayload:
+    """LLM request payload structure."""
+
+    model: str
+    messages: list[dict[str, str]]
+    temperature: int = 0
+    max_tokens: int = 8000
+    response_format: dict[str, str] | None = None
+
+    def to_dict(self) -> dict:
+        result = {
+            "model": self.model,
+            "messages": self.messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+        if self.response_format:
+            result["response_format"] = self.response_format
+        return result
+
+
+@dataclass(frozen=True)
 class LLMRequest:
     """Immutable LLM request data."""
 
     prompt: str
-    config: "Config | LLMConfig"
+    config: LLMConfig
     system: str | None = None
     json_mode: bool = True
     max_tokens: int = 8000
@@ -46,7 +103,7 @@ class LLMRequest:
     purpose: str = ""
 
 
-@dataclass
+@dataclass(frozen=True)
 class LLMResult:
     """LLM call result."""
 
@@ -82,18 +139,23 @@ class PromptTemplate:
 class LLMRunner:
     """LLM runner - consumes LLMRequest and produces LLMResult."""
 
-    def __init__(self, config: "Config | LLMConfig", api_key: str = ""):
-        from scholaraio.config import LLMConfig, resolve_llm
-
-        if isinstance(config, LLMConfig):
-            self._llm_cfg = config
-            self._api_key = api_key or config.api_key
-        else:
-            self._llm_cfg = config.llm
-            self._api_key = api_key or resolve_llm(config)
+    def __init__(
+        self,
+        config: LLMConfig,
+        http_client: HTTPClient,
+        api_key: str = "",
+    ):
+        self._llm_cfg = config
+        self._api_key = api_key or config.resolve_api_key()
 
         if not self._api_key:
             raise RuntimeError("No LLM API key configured.")
+
+        self._http_client = http_client
+
+    @property
+    def name(self) -> str:
+        return "llm-runner"
 
     def execute(self, request: LLMRequest) -> LLMResult:
         """Execute LLM request with retry logic.
@@ -111,19 +173,20 @@ class LLMRunner:
             messages.append({"role": "system", "content": request.system})
         messages.append({"role": "user", "content": request.prompt})
 
-        payload: dict[str, str | int] = {
-            "model": self._llm_cfg.model,
-            "messages": messages,
-            "temperature": 0,
-            "max_tokens": request.max_tokens,
-        }
+        response_format: dict[str, str] | None = None
         if request.json_mode:
-            payload["response_format"] = {"type": "json_object"}
+            response_format = {"type": "json_object"}
 
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
+        payload = LLMPayload(
+            model=self._llm_cfg.model,
+            messages=messages,
+            max_tokens=request.max_tokens,
+            response_format=response_format,
+        )
+
+        headers = HTTPHeaders(
+            authorization=f"Bearer {self._api_key}",
+        )
 
         timeout = request.timeout or self._llm_cfg.timeout
         last_error: Exception | None = None
@@ -151,8 +214,8 @@ class LLMRunner:
     def _make_request(
         self,
         url: str,
-        payload: dict,
-        headers: dict,
+        payload: LLMPayload,
+        headers: HTTPHeaders,
         timeout: int,
         purpose: str = "",
     ) -> LLMResult:
@@ -166,7 +229,12 @@ class LLMRunner:
         content = ""
 
         try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+            resp = self._http_client.post(
+                url=url,
+                json=payload.to_dict(),
+                headers=headers.to_dict(),
+                timeout=timeout,
+            )
             resp.raise_for_status()
             data = resp.json()
 
@@ -207,46 +275,3 @@ class LLMRunner:
             model=model_name,
             duration_s=duration,
         )
-
-
-# ============================================================================
-#  Convenience Factory (optional, for simple cases)
-# ============================================================================
-
-
-def create_request(
-    prompt: str,
-    config: "Config | LLMConfig",
-    *,
-    system: str | None = None,
-    json_mode: bool = True,
-    max_tokens: int = 8000,
-    timeout: int | None = None,
-    max_retries: int = 3,
-    purpose: str = "",
-) -> LLMRequest:
-    """Create LLMRequest - data initiation.
-
-    Args:
-        prompt: User message content.
-        config: Full Config or LLMConfig instance.
-        system: Optional system message.
-        json_mode: Enable JSON response format.
-        max_tokens: Max completion tokens.
-        timeout: Request timeout.
-        max_retries: Number of retries on failure.
-        purpose: Call purpose identifier.
-
-    Returns:
-        LLMRequest instance ready for execution.
-    """
-    return LLMRequest(
-        prompt=prompt,
-        config=config,
-        system=system,
-        json_mode=json_mode,
-        max_tokens=max_tokens,
-        timeout=timeout,
-        max_retries=max_retries,
-        purpose=purpose,
-    )

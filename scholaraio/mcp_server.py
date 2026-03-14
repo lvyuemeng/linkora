@@ -40,9 +40,9 @@ def _get_cfg():
     if _cfg is None:
         from scholaraio.config import load_config
 
-        root = os.environ.get("SCHOLARAIO_ROOT")
+        root = os.environ.get("SYNAPSE_ROOT")
         if root:
-            _cfg = load_config(Path(root) / "config.yaml")
+            _cfg = load_config(root=Path(root))
         else:
             _cfg = load_config()
 
@@ -1058,10 +1058,10 @@ def import_zotero(
         cfg = _get_cfg()
 
         # Resolve credentials
-        # BROKEN: cfg.api_key() removed - will be refactored to use cfg.resolve_zotero_api_key()
-        _api_key = api_key or cfg.sources.zotero_api_key
-        _library_id = library_id or cfg.sources.zotero_library_id
-        _library_type = library_type or cfg.sources.zotero_library_type
+        # BROKEN: old API removed - will use cfg.sources.zotero.api_key
+        _api_key = api_key or cfg.sources.zotero.api_key
+        _library_id = library_id or cfg.sources.zotero.library_id
+        _library_type = library_type or cfg.sources.zotero.library_type
 
         if local:
             db_path = Path(local)

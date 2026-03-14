@@ -23,34 +23,20 @@ Usage:
 from __future__ import annotations
 
 import json
-import logging
 import re
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from scholaraio.llm import LLMRunner, LLMRequest, PromptTemplate
+from scholaraio.log import get_logger
+
 if TYPE_CHECKING:
     from scholaraio.config import Config
 
-_log = logging.getLogger(__name__)
+_log = get_logger(__name__)
 
 # ============================================================================
-# Strategy Registry: Key-based Pipeline Resolution
-# ============================================================================
-
-
-@dataclass(frozen=True)
-class PromptTemplate:
-    """Immutable prompt template."""
-
-    system: str
-    user_template: str
-
-    def render(self, **kwargs: str) -> str:
-        return self.user_template.format(**kwargs)
-
-
 # Prompt definitions
 _TOC_PROMPT = PromptTemplate(
     system="You are an academic paper analyzer.",
@@ -305,20 +291,19 @@ class ContentExtractor:
 
 
 # ============================================================================
-# LLM Runner
+# LLM Runner Wrapper
 # ============================================================================
 
 
-class LLMRunner:
-    """LLM execution with unified retry logic (wraps scholaraio.llm)."""
+class LoaderLLMRunner:
+    """Wrapper around llm.LLMRunner for loader-specific interface."""
 
     def __init__(self, config: Config) -> None:
-        from scholaraio.llm import LLMRunner as _LLMRunner
+        from scholaraio.http import RequestsClient
 
-        # Get API key for this config
-        api_key = config.api_key("llm")
-        self._runner = _LLMRunner(config, api_key=api_key)
-        self._config = config
+        api_key = config.llm.resolve_api_key()
+        http_client = RequestsClient()
+        self._runner = LLMRunner(config.llm, http_client, api_key)
 
     def execute(
         self,
@@ -328,20 +313,22 @@ class LLMRunner:
         timeout: int | None = None,
     ) -> tuple[str | None, str]:
         """Execute LLM with unified retry. Returns (result, reason)."""
-        from scholaraio.llm import LLMRequest
-
         request = LLMRequest(
             prompt=prompt,
-            config=self._config,
+            config=self._runner._llm_cfg,  # Use the internal LLMConfig
             timeout=timeout,
             max_retries=max_retries,
             purpose="loader",
         )
         try:
             result = self._runner.execute(request)
-            return result.content, f"attempt{1}"
+            return result.content, "attempt1"
         except Exception as e:
             return None, str(e)
+
+
+# Alias for backward compatibility
+_LLMRunner = LoaderLLMRunner
 
 
 # ============================================================================
@@ -357,17 +344,18 @@ class PaperEnricher:
         from scholaraio.papers import PaperStore
 
         self._store = PaperStore(papers_dir)
+        self._papers_dir = papers_dir
 
-    def _get_runner(self, config: Config) -> LLMRunner:
+    def _get_runner(self, config: Config) -> LoaderLLMRunner:
         """Get LLM runner for config."""
-        return LLMRunner(config)
+        return LoaderLLMRunner(config)
 
     def _execute(
         self,
         strategy_key: str,
         lines: list[str],
         meta: dict,
-        runner: LLMRunner,
+        runner: LoaderLLMRunner,
         *,
         timeout: int | None = None,
     ) -> tuple[str | None, str]:
@@ -382,7 +370,7 @@ class PaperEnricher:
         )
 
         # Execute with retry
-        raw, reason = runner.execute(prompt, timeout=timeout)
+        raw, reason = runner.execute(prompt, max_retries=2, timeout=timeout)
         if not raw:
             return None, f"{strategy_key}-{reason}"
 
@@ -404,7 +392,9 @@ class PaperEnricher:
         force: bool = False,
     ) -> bool:
         """Enrich TOC for a paper."""
-        paper_d = self._store.paper_dir(paper_id)
+        from scholaraio.papers import paper_dir
+
+        paper_d = paper_dir(self._papers_dir, paper_id)
         if not paper_d.exists():
             _log.error(f"Paper directory not found: {paper_d}")
             return False
@@ -457,7 +447,9 @@ class PaperEnricher:
         force: bool = False,
     ) -> bool:
         """Enrich conclusion for a paper."""
-        paper_d = self._store.paper_dir(paper_id)
+        from scholaraio.papers import paper_dir
+
+        paper_d = paper_dir(self._papers_dir, paper_id)
         if not paper_d.exists():
             _log.error(f"Paper directory not found: {paper_d}")
             return False
@@ -544,7 +536,7 @@ class PaperEnricher:
         self,
         lines: list[str],
         meta: dict,
-        runner: LLMRunner,
+        runner: LoaderLLMRunner,
     ) -> tuple[str | None, str]:
         """Extract conclusion by selecting from headers."""
         headers = ContentExtractor.extract_headers(lines)
@@ -558,7 +550,7 @@ class PaperEnricher:
         self,
         lines: list[str],
         meta: dict,
-        runner: LLMRunner,
+        runner: LoaderLLMRunner,
     ) -> tuple[str | None, str]:
         """Extract conclusion using fallback (direct line numbers)."""
         _log.debug("[Fallback] switching to fallback")
@@ -567,7 +559,7 @@ class PaperEnricher:
     def _validate(
         self,
         text: str,
-        runner: LLMRunner,
+        runner: LoaderLLMRunner,
     ) -> tuple[str | None, str]:
         """Validate and clean conclusion text."""
         if len(text.strip()) < 100:

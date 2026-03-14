@@ -317,7 +317,7 @@ class PaperFilter:
 
 | Module | Status | Key Changes |
 |--------|--------|-------------|
-| log.py | ✅ | LoggerManager singleton, HasLogConfig Protocol |
+| log.py | ✅ | LoggerManager singleton, uses Config.log directly |
 | papers.py | ✅ | PaperStore, PaperMetadata, YearRange, Issue, PaperFilter |
 | index/ (text.py) | ✅ | FTS5 search (moved from index.py) |
 | index/ (vector.py) | ✅ | FAISS semantic search (moved from vectors.py) |
@@ -408,52 +408,4 @@ class EndnoteSource:
 | Patterns | Frozen dataclasses, resolve_*() methods on Config |
 | Status | Module restructure ✅, Config redesign ✅, CLI refactor ⬜ |
 
----
 
-## Config Refactor (v2)
-
-### Changes from Section 5
-
-1. **Removed Protocol classes** - Not needed for Config dataclass
-2. **Removed backward compatibility wrappers** - ZoteroCompat, EmbedCompat, SearchCompat deleted
-3. **API key resolution as Config methods** - `resolve_llm_api_key()`, `resolve_zotero_api_key()`, `resolve_zotero_library_id()`, `resolve_mineru_api_key()`
-4. **Workspace from config** - WorkspaceConfig.name read from config.yaml, paths derived from workspace
-
-### Updated Config Structure
-
-```python
-@dataclass
-class Config:
-    workspace: WorkspaceConfig
-    index: IndexConfig
-    sources: SourcesConfig
-    ingest: IngestConfig
-    llm: LLMConfig
-    topics: TopicsConfig
-    log: LogConfig
-    _root: Path
-
-    # API key resolution
-    def resolve_llm_api_key(self) -> str: ...
-    def resolve_zotero_api_key(self) -> str: ...
-    def resolve_zotero_library_id(self) -> str: ...
-    def resolve_mineru_api_key(self) -> str: ...
-
-    # Path properties (derived from workspace)
-    @property
-    def workspace_dir(self) -> Path: ...
-    @property
-    def papers_dir(self) -> Path: ...
-    @property
-    def index_db(self) -> Path: ...
-```
-
-### Broken API Marked
-
-Old APIs marked with `# BROKEN:` until refactored:
-- `cfg.api_key("zotero")` → use `cfg.resolve_zotero_api_key()`
-- `cfg.api_key("zotero", "library_id")` → use `cfg.resolve_zotero_library_id()`
-- `cfg.api_key("mineru")` → use `cfg.resolve_mineru_api_key()`
-- `cfg.zotero` → use `cfg.sources`
-- `cfg.embed` → use `cfg.index`
-- `cfg.search` → use `cfg.index`

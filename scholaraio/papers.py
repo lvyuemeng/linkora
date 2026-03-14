@@ -7,7 +7,6 @@ Single source for paper storage, caching, and audit.
 from __future__ import annotations
 
 import json
-import logging
 import re
 import uuid
 import warnings
@@ -15,7 +14,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Callable
 
-_log = logging.getLogger(__name__)
+from scholaraio.log import get_logger
+from scholaraio.audit import Issue, YearRange
+
+_log = get_logger(__name__)
 
 # ============================================================================
 #  Data Structures (from ingest/metadata/_models.py)
@@ -139,31 +141,7 @@ def _extract_lastname(full_name: str) -> str:
     return parts[0] if parts else ""
 
 
-@dataclass(frozen=True)
-class Issue:
-    """Audit issue report."""
 
-    paper_id: str
-    severity: str  # "error" | "warning" | "info"
-    rule: str
-    message: str
-
-
-class YearRange(tuple):
-    """Year filter range: (start, end) with None for unbounded."""
-
-    __slots__ = ()
-
-    def __new__(cls, start: int | None, end: int | None) -> "YearRange":
-        return super().__new__(cls, (start, end))
-
-    @property
-    def start(self) -> int | None:
-        return self[0]
-
-    @property
-    def end(self) -> int | None:
-        return self[1]
 
 
 @dataclass
@@ -269,7 +247,7 @@ class PaperStore:
 
             # Run all rules
             for rule in rules:
-                issues.extend(rule(self, pdir, data))
+                issues.extend(rule(pdir, data))
 
             # DOI tracking for duplicate check
             doi = (data.get("doi") or "").strip().lower()
@@ -388,37 +366,6 @@ _default_rules = [
 ]
 
 
-def format_audit(issues: list[Issue]) -> str:
-    """Format audit issues as report."""
-    if not issues:
-        return "Audit passed, no issues found."
-
-    errors = [i for i in issues if i.severity == "error"]
-    warnings = [i for i in issues if i.severity == "warning"]
-    infos = [i for i in issues if i.severity == "info"]
-
-    lines = [
-        f"Audit: {len(errors)} errors, {len(warnings)} warnings, {len(infos)} info\n"
-    ]
-
-    if errors:
-        lines.extend(["=" * 40, "Errors", "=" * 40])
-        for i in errors:
-            lines.append(f"  [{i.rule}] {i.paper_id}: {i.message}")
-
-    if warnings:
-        lines.extend(["", "-" * 40, "Warnings", "-" * 40])
-        for i in warnings:
-            lines.append(f"  [{i.rule}] {i.paper_id}: {i.message}")
-
-    if infos:
-        lines.extend(["", "-" * 40, "Info", "-" * 40])
-        for i in infos:
-            lines.append(f"  [{i.rule}] {i.paper_id}: {i.message}")
-
-    return "\n".join(lines)
-
-
 # =============================================================================
 #  Path Helpers
 # =============================================================================
@@ -462,71 +409,7 @@ def parse_year_range(year: str) -> YearRange:
 # =============================================================================
 
 
-@dataclass(frozen=True)
-class PaperFilter:
-    """Paper filter parameters (immutable) with matching method."""
 
-    year: str | None = None
-    journal: str | None = None
-    paper_type: str | None = None
-    author: str | None = None
-
-    def matches(self, meta: dict) -> bool:
-        """Check if paper metadata matches filter."""
-        if self.year:
-            start, end = parse_year_range(self.year)
-            try:
-                year = int(meta.get("year", 0))
-                if start and year < start:
-                    return False
-                if end and year > end:
-                    return False
-            except (ValueError, TypeError):
-                return False
-
-        if self.journal:
-            journal = (meta.get("journal") or "").lower()
-            if self.journal.lower() not in journal:
-                return False
-
-        if self.paper_type:
-            ptype = (meta.get("paper_type") or "").lower()
-            if self.paper_type.lower() not in ptype:
-                return False
-
-        if self.author:
-            authors = meta.get("authors") or []
-            if isinstance(authors, list):
-                author_found = any(self.author.lower() in a.lower() for a in authors)
-            else:
-                author_found = self.author.lower() in str(authors).lower()
-            if not author_found:
-                return False
-
-        return True
-
-    def apply(self, papers_dir: Path) -> list[dict]:
-        """Apply filter to papers directory.
-
-        Args:
-            papers_dir: Papers directory to filter.
-
-        Returns:
-            List of matching paper metadata.
-        """
-        store = PaperStore(papers_dir)
-        results = []
-        for pdir in store.iter_papers():
-            try:
-                meta = store.read_meta(pdir)
-            except (ValueError, FileNotFoundError):
-                continue
-
-            if self.matches(meta):
-                meta["_dir_name"] = pdir.name
-                results.append(meta)
-
-        return results
 
 
 # =============================================================================

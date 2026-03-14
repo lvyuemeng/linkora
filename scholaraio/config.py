@@ -1,17 +1,12 @@
 """
-config.py — ScholarAIO configuration loading and management
+config.py — Synapse configuration loading and management
 
-Priority (high to low):
-1. config.local.yaml (API keys, not tracked)
-2. config.yaml (main config)
-3. Code defaults
-
-Config file search:
-1. Explicit config_path
-2. SCHOLARAIO_CONFIG env var
-3. Walk up from cwd (max 6 levels)
-
-Workspace: Storage paths are derived from workspace identity in config.
+Layered resolution (priority top → bottom):
+1. CLI argument (--workspace)
+2. Environment variables (SYNAPSE_WORKSPACE)
+3. Workspace-local config (<workspace>/synapse.yml)
+4. Global config (~/.synapse/config.yml, ~/.config/synapse/config.yml)
+5. Built-in defaults
 """
 
 from __future__ import annotations
@@ -19,59 +14,76 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Iterator
 
 
-ENV_PREFIX = "SCHOLARAIO_"
+ENV_PREFIX = "SYNAPSE_"
 
 
-# Config Dataclasses
+# ============== Config Dataclasses ==============
 
 
 @dataclass(frozen=True)
 class WorkspaceConfig:
-    """Workspace identity - determines storage location."""
-
     name: str = "default"
     description: str = ""
+    root: str = ""  # Optional override for workspace root
+
+
+@dataclass(frozen=True)
+class LocalSourceConfig:
+    enabled: bool = True
+    papers_dir: str = "papers"
+    paths: list[str] = field(default_factory=list)  # Additional paper paths
+
+
+@dataclass(frozen=True)
+class ArxivSourceConfig:
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
+class OpenAlexSourceConfig:
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
+class ZoteroSourceConfig:
+    enabled: bool = False
+    library_id: str = ""
+    api_key: str = ""
+    library_type: str = "user"
+
+
+@dataclass(frozen=True)
+class EndnoteSourceConfig:
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
+class SourcesConfig:
+    local: LocalSourceConfig = field(default_factory=LocalSourceConfig)
+    arxiv: ArxivSourceConfig = field(default_factory=ArxivSourceConfig)
+    openalex: OpenAlexSourceConfig = field(default_factory=OpenAlexSourceConfig)
+    zotero: ZoteroSourceConfig = field(default_factory=ZoteroSourceConfig)
+    endnote: EndnoteSourceConfig = field(default_factory=EndnoteSourceConfig)
 
 
 @dataclass(frozen=True)
 class IndexConfig:
-    """Index module configuration (FTS + Vector)."""
-
-    # FTS
     top_k: int = 20
-    # Vector
     embed_model: str = "Qwen/Qwen3-Embedding-0.6B"
     embed_device: str = "auto"
     embed_cache: str = "~/.cache/modelscope/hub/models"
     embed_top_k: int = 10
     embed_source: str = "modelscope"
-    # Chunking (for L3 content)
     chunk_size: int = 800
     chunk_overlap: int = 150
 
 
 @dataclass(frozen=True)
-class SourcesConfig:
-    """Data source configuration."""
-
-    # Local
-    local_enabled: bool = True
-    # OpenAlex
-    openalex_enabled: bool = True
-    # Zotero
-    zotero_enabled: bool = False
-    zotero_library_id: str = ""
-    zotero_api_key: str = ""
-    zotero_library_type: str = "user"
-    # Endnote
-    endnote_enabled: bool = True
-
-
-@dataclass(frozen=True)
 class LLMConfig:
-    """LLM backend configuration."""
+    """LLM client configuration."""
 
     backend: str = "openai-compat"
     model: str = "deepseek-chat"
@@ -81,69 +93,180 @@ class LLMConfig:
     timeout_toc: int = 120
     timeout_clean: int = 90
 
+    def resolve_api_key(self) -> str:
+        """Resolve API key with environment variable fallback."""
+        import os
+        return self.api_key or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
+
 
 @dataclass(frozen=True)
 class IngestConfig:
-    """PDF ingestion configuration."""
-
-    # Extractor
-    extractor: str = "robust"  # regex | auto | llm | robust
-    # MinerU
+    extractor: str = "robust"
     mineru_endpoint: str = "http://localhost:8000"
     mineru_cloud_url: str = "https://mineru.net/api/v4"
     mineru_api_key: str = ""
-    # LLM Abstract
-    abstract_llm_mode: str = "verify"  # off | fallback | verify
+    abstract_llm_mode: str = "verify"
     contact_email: str = ""
 
 
 @dataclass(frozen=True)
 class TopicsConfig:
-    """BERTopic configuration."""
-
     min_topic_size: int = 5
-    nr_topics: int = 0  # 0 = auto
-    model_dir: str = "data/topic_model"
+    nr_topics: int = 0
+    model_dir: str = "topic_model"
 
 
 @dataclass(frozen=True)
 class LogConfig:
-    """Logging configuration."""
-
     level: str = "INFO"
-    file: str = "data/scholaraio.log"
+    file: str = "synapse.log"
     max_bytes: int = 10_000_000
     backup_count: int = 3
-    metrics_db: str = "data/metrics.db"
+    metrics_db: str = "metrics.db"
 
 
-# Main Config
+# ============== Data Pipe Functions ==============
+
+
+def _load_yaml(path: Path | None) -> dict:
+    if path and path.exists():
+        import yaml
+        with open(path, encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    return {}
+
+
+def _merge_dicts(*dicts: dict) -> dict:
+    """Deep merge dicts (rightmost has highest priority)."""
+    result = {}
+    for d in dicts:
+        for k, v in d.items():
+            if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+                result[k] = _merge_dicts(result[k], v)
+            else:
+                result[k] = v
+    return result
+
+
+def _find_root() -> Path:
+    current = Path.cwd()
+    for _ in range(6):
+        if (current / ".synapse").exists() or (current / "workspace").exists():
+            return current
+        if (current / "config.yaml").exists():
+            return current
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return Path.cwd()
+
+
+def _config_paths(root: Path) -> Iterator[Path]:
+    home = Path.home()
+    yield home / ".synapse" / "config.yml"
+    yield home / ".config" / "synapse" / "config.yml"
+    yield root / "config.yaml"
+
+
+def _resolve_workspace(data: dict, cli_ws: str | None, env_ws: str | None) -> str:
+    return cli_ws or env_ws or data.get("default_workspace", "default")
+
+
+# ============== Config Builder ==============
+
+
+def _build_sources(data: dict) -> SourcesConfig:
+    return SourcesConfig(
+        local=LocalSourceConfig(**data.get("local", {})),
+        arxiv=ArxivSourceConfig(**data.get("arxiv", {})),
+        openalex=OpenAlexSourceConfig(**data.get("openalex", {})),
+        zotero=ZoteroSourceConfig(**data.get("zotero", {})),
+        endnote=EndnoteSourceConfig(**data.get("endnote", {})),
+    )
+
+
+# ============== Main Pipeline ==============
+
+
+def _load(workspace: str | None = None, root: Path | None = None) -> "Config":
+    root = root or _find_root()
+    env_ws = os.environ.get(f"{ENV_PREFIX}WORKSPACE")
+
+    # Collect layers
+    layers = [_load_yaml(p) for p in _config_paths(root)]
+    data = _merge_dicts(*layers) if layers else {}
+
+    # Workspace-local override
+    ws_name = _resolve_workspace(data, workspace, env_ws)
+    ws_data = _load_yaml(root / "workspace" / ws_name / "synapse.yml")
+    merged = _merge_dicts(data, ws_data) if ws_data else data
+
+    # Build workspace store
+    ws_store = {
+        name: WorkspaceConfig(
+            name=name,
+            description=(entry if isinstance(entry, str) else entry.get("description", ""))
+            if entry else ""
+        )
+        for name, entry in merged.get("workspace", {}).items()
+    }
+
+    # Resolve current workspace
+    ws_entry = ws_store.get(ws_name, WorkspaceConfig(name=ws_name))
+
+    return Config(
+        workspace=WorkspaceConfig(name=ws_name, description=ws_entry.description),
+        workspace_store=ws_store,
+        default_workspace=merged.get("default_workspace", "default"),
+        sources=_build_sources(merged.get("sources", {})),
+        index=IndexConfig(**merged.get("index", {})),
+        llm=LLMConfig(**merged.get("llm", {})),
+        ingest=IngestConfig(**merged.get("ingest", {})),
+        topics=TopicsConfig(**merged.get("topics", {})),
+        log=LogConfig(**merged.get("logging", {})),
+        _root=root,
+    )
+
+
+# ============== Config Class ==============
 
 
 @dataclass
 class Config:
-    """ScholarAIO global configuration."""
+    """Synapse configuration."""
 
-    workspace: WorkspaceConfig = field(default_factory=WorkspaceConfig)
-    index: IndexConfig = field(default_factory=IndexConfig)
-    sources: SourcesConfig = field(default_factory=SourcesConfig)
-    ingest: IngestConfig = field(default_factory=IngestConfig)
-    llm: LLMConfig = field(default_factory=LLMConfig)
-    topics: TopicsConfig = field(default_factory=TopicsConfig)
-    log: LogConfig = field(default_factory=LogConfig)
+    workspace: WorkspaceConfig
+    workspace_store: dict[str, WorkspaceConfig]
+    default_workspace: str
+    sources: SourcesConfig
+    index: IndexConfig
+    llm: LLMConfig
+    ingest: IngestConfig
+    topics: TopicsConfig
+    log: LogConfig
+    _root: Path = field(default_factory=Path.cwd)
 
-    _root: Path = field(default_factory=Path.cwd, repr=False, compare=False)
-
-    # Path Properties (derived from workspace)
+    # Path Properties
+    @property
+    def root(self) -> Path:
+        """Get root path - uses workspace override if set."""
+        if self.workspace.root:
+            return Path(self.workspace.root).resolve()
+        return self._root
 
     @property
     def workspace_dir(self) -> Path:
-        """Workspace directory - derived from workspace identity."""
-        return (self._root / "workspace" / self.workspace.name).resolve()
+        return (self.root / "workspace" / self.workspace.name).resolve()
 
     @property
     def papers_dir(self) -> Path:
-        return (self.workspace_dir / "papers").resolve()
+        return (self.workspace_dir / self.sources.local.papers_dir).resolve()
+
+    @property
+    def extra_paths(self) -> list[Path]:
+        """Additional paper paths from local source."""
+        return [self.root / p for p in self.sources.local.paths if p]
 
     @property
     def index_db(self) -> Path:
@@ -154,10 +277,6 @@ class Config:
         return (self.workspace_dir / "vectors.faiss").resolve()
 
     @property
-    def vector_ids_file(self) -> Path:
-        return (self.workspace_dir / "vector_ids.json").resolve()
-
-    @property
     def log_file(self) -> Path:
         return (self._root / self.log.file).resolve()
 
@@ -165,166 +284,45 @@ class Config:
     def metrics_db_path(self) -> Path:
         return (self._root / self.log.metrics_db).resolve()
 
-    @property
-    def topics_model_dir(self) -> Path:
-        return (self._root / self.topics.model_dir).resolve()
-
     # API key resolution
-
     def resolve_llm_api_key(self) -> str:
-        """Resolve LLM API key: config > SCHOLARAIO_LLM_API_KEY > DEEPSEEK_API_KEY > OPENAI_API_KEY."""
-        if self.llm.api_key:
-            return self.llm.api_key
-        if key := os.environ.get("SCHOLARAIO_LLM_API_KEY"):
-            return key
-        if key := os.environ.get("DEEPSEEK_API_KEY"):
-            return key
-        if key := os.environ.get("OPENAI_API_KEY"):
-            return key
-        return ""
+        return self.llm.api_key or os.environ.get(f"{ENV_PREFIX}LLM_API_KEY") or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
 
     def resolve_zotero_api_key(self) -> str:
-        """Resolve Zotero API key."""
-        if self.sources.zotero_api_key:
-            return self.sources.zotero_api_key
-        if key := os.environ.get("ZOTERO_API_KEY"):
-            return key
-        return ""
+        return self.sources.zotero.api_key or os.environ.get("ZOTERO_API_KEY") or ""
 
     def resolve_zotero_library_id(self) -> str:
-        """Resolve Zotero library ID."""
-        if self.sources.zotero_library_id:
-            return self.sources.zotero_library_id
-        if key := os.environ.get("ZOTERO_LIBRARY_ID"):
-            return key
-        return ""
+        return self.sources.zotero.library_id or os.environ.get("ZOTERO_LIBRARY_ID") or ""
 
     def resolve_mineru_api_key(self) -> str:
-        """Resolve MinerU API key."""
-        if self.ingest.mineru_api_key:
-            return self.ingest.mineru_api_key
-        if key := os.environ.get("MINERU_API_KEY"):
-            return key
-        return ""
-
-    # Directory Management
+        return self.ingest.mineru_api_key or os.environ.get("MINERU_API_KEY") or ""
 
     def ensure_dirs(self) -> None:
-        """Create required directories."""
-        for d in (
-            self.workspace_dir,
-            self.papers_dir,
-            self._root / "data" / "inbox",
-            self._root / "data" / "pending",
-            self.log_file.parent,
-            self.metrics_db_path.parent,
-            self.topics_model_dir.parent,
-        ):
+        for d in (self.workspace_dir, self.papers_dir, self.log_file.parent, self.metrics_db_path.parent):
             d.mkdir(parents=True, exist_ok=True)
 
 
-# Environment overrides - mapping-based
+# ============== Singleton ==============
 
 
-_ENV_OVERRIDES: dict[str, tuple[str, list[str]]] = {
-    "workspace": ("WORKSPACE", ["name", "description"]),
-    "index": ("INDEX", ["top_k", "embed_model", "embed_device", "chunk_size", "chunk_overlap"]),
-    "sources": ("SOURCES", ["zotero_api_key", "zotero_library_id"]),
-    "llm": ("LLM", ["api_key", "backend", "model", "base_url"]),
-    "ingest": ("MINERU", ["mineru_api_key", "mineru_endpoint"]),
-    "log": ("LOG", ["level"]),
-}
+_config_singleton: Config | None = None
 
 
-def load_config(config_path: Path | None = None) -> Config:
-    """Load and merge YAML configuration files.
-
-    Priority (high to low):
-    1. Environment variables SCHOLARAIO_*
-    2. config.local.yaml
-    3. config.yaml
-    4. Code defaults
-    """
-    import yaml
-
-    # Find config file
-    if config_path is None:
-        config_path = _find_config_file()
-
-    data: dict = {}
-    root = Path.cwd()
-
-    if config_path and config_path.exists():
-        root = config_path.parent
-        with open(config_path, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-
-        # Local overrides
-        local_path = config_path.parent / "config.local.yaml"
-        if local_path.exists():
-            with open(local_path, encoding="utf-8") as f:
-                local_data = yaml.safe_load(f) or {}
-            data = _deep_merge(data, local_data)
-
-    cfg = _build_config(data, root)
-    _apply_env_overrides(cfg)
-    return cfg
+def get_config() -> Config:
+    """Get config singleton."""
+    global _config_singleton
+    if _config_singleton is None:
+        _config_singleton = _load()
+    return _config_singleton
 
 
-def _find_config_file() -> Path | None:
-    """Walk up from cwd to find config.yaml."""
-    current = Path.cwd()
-    for _ in range(6):
-        candidate = current / "config.yaml"
-        if candidate.exists():
-            return candidate
-        parent = current.parent
-        if parent == current:
-            break
-        current = parent
-    return None
+def reload_config(workspace: str | None = None) -> Config:
+    """Force reload config."""
+    global _config_singleton
+    _config_singleton = _load(workspace=workspace)
+    return _config_singleton
 
 
-def _deep_merge(base: dict, override: dict) -> dict:
-    """Recursively merge override into base."""
-    result = dict(base)
-    for key, val in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(val, dict):
-            result[key] = _deep_merge(result[key], val)
-        else:
-            result[key] = val
-    return result
-
-
-def _apply_env_overrides(cfg: Config) -> None:
-    """Apply environment variable overrides using mapping."""
-    # Root override
-    if root := os.environ.get(f"{ENV_PREFIX}ROOT"):
-        cfg._root = Path(root).resolve()
-
-    # Section-based overrides
-    for section, (env_prefix, fields) in _ENV_OVERRIDES.items():
-        section_obj = getattr(cfg, section, None)
-        if section_obj is None:
-            continue
-        for fld in fields:
-            env_key = f"{ENV_PREFIX}{env_prefix}_{fld}"
-            if val := os.environ.get(env_key):
-                setattr(section_obj, fld, val)
-
-
-# Loader
-
-
-def _build_config(data: dict, root: Path) -> Config:
-    """Build Config from dict."""
-    return Config(
-        workspace=WorkspaceConfig(**data.get("workspace", {})),
-        index=IndexConfig(**data.get("index", {})),
-        sources=SourcesConfig(**data.get("sources", {})),
-        ingest=IngestConfig(**data.get("ingest", {})),
-        llm=LLMConfig(**data.get("llm", {})),
-        topics=TopicsConfig(**data.get("topics", {})),
-        log=LogConfig(**data.get("logging", {})),
-        _root=root,
-    )
+def load_config(workspace: str | None = None, root: Path | None = None) -> Config:
+    """Load configuration."""
+    return _load(workspace=workspace, root=root)
