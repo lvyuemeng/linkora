@@ -291,47 +291,6 @@ class ContentExtractor:
 
 
 # ============================================================================
-# LLM Runner Wrapper
-# ============================================================================
-
-
-class LoaderLLMRunner:
-    """Wrapper around llm.LLMRunner for loader-specific interface."""
-
-    def __init__(self, config: Config) -> None:
-        from scholaraio.http import RequestsClient
-
-        api_key = config.llm.resolve_api_key()
-        http_client = RequestsClient()
-        self._runner = LLMRunner(config.llm, http_client, api_key)
-
-    def execute(
-        self,
-        prompt: str,
-        *,
-        max_retries: int = 2,
-        timeout: int | None = None,
-    ) -> tuple[str | None, str]:
-        """Execute LLM with unified retry. Returns (result, reason)."""
-        request = LLMRequest(
-            prompt=prompt,
-            config=self._runner._llm_cfg,  # Use the internal LLMConfig
-            timeout=timeout,
-            max_retries=max_retries,
-            purpose="loader",
-        )
-        try:
-            result = self._runner.execute(request)
-            return result.content, "attempt1"
-        except Exception as e:
-            return None, str(e)
-
-
-# Alias for backward compatibility
-_LLMRunner = LoaderLLMRunner
-
-
-# ============================================================================
 # Paper Enricher
 # ============================================================================
 
@@ -346,16 +305,21 @@ class PaperEnricher:
         self._store = PaperStore(papers_dir)
         self._papers_dir = papers_dir
 
-    def _get_runner(self, config: Config) -> LoaderLLMRunner:
+    def _get_runner(self, config: Config):
         """Get LLM runner for config."""
-        return LoaderLLMRunner(config)
+        from scholaraio.http import RequestsClient
+        from scholaraio.llm import LLMRunner as LLMRunnerImpl
+        
+        api_key = config.llm.resolve_api_key()
+        http_client = RequestsClient()
+        return LLMRunnerImpl(config.llm, http_client, api_key)
 
     def _execute(
         self,
         strategy_key: str,
         lines: list[str],
         meta: dict,
-        runner: LoaderLLMRunner,
+        runner,
         *,
         timeout: int | None = None,
     ) -> tuple[str | None, str]:
@@ -536,7 +500,7 @@ class PaperEnricher:
         self,
         lines: list[str],
         meta: dict,
-        runner: LoaderLLMRunner,
+        runner,
     ) -> tuple[str | None, str]:
         """Extract conclusion by selecting from headers."""
         headers = ContentExtractor.extract_headers(lines)
@@ -550,7 +514,7 @@ class PaperEnricher:
         self,
         lines: list[str],
         meta: dict,
-        runner: LoaderLLMRunner,
+        runner,
     ) -> tuple[str | None, str]:
         """Extract conclusion using fallback (direct line numbers)."""
         _log.debug("[Fallback] switching to fallback")
@@ -559,7 +523,7 @@ class PaperEnricher:
     def _validate(
         self,
         text: str,
-        runner: LoaderLLMRunner,
+        runner,
     ) -> tuple[str | None, str]:
         """Validate and clean conclusion text."""
         if len(text.strip()) < 100:

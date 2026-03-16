@@ -42,9 +42,71 @@ from scholaraio.llm import (
     PromptTemplate,
 )
 from scholaraio.log import get_logger
-from scholaraio.papers import PaperMetadata, _extract_lastname
+from scholaraio.papers import PaperMetadata
 
 _log = get_logger(__name__)
+
+# ============================================================================
+#  Utilities
+# ============================================================================
+
+
+# Last name extraction patterns
+_LASTNAME_PREFIX_RE = re.compile(
+    r"^(?:Prof|Prof\.|Dr|Dr\.|Mr|Mr\.|Mrs|Mrs\.|Ms|Ms\.)\s+",
+    re.IGNORECASE,
+)
+_LASTNAME_JP_RE = re.compile(r"^[\u3040-\u309f\u30a0-\u30ff]+")  # Hiragana/Katakana
+_LASTNAME_CN_RE = re.compile(r"^[\u4e00-\u9fff]+")  # CJK
+
+
+def _extract_lastname(full_name: str) -> str:
+    """Extract last name (surname) from full author name.
+
+    Handles:
+    - Western: "John Smith" -> "Smith"
+    - Western with prefix: "Prof. John Smith" -> "Smith"
+    - Chinese: "Smith John" (given, family) -> "Smith" (assumes Western order)
+    - Japanese: "山田" (family only) -> "山田"
+    - Chinese: "张 三" -> "张"
+
+    Args:
+        full_name: Full author name.
+
+    Returns:
+        Last name (surname).
+    """
+    if not full_name:
+        return ""
+
+    # Remove common prefixes
+    name = _LASTNAME_PREFIX_RE.sub("", full_name).strip()
+    if not name:
+        return ""
+
+    # Check for CJK names
+    # Japanese: hiragana/katakana only = family name (usually)
+    if _LASTNAME_JP_RE.match(name):
+        return name
+
+    # Chinese: first CJK block is family name
+    m = _LASTNAME_CN_RE.match(name)
+    if m:
+        return m.group(0)
+
+    # Western: last word is last name
+    parts = name.split()
+    if len(parts) == 1:
+        return parts[0]
+
+    # Common "Family Given" order (most Western): last part
+    # But some Chinese Western-order names: "John Smith" -> "Smith"
+    # Heuristic: if last name looks like Western surname (capitalized, no CJK)
+    last = parts[-1]
+    if last and last[0].isupper():
+        return last
+
+    return parts[0] if parts else ""
 
 
 # ============================================================================

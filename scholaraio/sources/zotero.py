@@ -12,7 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator
 
-from scholaraio.papers import PaperMetadata, _extract_lastname
+from scholaraio.papers import PaperMetadata
+from scholaraio.extract import _extract_lastname
 from scholaraio.log import get_logger
 
 if TYPE_CHECKING:

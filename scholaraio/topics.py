@@ -27,20 +27,21 @@ Usage:
 
 from __future__ import annotations
 
-import logging
 import pickle
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
+
+import numpy as np
+from bertopic import BERTopic
+
+from scholaraio.log import get_logger
 
 if TYPE_CHECKING:
-    import numpy as np
-    from bertopic import BERTopic
-
     from scholaraio.index import Embedder
 
-_log = logging.getLogger(__name__)
+_log = get_logger(__name__)
 
 # ============================================================================
 # Data Structures (Pure Data, No Side Effects)
@@ -125,7 +126,7 @@ class TopicModelOutput:
     metas: list[TopicMeta]
     topics: list[int]
     embeddings: "np.ndarray | None" = None
-    docs: list[str | None] = None
+    docs: list[str | None] | None = None
 
     def get_papers(self, topic_id: int) -> list[TopicMeta]:
         """Get papers for a specific topic."""
@@ -390,7 +391,7 @@ def _best_cite_key(meta: TopicMeta) -> int:
     cc = meta.citation_count
     if not cc or not isinstance(cc, dict):
         return 0
-    return max((v for v in cc.values() if isinstance(v, (int, float))), default=0)
+    return int(max((v for v in cc.values() if isinstance(v, (int, float))), default=0))
 
 
 def filter_topics_by_keyword(topics: list[TopicInfo], keyword: str) -> list[TopicInfo]:
@@ -437,8 +438,6 @@ class TopicTrainer:
         papers_map: dict[str, dict] | None = None,
     ) -> TopicInputData:
         """Load input data from database."""
-        import numpy as np
-
         from scholaraio.index import _unpack
 
         conn = sqlite3.connect(db_path)
@@ -501,6 +500,9 @@ class TopicTrainer:
             # Main library mode: metadata from meta.json
             from scholaraio.papers import PaperStore
 
+            if papers_dir is None:
+                raise ValueError("papers_dir required when papers_map is not provided")
+
             store = PaperStore(papers_dir)
             id_to_dir: dict[str, str] = {}
 
@@ -516,7 +518,7 @@ class TopicTrainer:
 
             for paper_id, blob in rows:
                 dir_name = id_to_dir.get(paper_id, paper_id)
-                paper_d = papers_dir / dir_name
+                paper_d = papers_dir / dir_name  # type: ignore[operator]
 
                 try:
                     meta = store.read_meta(paper_d)
@@ -726,5 +728,5 @@ class TopicTrainer:
             metas=input_data.metas,
             topics=list(topics) if not isinstance(topics, list) else topics,
             embeddings=np.array(embeddings, dtype="float32"),
-            docs=docs,
+            docs=cast(list[str | None] | None, docs),
         )

@@ -1,57 +1,180 @@
 """
-metrics.py -- ScholarAIO 指标采集与持久化
+metrics.py -- ScholarAIO Metrics Collection and Persistence
 ==========================================
 
-三大功能：
-  1. MetricsStore — SQLite 持久化（data/metrics.db）
-  2. timer / timed — 计时上下文管理器 / 装饰器
-  3. call_llm    — 统一 LLM 调用入口，自动追踪 token 用量
+Three main features:
+  1. MetricsStore -- SQLite persistence (data/metrics.db)
+  2. timer / timed -- timing context manager / decorator
+  3. call_llm -- unified LLM call entry, auto-tracks token usage
 """
 
 from __future__ import annotations
 
 import json as _json
-import logging
 import sqlite3
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Generator
+from typing import Any, Generator
 
-import requests
 
-if TYPE_CHECKING:
-    from .config import Config, LLMConfig, resolve_llm
+from scholaraio.log import get_logger
 
-_log = logging.getLogger(__name__)
+_log = get_logger(__name__)
 
 # ============================================================================
-#  LLMResult
+#  Event Enums and Data Classes (Immutable)
 # ============================================================================
 
 
-@dataclass
-class LLMResult:
-    """LLM 调用返回值。
+class EventCategory(Enum):
+    """Event category - type-safe enum."""
 
-    Attributes:
-        content: 模型返回的文本内容。
-        tokens_in: prompt token 数。
-        tokens_out: completion token 数。
-        tokens_total: 总 token 数。
-        model: 实际使用的模型名。
-        duration_s: 调用耗时（秒）。
-    """
+    LLM = "llm"
+    API = "api"
+    STEP = "step"
 
-    content: str
+
+class EventStatus(Enum):
+    """Event status - type-safe enum."""
+
+    OK = "ok"
+    ERROR = "error"
+    SKIP = "skip"
+
+
+@dataclass(frozen=True)
+class LLMMetrics:
+    """Immutable LLM usage metrics - grouped semantically."""
+
     tokens_in: int = 0
     tokens_out: int = 0
-    tokens_total: int = 0
     model: str = ""
     duration_s: float = 0.0
+
+    @property
+    def tokens_total(self) -> int:
+        return self.tokens_in + self.tokens_out
+
+
+@dataclass(frozen=True)
+class EventMetadata:
+    """Immutable event metadata."""
+
+    status: EventStatus = EventStatus.OK
+    detail: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class MetricsEvent:
+    """Immutable metrics event - complete record."""
+
+    category: EventCategory
+    name: str
+    timestamp: datetime
+    llm_metrics: LLMMetrics | None = None
+    metadata: EventMetadata | None = None
+
+    @classmethod
+    def create_llm(
+        cls,
+        name: str,
+        llm_metrics: LLMMetrics,
+        status: EventStatus = EventStatus.OK,
+        detail: dict[str, Any] | None = None,
+    ) -> "MetricsEvent":
+        """Factory for LLM event."""
+        return cls(
+            category=EventCategory.LLM,
+            name=name,
+            timestamp=datetime.now(timezone.utc),
+            llm_metrics=llm_metrics,
+            metadata=EventMetadata(status=status, detail=detail),
+        )
+
+    @classmethod
+    def create_step(
+        cls,
+        name: str,
+        duration_s: float,
+        status: EventStatus = EventStatus.OK,
+        detail: dict[str, Any] | None = None,
+    ) -> "MetricsEvent":
+        """Factory for step/timing event."""
+        return cls(
+            category=EventCategory.STEP,
+            name=name,
+            timestamp=datetime.now(timezone.utc),
+            llm_metrics=LLMMetrics(duration_s=duration_s),
+            metadata=EventMetadata(status=status, detail=detail),
+        )
+
+
+@dataclass(frozen=True)
+class TimeRange:
+    """Immutable time range for queries."""
+
+    since: datetime | None = None
+    until: datetime | None = None
+
+    def to_sql(self) -> tuple[str, list[Any]]:
+        """Convert to SQL WHERE clause."""
+        clauses = []
+        params: list[Any] = []
+        if self.since:
+            clauses.append("timestamp >= ?")
+            params.append(self.since.isoformat())
+        if self.until:
+            clauses.append("timestamp <= ?")
+            params.append(self.until.isoformat())
+        return (" AND ".join(clauses), params) if clauses else ("", [])
+
+
+@dataclass(frozen=True)
+class MetricsQuery:
+    """Immutable query parameters - grouped semantically."""
+
+    category: EventCategory | None = None
+    time_range: TimeRange | None = None
+    limit: int = 200
+
+    def to_sql(self) -> tuple[str, list[Any]]:
+        """Convert to SQL WHERE clause."""
+        clauses = []
+        params: list[Any] = []
+
+        if self.category:
+            clauses.append("category = ?")
+            params.append(self.category.value)
+
+        if self.time_range:
+            time_sql, time_params = self.time_range.to_sql()
+            clauses.append(time_sql)
+            params.extend(time_params)
+
+        return (" AND ".join(clauses), params) if clauses else ("", [])
+
+
+@dataclass(frozen=True)
+class MetricsResult:
+    """Immutable query result."""
+
+    events: tuple[dict[str, Any], ...]
+    total_count: int
+
+
+@dataclass(frozen=True)
+class LLMSummary:
+    """Immutable LLM usage summary."""
+
+    call_count: int
+    total_tokens_in: int
+    total_tokens_out: int
+    total_duration_s: float
 
 
 # ============================================================================
@@ -61,10 +184,10 @@ class LLMResult:
 
 @dataclass
 class TimerResult:
-    """计时结果，由 :func:`timer` 上下文管理器 yield。
+    """Timing result yielded by :func:`timer` context manager.
 
-    在 ``with`` 块内部读取 ``elapsed`` 返回实时耗时；
-    退出后返回最终耗时。
+    Read ``elapsed`` inside the ``with`` block for real-time elapsed time;
+    after exit, returns the final elapsed time.
     """
 
     def __init__(self) -> None:
@@ -112,25 +235,83 @@ _CREATE_INDEXES = [
 
 
 class MetricsStore:
-    """SQLite-backed metrics store.
+    """SQLite-backed metrics store with lazy connection.
 
     Args:
-        db_path: 数据库文件路径，传 ``":memory:"`` 用于测试。
-        session_id: 当前会话 ID。
+        db_path: Database file path, use ``":memory:"`` for testing.
+        session_id: Current session ID.
     """
 
     def __init__(self, db_path: Path | str, session_id: str) -> None:
         self._session_id = session_id
-        self._conn = sqlite3.connect(str(db_path))
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute(_CREATE_TABLE)
-        for idx_sql in _CREATE_INDEXES:
-            self._conn.execute(idx_sql)
-        self._conn.commit()
+        self._db_path = Path(db_path)
+        self._conn: sqlite3.Connection | None = None
+
+    def _ensure_connection(self) -> sqlite3.Connection:
+        """Lazy connection initialization."""
+        if self._conn is None:
+            self._conn = sqlite3.connect(str(self._db_path))
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute(_CREATE_TABLE)
+            for idx_sql in _CREATE_INDEXES:
+                self._conn.execute(idx_sql)
+            self._conn.commit()
+        return self._conn
 
     @property
     def session_id(self) -> str:
         return self._session_id
+
+    def record_event(self, event: MetricsEvent) -> None:
+        """Record a metrics event using typed interface.
+
+        Args:
+            event: MetricsEvent instance.
+        """
+        conn = self._ensure_connection()
+        llm = event.llm_metrics
+        meta = event.metadata
+
+        conn.execute(
+            "INSERT INTO events (session_id, timestamp, category, name, "
+            "duration_s, tokens_in, tokens_out, model, status, detail) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                self._session_id,
+                event.timestamp.isoformat(),
+                event.category.value,
+                event.name,
+                llm.duration_s if llm else None,
+                llm.tokens_in if llm else None,
+                llm.tokens_out if llm else None,
+                llm.model if llm else None,
+                meta.status.value if meta else "ok",
+                _json.dumps(meta.detail, ensure_ascii=False) if meta and meta.detail else None,
+            ),
+        )
+        conn.commit()
+
+    def query_events(self, query: MetricsQuery) -> MetricsResult:
+        """Query metrics events using typed interface.
+
+        Args:
+            query: MetricsQuery instance.
+
+        Returns:
+            MetricsResult with events tuple.
+        """
+        conn = self._ensure_connection()
+        filter_sql, filter_params = query.to_sql()
+        where = (" WHERE " + filter_sql) if filter_sql else ""
+
+        sql = f"SELECT * FROM events{where} ORDER BY id DESC LIMIT ?"
+        filter_params.append(query.limit)
+
+        cur = conn.execute(sql, filter_params)
+        cols = [d[0] for d in cur.description]
+        events = tuple(dict(zip(cols, row)) for row in cur.fetchall())
+
+        return MetricsResult(events=events, total_count=len(events))
 
     def record(
         self,
@@ -144,19 +325,9 @@ class MetricsStore:
         status: str = "ok",
         detail: dict | None = None,
     ) -> None:
-        """写入一条 metrics 事件。
-
-        Args:
-            category: 事件类别，如 ``"llm"``、``"api"``、``"step"``。
-            name: 事件名称，如 ``"extract.robust"``、``"enrich_toc"``。
-            duration_s: 耗时（秒）。
-            tokens_in: prompt token 数。
-            tokens_out: completion token 数。
-            model: 模型名。
-            status: ``"ok"`` | ``"error"`` | ``"skip"``。
-            detail: 额外信息（序列化为 JSON）。
-        """
-        self._conn.execute(
+        """Record a metrics event (backward compatible interface)."""
+        conn = self._ensure_connection()
+        conn.execute(
             "INSERT INTO events (session_id, timestamp, category, name, "
             "duration_s, tokens_in, tokens_out, model, status, detail) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -173,7 +344,7 @@ class MetricsStore:
                 _json.dumps(detail, ensure_ascii=False) if detail else None,
             ),
         )
-        self._conn.commit()
+        conn.commit()
 
     def query(
         self,
@@ -182,17 +353,8 @@ class MetricsStore:
         until: str | None = None,
         limit: int = 200,
     ) -> list[dict]:
-        """查询 metrics 事件。
-
-        Args:
-            category: 按类别过滤。
-            since: 起始时间（ISO 8601）。
-            until: 结束时间（ISO 8601）。
-            limit: 最大返回数。
-
-        Returns:
-            事件字典列表，按时间倒序。
-        """
+        """Query metrics events (backward compatible interface)."""
+        conn = self._ensure_connection()
         clauses = []
         params: list[Any] = []
         if category:
@@ -207,20 +369,20 @@ class MetricsStore:
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         sql = f"SELECT * FROM events{where} ORDER BY id DESC LIMIT ?"
         params.append(limit)
-        cur = self._conn.execute(sql, params)
+        cur = conn.execute(sql, params)
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
-    def summary(self, session_id: str | None = None) -> dict:
-        """汇总 LLM token 用量。
+    def summary(self, session_id: str | None = None) -> LLMSummary:
+        """Summarize LLM token usage.
 
         Args:
-            session_id: 指定会话，默认全部。
+            session_id: Optional session filter.
 
         Returns:
-            ``{"total_tokens_in": N, "total_tokens_out": N,
-            "total_duration_s": N, "call_count": N}``
+            LLMSummary with token counts and duration.
         """
+        conn = self._ensure_connection()
         clause = "WHERE category = 'llm'"
         params: list[Any] = []
         if session_id:
@@ -233,16 +395,18 @@ class MetricsStore:
             f"COALESCE(SUM(duration_s), 0) "
             f"FROM events {clause}"
         )
-        row = self._conn.execute(sql, params).fetchone()
-        return {
-            "call_count": row[0],
-            "total_tokens_in": row[1],
-            "total_tokens_out": row[2],
-            "total_duration_s": round(row[3], 2),
-        }
+        row = conn.execute(sql, params).fetchone()
+        return LLMSummary(
+            call_count=row[0] or 0,
+            total_tokens_in=row[1] or 0,
+            total_tokens_out=row[2] or 0,
+            total_duration_s=round(row[3] or 0, 2),
+        )
 
     def close(self) -> None:
-        self._conn.close()
+        if self._conn:
+            self._conn.close()
+            self._conn = None
 
 
 # ============================================================================
@@ -253,14 +417,14 @@ _store: MetricsStore | None = None
 
 
 def init(db_path: Path | str, session_id: str) -> MetricsStore:
-    """初始化全局 MetricsStore 单例。
+    """Initialize global MetricsStore singleton.
 
     Args:
-        db_path: SQLite 数据库路径。
-        session_id: 当前会话 ID。
+        db_path: SQLite database path.
+        session_id: Current session ID.
 
     Returns:
-        初始化后的 MetricsStore 实例。
+        Initialized MetricsStore instance.
     """
     global _store
     db = Path(db_path)
@@ -271,12 +435,12 @@ def init(db_path: Path | str, session_id: str) -> MetricsStore:
 
 
 def get_store() -> MetricsStore | None:
-    """返回全局 MetricsStore 实例，未初始化时返回 None。"""
+    """Get global MetricsStore instance, returns None if not initialized."""
     return _store
 
 
 def reset() -> None:
-    """关闭并重置全局 store（仅供测试使用）。"""
+    """Close and reset global store (for testing only)."""
     global _store
     if _store:
         _store.close()
@@ -290,26 +454,26 @@ def reset() -> None:
 
 @contextmanager
 def timer(name: str, category: str = "step") -> Generator[TimerResult, None, None]:
-    """计时上下文管理器，自动记录到 MetricsStore。
+    """Timing context manager, auto-records to MetricsStore.
 
     Args:
-        name: 事件名称。
-        category: 事件类别。
+        name: Event name.
+        category: Event category.
 
     Yields:
-        :class:`TimerResult`，退出时 ``elapsed`` 已填充。
+        :class:`TimerResult`, ``elapsed`` is populated on exit.
 
     Example::
 
         with timer("mineru.cloud", category="api") as t:
             do_something()
-        print(f"耗时 {t.elapsed:.1f}s")
+        print(f"Elapsed {t.elapsed:.1f}s")
     """
     result = TimerResult()
     result._t0 = time.monotonic()
+    status = "ok"
     try:
         yield result
-        status = "ok"
     except Exception:
         status = "error"
         raise
@@ -320,11 +484,11 @@ def timer(name: str, category: str = "step") -> Generator[TimerResult, None, Non
 
 
 def timed(name: str = "", category: str = "step"):
-    """计时装饰器。
+    """Timing decorator.
 
     Args:
-        name: 事件名称，默认为函数全限定名。
-        category: 事件类别。
+        name: Event name, defaults to function qualified name.
+        category: Event category.
     """
 
     def decorator(fn):
@@ -338,136 +502,3 @@ def timed(name: str = "", category: str = "step"):
         return wrapper
 
     return decorator
-
-
-# ============================================================================
-#  Unified LLM call
-# ============================================================================
-
-
-def call_llm(
-    prompt: str,
-    config: "Config | LLMConfig",
-    *,
-    api_key: str = "",
-    system: str | None = None,
-    json_mode: bool = True,
-    max_tokens: int = 8000,
-    timeout: int | None = None,
-    purpose: str = "",
-) -> LLMResult:
-    """统一 LLM 调用入口。
-
-    POST 到 OpenAI-compatible ``/v1/chat/completions`` 端点，
-    自动解析 ``response.usage``，记录 token 用量和耗时到 MetricsStore。
-
-    ``config`` 可以是完整的 :class:`Config` 或单独的 :class:`LLMConfig`。
-    传入 ``LLMConfig`` 时需同时提供 ``api_key``。
-
-    Args:
-        prompt: 用户消息内容。
-        config: ScholarAIO 全局配置，或 LLMConfig 实例。
-        api_key: 显式 API 密钥（覆盖 config 中的值）。
-        system: 可选的 system message。
-        json_mode: 是否启用 JSON 响应格式。
-        max_tokens: 最大生成 token 数。
-        timeout: 超时秒数，默认使用 config.llm.timeout。
-        purpose: 调用用途标识，用于 metrics 记录（如 ``"extract.robust"``）。
-
-    Returns:
-        :class:`LLMResult` 包含内容、token 统计和耗时。
-
-    Raises:
-        RuntimeError: 未配置 API key。
-        requests.HTTPError: API 返回非 2xx 状态码。
-    """
-    # Support both Config (has .llm attr) and LLMConfig (has .base_url directly)
-    from .config import LLMConfig
-
-    if isinstance(config, LLMConfig):
-        llm_cfg = config
-        resolved_key = api_key or llm_cfg.api_key
-    else:
-        llm_cfg = config.llm
-        # BROKEN: resolve_llm function removed - will be refactored to use config.resolve_llm_api_key()
-        resolved_key = api_key or config.llm.api_key
-
-    if not resolved_key:
-        raise RuntimeError("未配置 LLM API key。")
-
-    url = llm_cfg.base_url.rstrip("/") + "/v1/chat/completions"
-
-    messages: list[dict[str, str]] = []
-    if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
-
-    payload: dict[str, Any] = {
-        "model": llm_cfg.model,
-        "messages": messages,
-        "temperature": 0,
-        "max_tokens": max_tokens,
-    }
-    if json_mode:
-        payload["response_format"] = {"type": "json_object"}
-
-    headers = {
-        "Authorization": f"Bearer {resolved_key}",
-        "Content-Type": "application/json",
-    }
-
-    t0 = time.monotonic()
-    status = "ok"
-    tokens_in = tokens_out = tokens_total = 0
-    model_name = llm_cfg.model
-    try:
-        resp = requests.post(
-            url, json=payload, headers=headers, timeout=timeout or llm_cfg.timeout
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        try:
-            content = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as e:
-            snippet = _json.dumps(data, ensure_ascii=False)[:300]
-            raise ValueError(
-                f"Unexpected API response structure: {e}\n{snippet}"
-            ) from e
-        usage = data.get("usage") or {}
-        tokens_in = usage.get("prompt_tokens", 0)
-        tokens_out = usage.get("completion_tokens", 0)
-        tokens_total = usage.get("total_tokens", 0)
-        model_name = data.get("model", llm_cfg.model)
-    except Exception:
-        status = "error"
-        raise
-    finally:
-        duration = round(time.monotonic() - t0, 3)
-        _log.debug(
-            "LLM [%s] %d tokens (in=%d out=%d) %.1fs [%s]",
-            purpose or "unnamed",
-            tokens_total,
-            tokens_in,
-            tokens_out,
-            duration,
-            status,
-        )
-        if _store:
-            _store.record(
-                "llm",
-                purpose or "unnamed",
-                duration_s=duration,
-                tokens_in=tokens_in if tokens_in is not None else None,
-                tokens_out=tokens_out if tokens_out is not None else None,
-                model=model_name,
-                status=status,
-            )
-
-    return LLMResult(
-        content=content,
-        tokens_in=tokens_in,
-        tokens_out=tokens_out,
-        tokens_total=tokens_total,
-        model=model_name,
-        duration_s=duration,
-    )

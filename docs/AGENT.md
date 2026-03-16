@@ -76,10 +76,19 @@ uv run ruff format scholaraio/
 
 ```bash
 # Install dev dependencies first
-uv add -D mypy
+uv add -dev ty
 
 # Run type checker
-uv run mypy scholaraio/
+uv run ty check
+
+Usage: ty.exe <COMMAND>
+
+Commands:
+  check    Check a project for type errors
+  server   Start the language server
+  version  Display ty's version
+  explain  Explain rules and other parts of ty
+  help     Print this message or the help of the given subcommand(s)
 ```
 
 ## Testing

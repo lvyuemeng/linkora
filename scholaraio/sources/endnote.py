@@ -17,7 +17,8 @@ from endnote_utils.core import (
     process_record_xml,
 )
 
-from scholaraio.papers import _extract_lastname
+from scholaraio.papers import PaperMetadata
+from scholaraio.extract import _extract_lastname
 from scholaraio.log import get_logger
 
 _log = get_logger(__name__)

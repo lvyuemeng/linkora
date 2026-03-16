@@ -7,15 +7,13 @@ Single source for paper storage, caching, and audit.
 from __future__ import annotations
 
 import json
-import re
 import uuid
-import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Callable
 
 from scholaraio.log import get_logger
-from scholaraio.audit import Issue, YearRange
+from scholaraio.audit import Issue, YearRange, DEFAULT_RULES
 
 _log = get_logger(__name__)
 
@@ -81,67 +79,6 @@ class PaperMetadata:
 # ============================================================================
 #  Utilities
 # ============================================================================
-
-
-# Last name extraction patterns
-_LASTNAME_PREFIX_RE = re.compile(
-    r"^(?:Prof|Prof\.|Dr|Dr\.|Mr|Mr\.|Mrs|Mrs\.|Ms|Ms\.)\s+",
-    re.IGNORECASE,
-)
-_LASTNAME_JP_RE = re.compile(r"^[\u3040-\u309f\u30a0-\u30ff]+")  # Hiragana/Katakana
-_LASTNAME_CN_RE = re.compile(r"^[\u4e00-\u9fff]+")  # CJK
-
-
-def _extract_lastname(full_name: str) -> str:
-    """Extract last name (surname) from full author name.
-
-    Handles:
-    - Western: "John Smith" -> "Smith"
-    - Western with prefix: "Prof. John Smith" -> "Smith"
-    - Chinese: "Smith John" (given, family) -> "Smith" (assumes Western order)
-    - Japanese: "山田" (family only) -> "山田"
-    - Chinese: "张 三" -> "张"
-
-    Args:
-        full_name: Full author name.
-
-    Returns:
-        Last name (surname).
-    """
-    if not full_name:
-        return ""
-
-    # Remove common prefixes
-    name = _LASTNAME_PREFIX_RE.sub("", full_name).strip()
-    if not name:
-        return ""
-
-    # Check for CJK names
-    # Japanese: hiragana/katakana only = family name (usually)
-    if _LASTNAME_JP_RE.match(name):
-        return name
-
-    # Chinese: first CJK block is family name
-    m = _LASTNAME_CN_RE.match(name)
-    if m:
-        return m.group(0)
-
-    # Western: last word is last name
-    parts = name.split()
-    if len(parts) == 1:
-        return parts[0]
-
-    # Common "Family Given" order (most Western): last part
-    # But some Chinese Western-order names: "John Smith" -> "Smith"
-    # Heuristic: if last name looks like Western surname (capitalized, no CJK)
-    last = parts[-1]
-    if last and last[0].isupper():
-        return last
-
-    return parts[0] if parts else ""
-
-
-
 
 
 @dataclass
@@ -229,7 +166,7 @@ class PaperStore:
         Returns:
             Issues sorted by severity.
         """
-        rules = rules or _default_rules
+        rules = rules or DEFAULT_RULES
         issues: list[Issue] = []
         doi_map: dict[str, list[str]] = {}
 
@@ -274,98 +211,6 @@ class PaperStore:
         return issues
 
 
-def _rule_missing_fields(store: PaperStore, pdir: Path, data: dict) -> list[Issue]:
-    """Check missing required fields."""
-    pid = pdir.name
-    required = ["doi", "abstract", "year", "authors", "journal", "title"]
-    issues = []
-    for field_name in required:
-        if not data.get(field_name):
-            severity = "error" if field_name == "title" else "warning"
-            issues.append(
-                Issue(pid, severity, f"missing_{field_name}", f"Missing {field_name}")
-            )
-    return issues
-
-
-def _rule_file_pairing(store: PaperStore, pdir: Path, data: dict) -> list[Issue]:
-    """Check meta.json / paper.md pairing."""
-    pid = pdir.name
-    issues = []
-    md_file = pdir / "paper.md"
-    if not md_file.exists():
-        return [Issue(pid, "error", "missing_md", "Missing paper.md")]
-
-    # Check content length
-    content = store.read_md(pdir)
-    if content and len(content.strip()) < 200:
-        issues.append(
-            Issue(
-                pid,
-                "warning",
-                "short_md",
-                f"paper.md too short ({len(content.strip())} chars)",
-            )
-        )
-    return issues
-
-
-def _rule_title_match(store: PaperStore, pdir: Path, data: dict) -> list[Issue]:
-    """Check JSON title vs MD H1 consistency."""
-    pid = pdir.name
-    json_title = (data.get("title") or "").strip().lower()
-    if not json_title:
-        return []
-
-    content = store.read_md(pdir)
-    if not content:
-        return []
-
-    h1_match = re.search(r"^#\s+(.+)", content, re.MULTILINE)
-    if not h1_match:
-        return []
-
-    md_title = h1_match.group(1).strip().lower()
-    json_words = set(re.findall(r"\w{4,}", json_title))
-    md_words = set(re.findall(r"\w{4,}", md_title))
-    if json_words and md_words:
-        overlap = len(json_words & md_words) / max(len(json_words), 1)
-        if overlap < 0.3:
-            return [Issue(pid, "warning", "title_mismatch", "JSON vs MD H1 mismatch")]
-    return []
-
-
-def _rule_filename_format(store: PaperStore, pdir: Path, data: dict) -> list[Issue]:
-    """Check directory name format."""
-    pid = pdir.name
-    m = re.match(r"^(.+?)-(\d{4})-(.+)$", pid)
-    if not m:
-        return [
-            Issue(pid, "info", "nonstandard_filename", "Not Author-Year-Title format")
-        ]
-
-    file_year = int(m.group(2))
-    json_year = data.get("year")
-    if json_year and file_year != json_year:
-        return [
-            Issue(
-                pid,
-                "warning",
-                "filename_year_mismatch",
-                f"Dir year {file_year} != JSON year {json_year}",
-            )
-        ]
-    return []
-
-
-_default_rules = [
-    _rule_missing_fields,
-    _rule_file_pairing,
-    _rule_title_match,
-    _rule_filename_format,
-]
-
-
 # =============================================================================
 #  Path Helpers
 # =============================================================================
@@ -391,7 +236,7 @@ def best_citation(meta: dict) -> int:
     cc = meta.get("citation_count")
     if not cc or not isinstance(cc, dict):
         return 0
-    return max((v for v in cc.values() if isinstance(v, (int, float))), default=0)
+    return int(max((v for v in cc.values() if isinstance(v, (int, float))), default=0))
 
 
 def parse_year_range(year: str) -> YearRange:
@@ -405,44 +250,25 @@ def parse_year_range(year: str) -> YearRange:
 
 
 # =============================================================================
-#  Filter Helpers
-# =============================================================================
-
-
-
-
-
-# =============================================================================
-#  Deprecated Functions (Use PaperStore Instead)
+# Backward-Compatible Functions (for legacy imports)
 # =============================================================================
 
 
 def iter_paper_dirs(papers_dir: Path) -> Iterator[Path]:
-    """Iterate paper directories with meta.json.
-
-    DEPRECATED: Use PaperStore(papers_dir).iter_papers() instead.
-    """
-    warnings.warn(
-        "iter_paper_dirs is deprecated. Use PaperStore(papers_dir).iter_papers() instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    if not papers_dir.exists():
-        return
-    for d in sorted(papers_dir.iterdir()):
-        if d.is_dir() and (d / "meta.json").exists():
-            yield d
+    """Iterate paper directories (backward compatibility)."""
+    store = PaperStore(papers_dir)
+    return store.iter_papers()
 
 
 def read_meta(paper_d: Path) -> dict:
-    """Read meta.json (standalone function).
+    """Read meta.json (backward compatibility)."""
+    papers_dir = paper_d.parent.parent
+    store = PaperStore(papers_dir)
+    return store.read_meta(paper_d)
 
-    DEPRECATED: Use PaperStore(papers_dir).read_meta(paper_d) instead.
-    """
-    warnings.warn(
-        "read_meta is deprecated. Use PaperStore(papers_dir).read_meta(paper_d) instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    p = paper_d / "meta.json"
-    return json.loads(p.read_text(encoding="utf-8"))
+
+def write_meta(paper_d: Path, data: dict) -> None:
+    """Write meta.json (backward compatibility)."""
+    papers_dir = paper_d.parent.parent
+    store = PaperStore(papers_dir)
+    return store.write_meta(paper_d, data)

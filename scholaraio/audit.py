@@ -51,10 +51,14 @@ class YearRange(tuple):
 def rule_missing_fields(paper_d: Path, data: dict) -> list[Issue]:
     """Check missing required fields."""
     pid = paper_d.name
-    required = ["title", "authors", "year", "doi", "journal"]
+    required = ["doi", "abstract", "year", "authors", "journal", "title"]
     missing = [f for f in required if not data.get(f)]
     if missing:
-        return [Issue(pid, "error", "missing_fields", f"Missing: {', '.join(missing)}")]
+        issues = []
+        for field_name in missing:
+            severity = "error" if field_name == "title" else "warning"
+            issues.append(Issue(pid, severity, f"missing_{field_name}", f"Missing {field_name}"))
+        return issues
     return []
 
 
@@ -64,6 +68,14 @@ def rule_file_pairing(paper_d: Path, data: dict) -> list[Issue]:
     md_path = paper_d / "paper.md"
     if not md_path.exists():
         return [Issue(pid, "error", "missing_md", "meta.json exists but paper.md missing")]
+    
+    # Check content length
+    try:
+        content = md_path.read_text(encoding="utf-8", errors="replace")
+        if content and len(content.strip()) < 200:
+            return [Issue(pid, "warning", "short_md", f"paper.md too short ({len(content.strip())} chars)")]
+    except Exception:
+        pass
     return []
 
 

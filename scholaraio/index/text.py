@@ -21,13 +21,10 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any
 
 from scholaraio.hash import compute_full_hash
 from scholaraio.papers import best_citation, parse_year_range
-
-if TYPE_CHECKING:
-    pass
 
 # ============================================================================
 # Query Data Classes (Immutable, No Side Effects)
@@ -50,6 +47,8 @@ class FilterParams:
         """Convert to SQL WHERE clause and params."""
         clauses: list[str] = []
         params: list[str] = []
+
+        # Year filter
         if self.year:
             start, end = parse_year_range(self.year)
             if start is not None and end is not None:
@@ -65,12 +64,17 @@ class FilterParams:
             elif end is not None:
                 clauses.append("year <= ?")
                 params.append(str(end))
+
+        # Journal filter
         if self.journal:
             clauses.append("journal LIKE ?")
             params.append(f"%{self.journal}%")
+
+        # Paper type filter
         if self.paper_type:
             clauses.append("paper_type LIKE ?")
             params.append(f"%{self.paper_type}%")
+
         return ("".join(f" AND {c}" for c in clauses), params) if clauses else ("", [])
 
 
@@ -188,7 +192,7 @@ class SearchIndex:
             raise FileNotFoundError("FTS5 index table not found.")
 
     def _enrich_dir_names(self, results: list[dict]) -> None:
-        conn = self._conn
+        conn = self._ensure_connection()
         id_to_dir: dict[str, str] = {}
         has_reg = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='papers_registry'"
@@ -210,7 +214,7 @@ class SearchIndex:
         paper_ids: set[str] | None = None,
     ) -> list[dict]:
         self._ensure_fts_table()
-        conn = self._conn
+        conn = self._ensure_connection()
 
         cols, where_clause, where_params = mode
         filter_sql, filter_params = filters.to_sql()
@@ -447,10 +451,12 @@ class SearchIndex:
             ) WHERE target_id IS NULL
         """)
 
-    def rebuild(self, papers_dir: Path) -> int:
-        """Full rebuild of search index."""
-        from scholaraio.papers import PaperStore
+    def rebuild(self, store) -> int:
+        """Full rebuild of search index.
 
+        Args:
+            store: PaperStore instance.
+        """
         self._ensure_schemas()
         conn = self._ensure_connection()
 
@@ -461,26 +467,27 @@ class SearchIndex:
         conn.execute("DELETE FROM papers_registry")
         conn.execute("DELETE FROM citations")
 
-        store = PaperStore(papers_dir)
         count = 0
         for pdir in store.iter_papers():
             try:
-                meta = store.read_meta(pdir)
+                meta: dict[str, Any] = store.read_meta(pdir)
             except (ValueError, FileNotFoundError):
                 continue
-            paper_id = meta.get("id") or pdir.name
+            paper_id: str = meta.get("id") or pdir.name
             h = compute_full_hash(meta)
-            if self._index_paper(conn, pdir, paper_id, meta, h):
+            if self._index_paper(conn, pdir, meta, paper_id, h):
                 count += 1
 
         self._resolve_citations(conn)
         conn.commit()
         return count
 
-    def update(self, papers_dir: Path) -> int:
-        """Incrementally update search index."""
-        from scholaraio.papers import PaperStore
+    def update(self, store) -> int:
+        """Incrementally update search index.
 
+        Args:
+            store: PaperStore instance.
+        """
         self._ensure_schemas()
         conn = self._ensure_connection()
 
@@ -491,21 +498,20 @@ class SearchIndex:
         ).fetchall():
             existing_hashes[row[0]] = row[1]
 
-        store = PaperStore(papers_dir)
         count = 0
         for pdir in store.iter_papers():
             try:
-                meta = store.read_meta(pdir)
+                meta: dict[str, Any] = store.read_meta(pdir)
             except (ValueError, FileNotFoundError):
                 continue
-            paper_id = meta.get("id") or pdir.name
+            paper_id: str = meta.get("id") or pdir.name
             h = compute_full_hash(meta)
 
             if existing_hashes.get(paper_id) == h:
                 continue  # unchanged
 
             conn.execute("DELETE FROM papers WHERE paper_id = ?", (paper_id,))
-            if self._index_paper(conn, pdir, paper_id, meta, h):
+            if self._index_paper(conn, pdir, meta, paper_id, h):
                 count += 1
 
         self._resolve_citations(conn)

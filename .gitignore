@@ -3,7 +3,6 @@ data/
 workspace/
 
 # Python
-.ruff_cache/
 __pycache__/
 *__pycache__
 *.py[cod]
@@ -13,7 +12,9 @@ build/
 .venv/
 .env
 
-# Tests & IDE
+# Tests & Lint & IDE
+.mypy_cache/
+.ruff_cache/
 tests/
 .pytest_cache/
 .vscode/

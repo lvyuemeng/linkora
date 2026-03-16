@@ -1,18 +1,176 @@
+# setup.py Refactoring Plan
+
+> Refactor `scholaraio/setup.py` to align with AGENT.md philosophy.
+> - English only
+> - Data pipe flow
+> - Commands: `synapse check` and `synapse doctor`
+
+---
+
+## 1. Command Design
+
+### 1.1 `synapse check`
+
+Quick environment diagnostics (fast, no network):
+
+```bash
+$ synapse check
+
+[OK] python: 3.12.2
+[OK] config.yaml: found
+[OK] workspace: /path/to/workspace
+[OK] papers_dir: /path/to/papers (0 papers)
+[--] llm.api_key: not set
+
+Passed: 4/5
+```
+
+### 1.2 `synapse doctor`
+
+Full health check (may test network/API connections):
+
+```bash
+$ synapse doctor
+
+=== Environment ===
+[OK] python: 3.12.2
+[OK] deps: requests, pyyaml
+
+=== Configuration ===
+[OK] config.yaml: found
+[OK] workspace_dir: /path/to/workspace
+[OK] papers_dir: /path/to/papers
+
+=== Secrets ===
+[--] llm.api_key: not set
+[--] mineru.api_key: not set
+
+=== Services ===
+[OK] LLM (deepseek): reachable
+[--] MinerU: not reachable
+
+Health Score: 7/9
+```
+
+---
+
+## 2. Data Pipe Flow
+
+### 2.1 Types
+
+```python
+from dataclasses import dataclass
+from enum import Enum, auto
+
+
+class CheckCategory(Enum):
+    ENV = auto()      # Python, deps
+    CONFIG = auto()   # Config files
+    PATHS = auto()   # Directories
+    SECRETS = auto() # API keys
+    SERVICES = auto() # Network checks
+
+
+@dataclass(frozen=True)
+class CheckItem:
+    category: CheckCategory
+    name: str
+    ok: bool
+    detail: str
+
+
+@dataclass(frozen=True)
+class CheckResult:
+    items: tuple[CheckItem, ...]
+
+    @property
+    def passed(self) -> bool:
+        return all(i.ok for i in self.items)
+
+    @property
+    def total(self) -> int:
+        return len(self.items)
+
+    @property
+    def failed(self) -> int:
+        return sum(1 for i in self.items if not i.ok)
+```
+
+### 2.2 Pipe Functions
+
+```python
+def _collect(cfg: Config) -> Iterator[CheckItem]:
+    """Collect all check items."""
+    # ENV
+    yield _check_python()
+    yield from _check_deps()
+
+    # CONFIG
+    yield _check_config(cfg)
+    yield _check_local_config(cfg)
+
+    # PATHS
+    yield _check_workspace_dir(cfg)
+    yield _check_papers_dir(cfg)
+
+    # SECRETS
+    yield _check_llm_key(cfg)
+    yield _check_mineru_key(cfg)
+
+
+def _verify_service(item: CheckItem, cfg: Config) -> CheckItem:
+    """Verify service connectivity (for doctor command)."""
+    if item.category != CheckCategory.SERVICES:
+        return item
+    # Test network connectivity here
+    return item
+
+
+def run_check(cfg: Config) -> CheckResult:
+    """Quick check (no network)."""
+    items = tuple(_collect(cfg))
+    return CheckResult(items=items)
+
+
+def run_doctor(cfg: Config) -> CheckResult:
+    """Full health check (with network)."""
+    items = tuple(_verify_service(item, cfg) for item in _collect(cfg))
+    return CheckResult(items=items)
+```
+
+---
+
+## 3. Secret Management
+
+Two-file pattern:
+
+| File | Tracked | Contents |
+|------|---------|----------|
+| `config.yaml` | YES | Non-sensitive defaults |
+| `config.local.yaml` | NO | Secrets only |
+
+---
+
+## 4. Complete Code
+
+```python
 """
 setup.py — Synapse Environment Setup
 
 Commands:
   synapse check    Quick diagnostics (no network)
   synapse doctor   Full health check (with network)
-  synapse init     Interactive setup wizard
+  synapse init    Interactive setup wizard
 """
 
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 from dataclasses import dataclass
 from enum import Enum, auto
+from pathlib import Path
 from typing import Iterator
 
 import yaml
@@ -131,7 +289,7 @@ def _check_papers_dir(cfg: Config) -> CheckItem:
 def _check_llm_key(cfg: Config) -> CheckItem:
     key = cfg.resolve_llm_api_key()
     ok = bool(key)
-    detail = "configured" if ok else "not set"
+    detail = f"configured" if ok else "not set"
     return CheckItem(CheckCategory.SECRETS, "llm.api_key", ok, detail)
 
 
@@ -298,7 +456,7 @@ def run_init(force: bool = False) -> InitResult:
     local_created = False
     if force or not local_path.exists():
         key = input("LLM API key (skip to use env): ").strip()
-        local_data: dict = {}
+        local_data = {}
         if key:
             local_data.setdefault("llm", {})["api_key"] = key
         if local_data:
@@ -341,20 +499,52 @@ def cmd_init(args) -> None:
         print("Created config.local.yaml")
     if result.dirs_created:
         print("Created directories")
+    print("\nDone! Run: synapse doctor")
 
 
 # ============================================================================
-#  Legacy API (for backward compatibility)
+#  Main
 # ============================================================================
 
 
-def check_environment(lang: str = "zh") -> None:
-    """Legacy function for backward compatibility."""
-    cfg = get_config()
-    result = run_check(cfg)
-    print(format_result(result, "Environment Check"))
+if __name__ == "__main__":
+    import argparse
 
+    parser = argparse.ArgumentParser(description="Synapse Setup")
+    sub = parser.add_subparsers()
 
-def main() -> None:
-    """Legacy main function for backward compatibility."""
-    run_init()
+    p = sub.add_parser("check", help="Quick diagnostics")
+    p.set_defaults(func=cmd_check)
+
+    p = sub.add_parser("doctor", help="Full health check")
+    p.set_defaults(func=cmd_doctor)
+
+    p = sub.add_parser("init", help="Initialize configuration")
+    p.add_argument("--force", action="store_true", help="Overwrite files")
+    p.set_defaults(func=cmd_init)
+
+    args = parser.parse_args()
+    if hasattr(args, "func"):
+        args.func(args)
+    else:
+        parser.print_help()
+```
+
+---
+
+## 5. CLI Summary
+
+| Command | Description | Network |
+|---------|-------------|---------|
+| `synapse check` | Quick diagnostics | No |
+| `synapse doctor` | Full health check | Yes |
+| `synapse init` | Interactive setup | No |
+
+---
+
+## 6. Files Changed
+
+| File | Action |
+|------|--------|
+| `scholaraio/setup.py` | Refactor to new design |
+| `scholaraio/cli/commands.py` | Update setup command names |

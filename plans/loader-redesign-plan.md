@@ -15,7 +15,6 @@
 | LLMRunner wrapper | `class LLMRunner` wraps `llm.LLMRunner` | Use directly |
 | String dispatch | `if key == "toc"` etc. | Dictionary dispatch with Enum |
 | Scattered imports | Inside methods | Move to module level |
-| Backward compatibility | `PaperEnricher` alias | REMOVED |
 
 ---
 

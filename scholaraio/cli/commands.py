@@ -1,146 +1,153 @@
-"""CLI command handlers - grouped by functionality."""
+"""CLI command handlers - unified commands with context injection."""
 
 from __future__ import annotations
 
 import argparse
-import logging
+from typing import Literal
 
 from scholaraio.cli.args import add_filter_args, resolve_top_k
 from scholaraio.cli.output import ui, print_results_list
 from scholaraio.cli.errors import IndexNotFoundError
-from scholaraio.index import SearchIndex, VectorIndex
+from scholaraio.index import SearchIndex
 from scholaraio.papers import PaperStore
 
+from scholaraio.log import get_logger
 
-_log = logging.getLogger(__name__)
+_log = get_logger(__name__)
+
+# Type aliases for clarity
+SearchMode = Literal["fts", "author", "vector", "hybrid", "cited"]
+IndexType = Literal["fts", "vector"]
 
 
 # ============================================================================
-#  Search Commands (index.py, vectors.py)
+#  Unified Search Command
 # ============================================================================
 
 
 def cmd_search(args: argparse.Namespace, cfg) -> None:
+    """Unified search command with --mode flag.
+
+    Modes:
+        fts     - Full-text search using FTS5
+        author  - Search by author name
+        vector  - Semantic vector search (requires faiss)
+        hybrid  - Combined FTS + vector search
+        cited   - Top cited papers
+    """
+    query = " ".join(args.query) if hasattr(args, "query") and args.query else ""
+    mode: SearchMode = getattr(args, "mode", "fts")
+    top_k = resolve_top_k(args, cfg.index.top_k)
+    year = getattr(args, "year", None)
+    journal = getattr(args, "journal", None)
+    paper_type = getattr(args, "paper_type", None)
+
+    try:
+        if mode == "fts":
+            _search_fts(cfg, query, top_k, year, journal, paper_type)
+        elif mode == "author":
+            _search_author(cfg, query, top_k, year, journal, paper_type)
+        elif mode == "vector":
+            _search_vector(cfg, query, top_k, year, journal, paper_type)
+        elif mode == "hybrid":
+            _search_hybrid(cfg, query, top_k, year, journal, paper_type)
+        elif mode == "cited":
+            _search_cited(cfg, top_k, year, journal, paper_type)
+    except FileNotFoundError:
+        raise IndexNotFoundError(str(cfg.index_db))
+
+
+def _search_fts(cfg, query: str, top_k: int, year, journal, paper_type) -> None:
     """Full-text search using FTS5."""
-    query = " ".join(args.query)
-    try:
-        with SearchIndex(cfg.index_db) as idx:
-            results = idx.search(
-                query,
-                top_k=resolve_top_k(args, cfg.search.top_k),
-                year=args.year,
-                journal=args.journal,
-                paper_type=args.paper_type,
-            )
-    except FileNotFoundError:
-        raise IndexNotFoundError(str(cfg.index_db))
-    print_results_list(results, f'Found {len(results)} papers (query: "{query}")')
+    with SearchIndex(cfg.index_db) as idx:
+        results = idx.search(
+            query, top_k=top_k, year=year, journal=journal, paper_type=paper_type
+        )
+    print_results_list(results, f'Found {len(results)} papers (FTS: "{query}")')
 
 
-def cmd_search_author(args: argparse.Namespace, cfg) -> None:
+def _search_author(cfg, query: str, top_k: int, year, journal, paper_type) -> None:
     """Search by author name."""
-    query = " ".join(args.query)
-    try:
-        with SearchIndex(cfg.index_db) as idx:
-            results = idx.search_author(
-                query,
-                top_k=resolve_top_k(args, cfg.search.top_k),
-                year=args.year,
-                journal=args.journal,
-                paper_type=args.paper_type,
-            )
-    except FileNotFoundError:
-        raise IndexNotFoundError(str(cfg.index_db))
+    with SearchIndex(cfg.index_db) as idx:
+        results = idx.search_author(
+            query, top_k=top_k, year=year, journal=journal, paper_type=paper_type
+        )
     print_results_list(results, f'Found {len(results)} papers (author: "{query}")')
 
 
-def cmd_vsearch(args: argparse.Namespace, cfg) -> None:
+def _search_vector(cfg, query: str, top_k: int, year, journal, paper_type) -> None:
     """Semantic vector search."""
-    query = " ".join(args.query)
     try:
         from scholaraio.index import VectorIndex
 
         with VectorIndex(cfg.index_db) as vidx:
             results = vidx.search(
-                query,
-                top_k=resolve_top_k(args, cfg.embed.top_k),
-                year=args.year,
-                journal=args.journal,
-                paper_type=args.paper_type,
+                query, top_k=top_k, year=year, journal=journal, paper_type=paper_type
             )
-    except FileNotFoundError:
-        raise IndexNotFoundError(str(cfg.index_db))
-    print_results_list(results, f'Found {len(results)} papers (vector: "{query}")')
+        print_results_list(results, f'Found {len(results)} papers (vector: "{query}")')
+    except ImportError as e:
+        _log.error("Missing dependency for vector search: %s", e)
 
 
-def cmd_usearch(args: argparse.Namespace, cfg) -> None:
-    """Unified/hybrid search."""
-    query = " ".join(args.query)
-    try:
-        with SearchIndex(cfg.index_db) as idx:
-            results = idx.unified_search(
-                query,
-                top_k=resolve_top_k(args, cfg.search.top_k),
-                year=args.year,
-                journal=args.journal,
-                paper_type=args.paper_type,
-            )
-    except FileNotFoundError:
-        raise IndexNotFoundError(str(cfg.index_db))
+def _search_hybrid(cfg, query: str, top_k: int, year, journal, paper_type) -> None:
+    """Hybrid search (FTS + vector combined)."""
+    # Fallback to FTS - hybrid requires implementation
+    _log.warning("Hybrid search not fully implemented, using FTS fallback")
+    with SearchIndex(cfg.index_db) as idx:
+        results = idx.search(
+            query, top_k=top_k, year=year, journal=journal, paper_type=paper_type
+        )
     print_results_list(results, f'Found {len(results)} papers (hybrid: "{query}")')
 
 
-def cmd_top_cited(args: argparse.Namespace, cfg) -> None:
+def _search_cited(cfg, top_k: int, year, journal, paper_type) -> None:
     """Get top-cited papers."""
-    try:
-        with SearchIndex(cfg.index_db) as idx:
-            results = idx.top_cited(
-                top_k=resolve_top_k(args, cfg.search.top_k),
-                year=args.year,
-                journal=args.journal,
-                paper_type=args.paper_type,
-            )
-    except FileNotFoundError:
-        raise IndexNotFoundError(str(cfg.index_db))
+    with SearchIndex(cfg.index_db) as idx:
+        results = idx.top_cited(
+            top_k=top_k, year=year, journal=journal, paper_type=paper_type
+        )
     print_results_list(results, f"Found {len(results)} papers (top-cited)")
 
 
 # ============================================================================
-#  Index Commands (index.py, vectors.py)
+#  Unified Index Command
 # ============================================================================
 
 
 def cmd_index(args: argparse.Namespace, cfg) -> None:
-    """Build FTS5 index."""
+    """Unified index command with --type flag.
+
+    Types:
+        fts     - Build FTS5 full-text index
+        vector  - Build vector index (requires faiss)
+    """
+    index_type: IndexType = getattr(args, "type", "fts")
+    rebuild = getattr(args, "rebuild", False)
+
     papers_dir = cfg.papers_dir
     if not papers_dir.exists():
         _log.error("papers_dir does not exist: %s", papers_dir)
         return
-    action = "Rebuilding" if args.rebuild else "Building"
-    ui(f"{action} index: {papers_dir} -> {cfg.index_db}")
-    with SearchIndex(cfg.index_db) as idx:
-        count = idx.rebuild(papers_dir) if args.rebuild else idx.update(papers_dir)
-    ui(f"Done, indexed {count} papers.")
 
+    store = PaperStore(papers_dir)
 
-def cmd_embed(args: argparse.Namespace, cfg) -> None:
-    """Build vector index."""
-    papers_dir = cfg.papers_dir
-    if not papers_dir.exists():
-        _log.error("papers_dir does not exist: %s", papers_dir)
-        return
-    try:
-        from scholaraio.index import VectorIndex
+    if index_type == "fts":
+        action = "Rebuilding" if rebuild else "Building"
+        ui(f"{action} FTS index: {papers_dir} -> {cfg.index_db}")
+        with SearchIndex(cfg.index_db) as idx:
+            count = idx.rebuild(store) if rebuild else idx.update(store)
+        ui(f"Done, indexed {count} papers.")
+    elif index_type == "vector":
+        try:
+            from scholaraio.index import VectorIndex
 
-        action = "Rebuilding" if args.rebuild else "Building"
-        ui(f"{action} vectors: {papers_dir} -> {cfg.index_db}")
-        with VectorIndex(cfg.index_db) as vidx:
-            count = (
-                vidx.rebuild(papers_dir) if args.rebuild else vidx.update(papers_dir)
-            )
-        ui(f"Done, embedded {count} papers.")
-    except ImportError as e:
-        _log.error("Missing dependency: %s", e)
+            action = "Rebuilding" if rebuild else "Building"
+            ui(f"{action} vectors: {papers_dir} -> {cfg.index_db}")
+            with VectorIndex(cfg.index_db) as vidx:
+                count = vidx.rebuild(store) if rebuild else vidx.update(store)
+            ui(f"Done, embedded {count} papers.")
+        except ImportError as e:
+            _log.error("Missing dependency for vector index: %s", e)
 
 
 # ============================================================================
@@ -178,19 +185,91 @@ def cmd_setup(args: argparse.Namespace, cfg) -> None:
         setup_main()
 
 
+def cmd_check(args: argparse.Namespace, cfg) -> None:
+    """Quick environment diagnostics (no network)."""
+    from scholaraio.setup import cmd_check
+
+    cmd_check(args)
+
+
+def cmd_doctor(args: argparse.Namespace, cfg) -> None:
+    """Full health check (with network)."""
+    from scholaraio.setup import cmd_doctor
+
+    cmd_doctor(args)
+
+
+def cmd_init(args: argparse.Namespace, cfg) -> None:
+    """Interactive setup wizard."""
+    from scholaraio.setup import cmd_init
+
+    cmd_init(args)
+
+
 def cmd_metrics(args: argparse.Namespace, cfg) -> None:
     """Show LLM metrics."""
-    from scholaraio.metrics import show_summary, show_metrics
+    from datetime import datetime, timezone
+
+    from scholaraio.metrics import (
+        EventCategory,
+        MetricsQuery,
+        MetricsStore,
+        TimeRange,
+    )
+    from scholaraio.cli.output import ui
+
+    store = MetricsStore(cfg.metrics_db_path, session_id="cli")
 
     if args.summary:
-        show_summary(category=args.category)
+        category = args.category
+        summary = store.summary()
+        total_tokens = summary.total_tokens_in + summary.total_tokens_out
+        ui(f"LLM 调用次数: {summary.call_count}")
+        ui(f"输入 tokens: {summary.total_tokens_in}")
+        ui(f"输出 tokens: {summary.total_tokens_out}")
+        ui(f"总 tokens: {total_tokens}")
+        ui(f"总耗时: {summary.total_duration_s:.2f}s")
     else:
-        show_metrics(
-            cfg.metrics_db_path,
-            last=args.last,
-            category=args.category,
-            since=args.since,
+        category_str = args.category or "llm"
+        try:
+            category = EventCategory(category_str)
+        except ValueError:
+            category = None
+
+        time_range = None
+        if args.since:
+            since_dt = datetime.fromisoformat(args.since).replace(tzinfo=timezone.utc)
+            time_range = TimeRange(since=since_dt)
+
+        query = MetricsQuery(
+            category=category,
+            time_range=time_range,
+            limit=args.last,
         )
+        result = store.query_events(query)
+
+        if not result.events:
+            ui("No metrics found.")
+            return
+
+        ui(f"Recent {len(result.events)} events:")
+        for event in result.events:
+            ts = event.get("timestamp", "")
+            name = event.get("name", "")
+            cat = event.get("category", "")
+            duration = event.get("duration_s")
+            tokens_in = event.get("tokens_in")
+            tokens_out = event.get("tokens_out")
+            model = event.get("model", "")
+            status = event.get("status", "")
+
+            ui(f"[{ts}] {cat}:{name} status={status}")
+            if duration:
+                ui(f"  duration={duration:.2f}s")
+            if tokens_in or tokens_out:
+                ui(f"  tokens: {tokens_in or 0} in, {tokens_out or 0} out")
+            if model:
+                ui(f"  model={model}")
 
 
 # ============================================================================
@@ -200,44 +279,29 @@ def cmd_metrics(args: argparse.Namespace, cfg) -> None:
 
 def register_all(subparsers) -> None:
     """Register all CLI commands."""
-    # Search commands
-    p = subparsers.add_parser("search", help="Full-text search")
+    # Unified search command with --mode
+    p = subparsers.add_parser("search", help="Search papers")
     p.set_defaults(func=cmd_search)
-    p.add_argument("query", nargs="+", help="Search query")
+    p.add_argument("query", nargs="*", help="Search query")
     p.add_argument("--top", type=int, help="Max results")
+    p.add_argument(
+        "--mode",
+        choices=["fts", "author", "vector", "hybrid", "cited"],
+        default="fts",
+        help="Search mode (default: fts)",
+    )
     add_filter_args(p)
 
-    p = subparsers.add_parser("search-author", help="Search by author")
-    p.set_defaults(func=cmd_search_author)
-    p.add_argument("query", nargs="+", help="Author name")
-    p.add_argument("--top", type=int, help="Max results")
-    add_filter_args(p)
-
-    p = subparsers.add_parser("vsearch", help="Vector search")
-    p.set_defaults(func=cmd_vsearch)
-    p.add_argument("query", nargs="+", help="Search query")
-    p.add_argument("--top", type=int, help="Max results")
-    add_filter_args(p)
-
-    p = subparsers.add_parser("usearch", help="Hybrid search")
-    p.set_defaults(func=cmd_usearch)
-    p.add_argument("query", nargs="+", help="Search query")
-    p.add_argument("--top", type=int, help="Max results")
-    add_filter_args(p)
-
-    p = subparsers.add_parser("top-cited", help="Top cited papers")
-    p.set_defaults(func=cmd_top_cited)
-    p.add_argument("--top", type=int, help="Max results")
-    add_filter_args(p)
-
-    # Index commands
-    p = subparsers.add_parser("index", help="Build FTS5 index")
+    # Unified index command with --type
+    p = subparsers.add_parser("index", help="Build search index")
     p.set_defaults(func=cmd_index)
     p.add_argument("--rebuild", action="store_true", help="Rebuild")
-
-    p = subparsers.add_parser("embed", help="Build vector index")
-    p.set_defaults(func=cmd_embed)
-    p.add_argument("--rebuild", action="store_true", help="Rebuild")
+    p.add_argument(
+        "--type",
+        choices=["fts", "vector"],
+        default="fts",
+        help="Index type (default: fts)",
+    )
 
     # System commands
     p = subparsers.add_parser("audit", help="Audit data quality")
@@ -248,8 +312,18 @@ def register_all(subparsers) -> None:
     p = subparsers.add_parser("setup", help="Setup wizard")
     p.set_defaults(func=cmd_setup)
     p_sub = p.add_subparsers(dest="action")
-    p_check = p_sub.add_parser("check", help="Check environment")
-    p_check.add_argument("--lang", choices=["en", "zh"], default="zh")
+    p_sub.add_parser("check", help="Check environment")
+    p_sub.add_parser("wizard", help="Interactive setup wizard")
+
+    p = subparsers.add_parser("check", help="Quick environment diagnostics (no network)")
+    p.set_defaults(func=cmd_check)
+
+    p = subparsers.add_parser("doctor", help="Full health check (with network)")
+    p.set_defaults(func=cmd_doctor)
+
+    p = subparsers.add_parser("init", help="Interactive setup wizard")
+    p.set_defaults(func=cmd_init)
+    p.add_argument("--force", action="store_true", help="Force overwrite existing config")
 
     p = subparsers.add_parser("metrics", help="Show metrics")
     p.set_defaults(func=cmd_metrics)

@@ -18,17 +18,23 @@ from __future__ import annotations
 
 import importlib
 import json
-import logging
 import os
 import sqlite3
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+import faiss
+import numpy as np
 
 from scholaraio.hash import compute_content_hash
+from scholaraio.log import get_logger
 
-_log = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
+
+_log = get_logger(__name__)
 
 # ============================================================================
 # Data Structures (Pure Data, No Side Effects)
@@ -130,18 +136,18 @@ class ModelStore:
 
     _instance: "ModelStore | None" = None
     _model_cache: dict = {}
+    _initialized: bool = False
 
     def __new__(cls, config=None) -> "ModelStore":
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
         return cls._instance
 
     def __init__(self, config=None) -> None:
         if self._initialized:
             return
         self._config = config
-        self._model = None
+        self._model: "SentenceTransformer | None" = None
         self._initialized = True
 
     def config(self, config) -> "ModelStore":
@@ -234,12 +240,14 @@ class ModelStore:
     def embed_text(self, text: str) -> list[float]:
         """Embed single text."""
         model = self.get_model()
+        assert model is not None
         vec = model.encode([text], prompt_name="query", normalize_embeddings=True)
         return vec[0].tolist()
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         """Embed multiple texts."""
         model = self.get_model()
+        assert model is not None
         vecs = model.encode(texts, normalize_embeddings=True, batch_size=16)
         return vecs.tolist()
 
@@ -280,7 +288,6 @@ class QwenEmbedder:
         self._store = ModelStore(config)
 
     def embed_documents(self, documents, verbose=False):
-        import numpy as np
 
         return np.array(self._store.embed_batch(list(documents)), dtype="float32")
 
@@ -313,11 +320,8 @@ def _faiss_paths(db_path: Path) -> tuple[Path, Path]:
 # ============================================================================
 
 
-def prepare_embed_tasks(papers_dir: Path) -> list[EmbedTask]:
-    """Prepare embedding tasks from papers directory (pure data)."""
-    from scholaraio.papers import PaperStore
-
-    store = PaperStore(papers_dir)
+def prepare_embed_tasks(store) -> list[EmbedTask]:
+    """Prepare embedding tasks from PaperStore (pure data)."""
     tasks: list[EmbedTask] = []
     for pdir in store.iter_papers():
         try:
@@ -385,6 +389,21 @@ def prepare_search_results(
     return results
 
 
+def _year_in_range(year_str: str, start: int | None, end: int | None) -> bool:
+    """Check if year is within range (pure data)."""
+    try:
+        y = int(year_str) if year_str else None
+        if y is None:
+            return False
+        if start is not None and y < start:
+            return False
+        if end is not None and y > end:
+            return False
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
 def filter_results(
     results: list[SearchResult],
     filters: VectorFilterParams,
@@ -395,31 +414,21 @@ def filter_results(
 
     filtered = results
 
+    # Filter by paper IDs
     if paper_ids is not None:
         filtered = [r for r in filtered if r.paper_id in paper_ids]
 
+    # Filter by year range
     if filters.year:
         start, end = parse_year_range(filters.year)
+        filtered = [r for r in filtered if _year_in_range(r.year, start, end)]
 
-        def year_ok(r: SearchResult) -> bool:
-            try:
-                y = int(r.year) if r.year else None
-                if y is None:
-                    return False
-                if start is not None and y < start:
-                    return False
-                if end is not None and y > end:
-                    return False
-                return True
-            except (ValueError, TypeError):
-                return False
-
-        filtered = [r for r in filtered if year_ok(r)]
-
+    # Filter by journal
     if filters.journal:
         j_lower = filters.journal.lower()
         filtered = [r for r in filtered if j_lower in r.journal.lower()]
 
+    # Filter by paper type
     if filters.paper_type:
         t_lower = filters.paper_type.lower()
         filtered = [r for r in filtered if t_lower in r.paper_type.lower()]
@@ -460,26 +469,29 @@ def save_embeddings(conn: sqlite3.Connection, results: list[EmbedResult]) -> Non
         )
 
 
+def table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    return bool(
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+    )
+
+
 def load_metadata(conn: sqlite3.Connection) -> tuple[dict, dict]:
     """Load metadata from FTS5 table. Returns (meta_map, dir_map)."""
-    meta_map: dict = {}
-    has_fts = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='papers'"
-    ).fetchone()
-    if has_fts:
-        conn.row_factory = sqlite3.Row
-        for row in conn.execute(
-            "SELECT paper_id, title, authors, year, journal, citation_count, paper_type FROM papers"
-        ).fetchall():
-            meta_map[row["paper_id"]] = dict(row)
+    meta_map, dir_map = {}, {}
 
-    dir_map: dict = {}
-    has_reg = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='papers_registry'"
-    ).fetchone()
-    if has_reg:
-        for row in conn.execute("SELECT id, dir_name FROM papers_registry").fetchall():
-            dir_map[row[0]] = row[1]
+    if table_exists(conn, "papers"):
+        conn.row_factory = sqlite3.Row
+        meta_map = {
+            row["paper_id"]: dict(row)
+            for row in conn.execute(
+                "SELECT paper_id, title, authors, year, journal, citation_count, paper_type FROM papers"
+            )
+        }
+
+    if table_exists(conn, "papers_registry"):
+        dir_map = dict(conn.execute("SELECT id, dir_name FROM papers_registry"))
 
     return meta_map, dir_map
 
@@ -490,46 +502,64 @@ def invalidate_faiss(db_path: Path) -> None:
         p.unlink(missing_ok=True)
 
 
+def load_faiss_index(idx_p: Path, ids_p: Path):
+    try:
+        return faiss.read_index(str(idx_p)), json.loads(ids_p.read_text("utf-8"))
+    except Exception as e:
+        _log.debug("Failed to load FAISS: %s", e)
+        return None, None
+
+
+def save_faiss_index(idx_p: Path, ids_p: Path, index, paper_ids):
+    faiss.write_index(index, str(idx_p))
+    ids_p.write_text(json.dumps(paper_ids, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
 def append_faiss(
     db_path: Path, new_ids: list[str], new_vecs: list[list[float]]
 ) -> None:
-    """Append new vectors to existing FAISS index."""
-    import faiss
-    import numpy as np
-
     idx_p, ids_p = _faiss_paths(db_path)
-
     if not idx_p.exists() or not ids_p.exists():
         return
 
-    try:
-        index = faiss.read_index(str(idx_p))
-        paper_ids = json.loads(ids_p.read_text("utf-8"))
-    except Exception as e:
-        _log.debug("failed to load FAISS cache, rebuilding: %s", e)
+    index, paper_ids = load_faiss_index(idx_p, ids_p)
+    if index is None or set(new_ids) & set(paper_ids):
         invalidate_faiss(db_path)
         return
 
-    if set(new_ids) & set(paper_ids):
-        invalidate_faiss(db_path)
-        return
+    import numpy as np
 
     arr = np.array(new_vecs, dtype="float32")
     faiss.normalize_L2(arr)
     index.add(arr)
     paper_ids.extend(new_ids)
 
-    faiss.write_index(index, str(idx_p))
-    ids_p.write_text(json.dumps(paper_ids, ensure_ascii=False) + "\n", encoding="utf-8")
+    save_faiss_index(idx_p, ids_p, index, paper_ids)
+
+
+def unpack_embeddings(rows: list[tuple[str, bytes]]) -> tuple[list[str], np.ndarray]:
+    if not rows:
+        raise FileNotFoundError("No embeddings found")
+
+    expected_len = len(rows[0][1])
+    if expected_len == 0 or expected_len % 4 != 0:
+        raise ValueError(f"Invalid embedding length: {expected_len}")
+    dim = expected_len // 4
+
+    valid_rows = [(pid, vec) for pid, vec in rows if len(vec) == expected_len]
+    if not valid_rows:
+        raise FileNotFoundError("No valid embedding rows")
+
+    paper_ids = [pid for pid, _ in valid_rows]
+    vecs = np.array(
+        [list(struct.unpack(f"{dim}f", vec)) for _, vec in valid_rows], dtype="float32"
+    )
+    faiss.normalize_L2(vecs)
+    return paper_ids, vecs
 
 
 def build_faiss_index(db_path: Path) -> tuple:
-    """Build or load FAISS index from database."""
-    import faiss
-    import numpy as np
-
     idx_p, ids_p = _faiss_paths(db_path)
-
     if idx_p.exists() and ids_p.exists():
         index = faiss.read_index(str(idx_p))
         paper_ids = json.loads(ids_p.read_text("utf-8"))
@@ -541,43 +571,11 @@ def build_faiss_index(db_path: Path) -> tuple:
     finally:
         conn.close()
 
-    if not rows:
-        raise FileNotFoundError("Vector index empty. Run `scholaraio embed` first.")
+    paper_ids, vecs = unpack_embeddings(rows)
+    index = faiss.IndexFlatIP(vecs.shape[1])
+    index.add(vecs)  # type: ignore[no-untyped-call]
 
-    expected_blob_len = len(rows[0][1])
-    dim = expected_blob_len // 4
-    if expected_blob_len == 0 or expected_blob_len % 4 != 0:
-        raise ValueError(
-            f"First embedding blob has invalid length: {expected_blob_len}"
-        )
-
-    valid_rows = []
-    for r in rows:
-        if len(r[1]) != expected_blob_len:
-            _log.warning(
-                "Skipping paper %s: blob length %d != expected %d",
-                r[0],
-                len(r[1]),
-                expected_blob_len,
-            )
-            continue
-        valid_rows.append(r)
-
-    if not valid_rows:
-        raise FileNotFoundError("No valid embedding rows after dimension check")
-
-    paper_ids = [r[0] for r in valid_rows]
-    vecs = np.array(
-        [list(struct.unpack(f"{dim}f", r[1])) for r in valid_rows],
-        dtype="float32",
-    )
-    faiss.normalize_L2(vecs)
-
-    index = faiss.IndexFlatIP(dim)
-    index.add(vecs)
-
-    faiss.write_index(index, str(idx_p))
-    ids_p.write_text(json.dumps(paper_ids, ensure_ascii=False) + "\n", encoding="utf-8")
+    save_faiss_index(idx_p, ids_p, index, paper_ids)
     return index, paper_ids
 
 
@@ -611,13 +609,17 @@ class VectorIndex:
     # Connection Management
     # -------------------------------------------------------------------------
 
-    def _ensure_connection(self) -> sqlite3.Connection:
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """Lazy database connection."""
         if self._conn is None:
             self._conn = sqlite3.connect(self._db_path)
         return self._conn
 
-    def _ensure_schema(self) -> None:
-        conn = self._ensure_connection()
+    @property
+    def schema_ready(self) -> None:
+        """Ensure database schema is ready."""
+        conn = self.connection
         _ensure_schema(conn)
 
     # -------------------------------------------------------------------------
@@ -642,16 +644,20 @@ class VectorIndex:
     # Index Build Methods
     # -------------------------------------------------------------------------
 
-    def rebuild(self, papers_dir: Path) -> int:
-        """Full rebuild of vector index."""
-        self._ensure_schema()
-        conn = self._ensure_connection()
+    def rebuild(self, store) -> int:
+        """Full rebuild of vector index.
+
+        Args:
+            store: PaperStore instance.
+        """
+        self.schema_ready
+        conn = self.connection
 
         # Clear existing data
         conn.execute("DELETE FROM paper_vectors")
 
         # Data layer: prepare tasks
-        tasks = prepare_embed_tasks(papers_dir)
+        tasks = prepare_embed_tasks(store)
         if not tasks:
             return 0
 
@@ -670,16 +676,20 @@ class VectorIndex:
 
         return len(results)
 
-    def update(self, papers_dir: Path) -> int:
-        """Incrementally update vector index."""
-        self._ensure_schema()
-        conn = self._ensure_connection()
+    def update(self, store) -> int:
+        """Incrementally update vector index.
+
+        Args:
+            store: PaperStore instance.
+        """
+        self.schema_ready
+        conn = self.connection
 
         # Data: load existing hashes
         existing_hashes = load_existing_hashes(conn)
 
         # Data: prepare tasks
-        tasks = prepare_embed_tasks(papers_dir)
+        tasks = prepare_embed_tasks(store)
         to_embed, updated_ids = filter_tasks_by_hash(tasks, existing_hashes)
 
         if not to_embed:
@@ -733,7 +743,6 @@ class VectorIndex:
         Returns:
             List of paper dictionaries with paper_id, title, authors, year, journal, score.
         """
-        import numpy as np
 
         if not self._db_path.exists():
             raise FileNotFoundError(
@@ -741,7 +750,7 @@ class VectorIndex:
             )
 
         # Check vectors exist
-        conn = self._ensure_connection()
+        conn = self.connection
         has_vectors = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='paper_vectors'"
         ).fetchone()
@@ -812,203 +821,3 @@ class VectorIndex:
 
 
 # ===========================================================================-
-# Legacy API (Required by External Callers)
-# ============================================================================
-
-
-def build_vectors(
-    papers_dir: Path,
-    db_path: Path,
-    rebuild: bool = False,
-    cfg=None,
-) -> int:
-    """Build or incrementally update vector index.
-
-    Args:
-        papers_dir: Papers directory to scan.
-        db_path: SQLite database path.
-        rebuild: If True, clear old data before building.
-        cfg: Optional Config for embedding model settings.
-
-    Returns:
-        Number of papers indexed.
-    """
-    index = VectorIndex(db_path, cfg)
-    try:
-        if rebuild:
-            return index.rebuild(papers_dir)
-        else:
-            return index.update(papers_dir)
-    finally:
-        index.close()
-
-
-def vsearch(
-    query: str,
-    db_path: Path,
-    top_k: int | None = None,
-    cfg=None,
-    *,
-    year: str | None = None,
-    journal: str | None = None,
-    paper_type: str | None = None,
-    paper_ids: set[str] | None = None,
-) -> list[dict]:
-    """Semantic vector search.
-
-    Args:
-        query: Natural language query.
-        db_path: SQLite database path.
-        top_k: Max results (defaults to cfg.embed.top_k if cfg provided).
-        cfg: Optional Config for embedding model.
-        year: Year filter.
-        journal: Journal filter.
-        paper_type: Paper type filter.
-        paper_ids: Paper UUID whitelist.
-
-    Returns:
-        List of paper dictionaries sorted by score.
-    """
-    if top_k is None:
-        top_k = cfg.embed.top_k if cfg is not None else 10
-
-    index = VectorIndex(db_path, cfg)
-    try:
-        return index.search(
-            query,
-            top_k,
-            year=year,
-            journal=journal,
-            paper_type=paper_type,
-            paper_ids=paper_ids,
-        )
-    finally:
-        index.close()
-
-
-# Internal helpers for external modules
-def _load_model(cfg=None):
-    """Load SentenceTransformer model."""
-    store = ModelStore(cfg)
-    return store.get_model()
-
-
-def _embed_text(text: str, cfg=None) -> list[float]:
-    """Embed single text."""
-    store = ModelStore(cfg)
-    return store.embed_text(text)
-
-
-def _embed_batch(texts: list[str], cfg=None) -> list[list[float]]:
-    """Embed multiple texts."""
-    store = ModelStore(cfg)
-    return store.embed_batch(texts)
-
-
-def _build_faiss_index(db_path: Path):
-    """Build FAISS index."""
-    return build_faiss_index(db_path)
-
-
-def _build_faiss_from_db(
-    db_path: Path,
-    index_path: Path,
-    ids_path: Path,
-    *,
-    empty_msg: str = "Vector index empty. Run `scholaraio embed` first.",
-):
-    """Build FAISS from explicit paths."""
-    return build_faiss_index_from_paths(db_path, index_path, ids_path, empty_msg)
-
-
-def _vsearch_faiss(
-    query: str,
-    index,
-    paper_ids: list[str],
-    top_k: int,
-    cfg=None,
-) -> list[tuple[str, float]]:
-    """Run FAISS similarity search."""
-    import faiss
-    import numpy as np
-
-    q_vec = np.array([_embed_text(query, cfg)], dtype="float32")
-    faiss.normalize_L2(q_vec)
-
-    fetch_k = min(top_k, index.ntotal)
-    scores, indices = index.search(q_vec, fetch_k)
-
-    results = []
-    for score, idx in zip(scores[0], indices[0]):
-        if idx < 0:
-            continue
-        results.append((paper_ids[idx], float(score)))
-    return results
-
-
-# ============================================================================
-# Internal Helper for External Legacy Function
-# ============================================================================
-
-
-def build_faiss_index_from_paths(
-    db_path: Path,
-    index_path: Path,
-    ids_path: Path,
-    empty_msg: str = "Vector index empty. Run `scholaraio embed` first.",
-):
-    """Build FAISS from explicit paths (internal)."""
-    import faiss
-    import numpy as np
-
-    if index_path.exists() and ids_path.exists():
-        index = faiss.read_index(str(index_path))
-        paper_ids = json.loads(ids_path.read_text("utf-8"))
-        return index, paper_ids
-
-    conn = sqlite3.connect(db_path)
-    try:
-        rows = conn.execute("SELECT paper_id, embedding FROM paper_vectors").fetchall()
-    finally:
-        conn.close()
-
-    if not rows:
-        raise FileNotFoundError(empty_msg)
-
-    expected_blob_len = len(rows[0][1])
-    dim = expected_blob_len // 4
-    if expected_blob_len == 0 or expected_blob_len % 4 != 0:
-        raise ValueError(
-            f"First embedding blob has invalid length: {expected_blob_len}"
-        )
-
-    valid_rows = []
-    for r in rows:
-        if len(r[1]) != expected_blob_len:
-            _log.warning(
-                "Skipping paper %s: blob length %d != expected %d",
-                r[0],
-                len(r[1]),
-                expected_blob_len,
-            )
-            continue
-        valid_rows.append(r)
-
-    if not valid_rows:
-        raise FileNotFoundError("No valid embedding rows after dimension check")
-
-    paper_ids = [r[0] for r in valid_rows]
-    vecs = np.array(
-        [list(struct.unpack(f"{dim}f", r[1])) for r in valid_rows],
-        dtype="float32",
-    )
-    faiss.normalize_L2(vecs)
-
-    index = faiss.IndexFlatIP(dim)
-    index.add(vecs)
-
-    faiss.write_index(index, str(index_path))
-    ids_path.write_text(
-        json.dumps(paper_ids, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
-    return index, paper_ids

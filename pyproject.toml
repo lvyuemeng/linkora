@@ -39,12 +39,12 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/zimoliao/scholaraio"
-Repository = "https://github.com/zimoliao/scholaraio"
-Issues = "https://github.com/zimoliao/scholaraio/issues"
+# Homepage = "https://github.com/zimoliao/scholaraio"
+# Repository = "https://github.com/zimoliao/scholaraio"
+# Issues = "https://github.com/zimoliao/scholaraio/issues"
 
 [project.optional-dependencies]
-embed = ["sentence-transformers>=3.0", "numpy>=1.24", "faiss-cpu>=1.7"]
+embed = ["sentence-transformers>=3.0", "numpy>=1.24", "faiss-cpu>=1.7","modelscope>=1.10"]
 topics = ["scholaraio[embed]", "bertopic>=0.16", "pandas>=2.0"]
 import = ["endnote-utils>=1.0", "pyzotero>=1.5"]
 mcp = ["mcp>=1.0"]
@@ -52,7 +52,6 @@ full = [
     "scholaraio[embed]",
     "scholaraio[topics]",
     "scholaraio[import]",
-    "modelscope>=1.10",
     "curl-cffi>=0.5",
 ]
 
@@ -62,9 +61,9 @@ scholaraio-mcp = "scholaraio.mcp_server:main"
 
 [dependency-groups]
 dev = [
-    "mypy>=1.19.1",
     "pytest>=7.0",
     "ruff>=0.15.5",
+    "ty>=0.0.23",
 ]
 
 [tool.setuptools.packages.find]

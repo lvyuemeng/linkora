@@ -106,21 +106,18 @@ _log = get_logger(__name__)
 
 ---
 
-### Phase 2: Create audit/ Module (P1)
+### Phase 2: Create audit.py (P1)
 
-New directory structure:
+New file structure:
 
 ```
 scholaraio/
 ├── papers.py              # Keep: PaperMetadata, _extract_lastname, path helpers
-├── audit/
-│   ├── __init__.py       # Exports: Issue, YearRange, PaperFilter, AuditRunner
-│   ├── types.py          # Issue, YearRange, PaperFilter
-│   ├── rules.py          # _rule_* functions
-│   └── formatter.py      # format_audit()
+├── audit.py               # Issue, YearRange, _rule_* functions, format_audit
+├── filters.py             # PaperFilter Protocol and implementation
 ```
 
-#### 3.2.1 New audit/types.py
+#### 3.2.1 New audit.py - Types Section
 
 ```python
 """Audit data types - immutable."""
@@ -153,15 +150,15 @@ class YearRange(tuple):
         return self[1]
 ```
 
-#### 3.2.2 New audit/rules.py
+#### 3.2.2 New audit.py - Rules Section
 
 ```python
 """Audit rules - pure functions."""
 
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, Callable, List
 
-from scholaraio.audit.types import Issue
+from scholaraio.audit import Issue
 
 
 class PaperReader(Protocol):
@@ -170,27 +167,27 @@ class PaperReader(Protocol):
     def read_md(self, paper_d: Path) -> str | None: ...
 
 
-def rule_missing_fields(reader: PaperReader, pdir: Path, data: dict) -> list[Issue]:
+def rule_missing_fields(reader: PaperReader, pdir: Path, data: dict) -> List[Issue]:
     """Check missing required fields."""
     # ... implementation
 
 
-def rule_file_pairing(reader: PaperReader, pdir: Path, data: dict) -> list[Issue]:
+def rule_file_pairing(reader: PaperReader, pdir: Path, data: dict) -> List[Issue]:
     """Check meta.json / paper.md pairing."""
     # ... implementation
 
 
-def rule_title_match(reader: PaperReader, pdir: Path, data: dict) -> list[Issue]:
+def rule_title_match(reader: PaperReader, pdir: Path, data: dict) -> List[Issue]:
     """Check JSON title vs MD H1 consistency."""
     # ... implementation
 
 
-def rule_filename_format(reader: PaperReader, pdir: Path, data: dict) -> list[Issue]:
+def rule_filename_format(reader: PaperReader, pdir: Path, data: dict) -> List[Issue]:
     """Check directory name format."""
     # ... implementation
 
 
-DEFAULT_RULES: list[callable] = [
+DEFAULT_RULES: List[Callable] = [
     rule_missing_fields,
     rule_file_pairing,
     rule_title_match,
@@ -198,12 +195,12 @@ DEFAULT_RULES: list[callable] = [
 ]
 ```
 
-#### 3.2.3 New audit/formatter.py
+#### 3.2.3 New audit.py - Formatter Section
 
 ```python
 """Audit report formatter."""
 
-from scholaraio.audit.types import Issue
+from scholaraio.audit import Issue
 
 
 def format_audit(issues: list[Issue]) -> str:
@@ -213,9 +210,9 @@ def format_audit(issues: list[Issue]) -> str:
 
 ---
 
-### Phase 3: Create filters/ Module (P2)
+### Phase 3: Create filters.py (P2)
 
-#### 3.3.1 New filters/types.py
+#### 3.3.1 New filters.py
 
 ```python
 """Paper filter types - Protocol-based matching."""
@@ -223,7 +220,7 @@ def format_audit(issues: list[Issue]) -> str:
 from dataclasses import dataclass
 from typing import Protocol
 
-from scholaraio.audit.types import YearRange
+from scholaraio.audit import YearRange
 
 
 class PaperFilter(Protocol):
@@ -334,8 +331,7 @@ After restructuring:
 ```python
 # papers.py - simplified
 from scholaraio.log import get_logger
-from scholaraio.audit.types import Issue, YearRange
-from scholaraio.audit.rules import DEFAULT_RULES
+from scholaraio.audit import Issue, YearRange, DEFAULT_RULES
 
 _log = get_logger(__name__)
 
@@ -351,15 +347,11 @@ _log = get_logger(__name__)
 2. Fix logging in loader.py (P0)
 3. Remove duplicate PromptTemplate from loader.py, import from llm.py (P1)
 4. Refactor loader.py to use llm.py LLMRunner directly (P2)
-5. Create scholaraio/audit/ directory
-6. Create audit/types.py (Issue, YearRange)
-7. Create audit/rules.py (_rule_* functions)
-8. Create audit/formatter.py (format_audit)
-9. Create audit/__init__.py
-10. Create filters/ module
-11. Refactor PaperStore (state leak mitigation)
-12. Update all imports across codebase
-13. Test that audit command still works
+5. Create scholaraio/audit.py (Issue, YearRange, _rule_* functions, format_audit)
+6. Create scholaraio/filters.py (PaperFilter Protocol and implementation)
+7. Refactor PaperStore (state leak mitigation)
+8. Update all imports across codebase
+9. Test that audit command still works
 ```
 
 ---
@@ -370,12 +362,8 @@ _log = get_logger(__name__)
 |------|--------|
 | `scholaraio/papers.py` | Fix logging, keep core types |
 | `scholaraio/loader.py` | Fix logging, remove duplicate PromptTemplate, use llm.py directly |
-| `scholaraio/audit/__init__.py` | CREATE |
-| `scholaraio/audit/types.py` | CREATE |
-| `scholaraio/audit/rules.py` | CREATE |
-| `scholaraio/audit/formatter.py` | CREATE |
-| `scholaraio/filters/__init__.py` | CREATE |
-| `scholaraio/filters/types.py` | CREATE |
+| `scholaraio/audit.py` | CREATE (Issue, YearRange, _rule_* functions, format_audit) |
+| `scholaraio/filters.py` | CREATE (PaperFilter Protocol and implementation) |
 | `scholaraio/extract.py` | Already correct |
 | CLI commands | Update imports |
 
@@ -416,14 +404,14 @@ graph TD
         I[path helpers]
     end
     
-    subgraph audit/
+    subgraph audit.py
         D[Issue]
         E[YearRange]
         G[_rule_*]
         H[format_audit]
     end
     
-    subgraph filters/
+    subgraph filters.py
         F[PaperFilter]
     end
     
@@ -444,22 +432,7 @@ graph TD
 
 ## 8. Backward Compatibility
 
-| Export | Current Location | New Location | Alias |
-|--------|-----------------|--------------|-------|
-| `Issue` | papers.py | audit/types.py | ✅ |
-| `YearRange` | papers.py | audit/types.py | ✅ |
-| `PaperFilter` | papers.py | filters/types.py | ✅ |
-| `format_audit` | papers.py | audit/formatter.py | ✅ |
-| `_rule_*` | papers.py | audit/rules.py | Internal only |
-
-**Strategy**: Keep re-exports in papers.py for backward compatibility during transition.
-
-```python
-# papers.py - backward compatibility exports
-from scholaraio.audit.types import Issue as Issue, YearRange as YearRange
-from scholaraio.audit.formatter import format_audit
-from scholaraio.filters.types import PaperFilter as PaperFilter
-```
+**Strategy**: No backward compatibility needed - clean break as requested.
 
 ---
 

@@ -77,8 +77,8 @@ class LLMPayload:
     max_tokens: int = 8000
     response_format: dict[str, str] | None = None
 
-    def to_dict(self) -> dict:
-        result = {
+    def to_dict(self) -> dict[str, str | list[dict[str, str]] | int | None]:
+        result: dict[str, str | list[dict[str, str]] | int | None] = {
             "model": self.model,
             "messages": self.messages,
             "temperature": self.temperature,
