@@ -57,7 +57,7 @@ full = [
 
 [project.scripts]
 scholaraio = "scholaraio.cli:main"
-scholaraio-mcp = "scholaraio.mcp_server:main"
+scholaraio-mcp = "scholaraio.mcp:main"
 
 [dependency-groups]
 dev = [

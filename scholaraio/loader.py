@@ -309,7 +309,7 @@ class PaperEnricher:
         """Get LLM runner for config."""
         from scholaraio.http import RequestsClient
         from scholaraio.llm import LLMRunner as LLMRunnerImpl
-        
+
         api_key = config.llm.resolve_api_key()
         http_client = RequestsClient()
         return LLMRunnerImpl(config.llm, http_client, api_key)

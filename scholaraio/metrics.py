@@ -286,7 +286,9 @@ class MetricsStore:
                 llm.tokens_out if llm else None,
                 llm.model if llm else None,
                 meta.status.value if meta else "ok",
-                _json.dumps(meta.detail, ensure_ascii=False) if meta and meta.detail else None,
+                _json.dumps(meta.detail, ensure_ascii=False)
+                if meta and meta.detail
+                else None,
             ),
         )
         conn.commit()

@@ -96,7 +96,13 @@ class LLMConfig:
     def resolve_api_key(self) -> str:
         """Resolve API key with environment variable fallback."""
         import os
-        return self.api_key or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
+
+        return (
+            self.api_key
+            or os.environ.get("DEEPSEEK_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+            or ""
+        )
 
 
 @dataclass(frozen=True)
@@ -131,6 +137,7 @@ class LogConfig:
 def _load_yaml(path: Path | None) -> dict:
     if path and path.exists():
         import yaml
+
         with open(path, encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
     return {}
@@ -206,8 +213,11 @@ def _load(workspace: str | None = None, root: Path | None = None) -> "Config":
     ws_store = {
         name: WorkspaceConfig(
             name=name,
-            description=(entry if isinstance(entry, str) else entry.get("description", ""))
-            if entry else ""
+            description=(
+                entry if isinstance(entry, str) else entry.get("description", "")
+            )
+            if entry
+            else "",
         )
         for name, entry in merged.get("workspace", {}).items()
     }
@@ -286,19 +296,32 @@ class Config:
 
     # API key resolution
     def resolve_llm_api_key(self) -> str:
-        return self.llm.api_key or os.environ.get(f"{ENV_PREFIX}LLM_API_KEY") or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
+        return (
+            self.llm.api_key
+            or os.environ.get(f"{ENV_PREFIX}LLM_API_KEY")
+            or os.environ.get("DEEPSEEK_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+            or ""
+        )
 
     def resolve_zotero_api_key(self) -> str:
         return self.sources.zotero.api_key or os.environ.get("ZOTERO_API_KEY") or ""
 
     def resolve_zotero_library_id(self) -> str:
-        return self.sources.zotero.library_id or os.environ.get("ZOTERO_LIBRARY_ID") or ""
+        return (
+            self.sources.zotero.library_id or os.environ.get("ZOTERO_LIBRARY_ID") or ""
+        )
 
     def resolve_mineru_api_key(self) -> str:
         return self.ingest.mineru_api_key or os.environ.get("MINERU_API_KEY") or ""
 
     def ensure_dirs(self) -> None:
-        for d in (self.workspace_dir, self.papers_dir, self.log_file.parent, self.metrics_db_path.parent):
+        for d in (
+            self.workspace_dir,
+            self.papers_dir,
+            self.log_file.parent,
+            self.metrics_db_path.parent,
+        ):
             d.mkdir(parents=True, exist_ok=True)
 
 

@@ -315,7 +315,9 @@ def register_all(subparsers) -> None:
     p_sub.add_parser("check", help="Check environment")
     p_sub.add_parser("wizard", help="Interactive setup wizard")
 
-    p = subparsers.add_parser("check", help="Quick environment diagnostics (no network)")
+    p = subparsers.add_parser(
+        "check", help="Quick environment diagnostics (no network)"
+    )
     p.set_defaults(func=cmd_check)
 
     p = subparsers.add_parser("doctor", help="Full health check (with network)")
@@ -323,7 +325,9 @@ def register_all(subparsers) -> None:
 
     p = subparsers.add_parser("init", help="Interactive setup wizard")
     p.set_defaults(func=cmd_init)
-    p.add_argument("--force", action="store_true", help="Force overwrite existing config")
+    p.add_argument(
+        "--force", action="store_true", help="Force overwrite existing config"
+    )
 
     p = subparsers.add_parser("metrics", help="Show metrics")
     p.set_defaults(func=cmd_metrics)

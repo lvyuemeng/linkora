@@ -20,10 +20,9 @@ import importlib
 import json
 import os
 import sqlite3
-import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 import faiss
 import numpy as np
@@ -104,6 +103,50 @@ class Embedder(Protocol):
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         """Embed multiple texts."""
         ...
+
+
+# ============================================================================
+# FAISS Index Configuration
+# ============================================================================
+
+
+type FaissIndexType = Literal["Flat", "FlatIP", "HNSW", "IVF256", "IVF512", "IVF1024", "IVF4096"]
+
+
+@dataclass(frozen=True)
+class FaissIndexConfig:
+    """Configuration for FAISS index.
+
+    Args:
+        index_type: Index type - "Flat", "FlatIP", "HNSW", or "IVF{size}".
+        nlist: Number of clusters for IVF (default: 100).
+        nprobe: Number of clusters to search for IVF (default: 10).
+        hnsw_m: Number of connections for HNSW (default: 32).
+        hnsw_ef: Search depth for HNSW (default: 128).
+    """
+
+    index_type: FaissIndexType = "FlatIP"
+    nlist: int = 100
+    nprobe: int = 10
+    hnsw_m: int = 32
+    hnsw_ef: int = 128
+
+    def create_index(self, dim: int) -> faiss.Index:
+        """Create FAISS index based on config."""
+        if self.index_type == "Flat":
+            return faiss.IndexFlatL2(dim)
+        elif self.index_type == "FlatIP":
+            return faiss.IndexFlatIP(dim)
+        elif self.index_type == "HNSW":
+            index = faiss.IndexHNSWFlat(dim, self.hnsw_m)
+            index.hnsw.efSearch = self.hnsw_ef
+            return index
+        elif self.index_type.startswith("IVF"):
+            nlist = int(self.index_type[3:])
+            quantizer = faiss.IndexFlatIP(dim)
+            return faiss.IndexIVFFlat(quantizer, dim, nlist)
+        else:
+            return faiss.IndexFlatIP(dim)
 
 
 # ============================================================================
@@ -300,21 +343,6 @@ class QwenEmbedder:
 # ============================================================================
 
 
-def _pack(vec: list[float]) -> bytes:
-    return struct.pack(f"{len(vec)}f", *vec)
-
-
-def _unpack(blob: bytes) -> list[float]:
-    n = len(blob) // 4
-    return list(struct.unpack(f"{n}f", blob))
-
-
-def _faiss_paths(db_path: Path) -> tuple[Path, Path]:
-    """Return (faiss_index_path, faiss_ids_path) next to the db file."""
-    parent = db_path.parent
-    return parent / "faiss.index", parent / "faiss_ids.json"
-
-
 # ============================================================================
 # Data Layer (No Side Effects)
 # ============================================================================
@@ -437,212 +465,192 @@ def filter_results(
 
 
 # ============================================================================
-# Side Effect Layer (DB, FAISS)
-# ============================================================================
-
-
-def _ensure_schema(conn: sqlite3.Connection) -> None:
-    """Create paper_vectors table and migrate schema if needed."""
-    conn.execute(_SCHEMA)
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(paper_vectors)")}
-    if "content_hash" not in cols:
-        conn.execute(_MIGRATE_HASH)
-
-
-def load_existing_hashes(conn: sqlite3.Connection) -> dict[str, str]:
-    """Load existing content hashes from database."""
-    return {
-        row[0]: row[1]
-        for row in conn.execute(
-            "SELECT paper_id, content_hash FROM paper_vectors"
-        ).fetchall()
-    }
-
-
-def save_embeddings(conn: sqlite3.Connection, results: list[EmbedResult]) -> None:
-    """Save embeddings to database."""
-    for result in results:
-        conn.execute(
-            "INSERT OR REPLACE INTO paper_vectors "
-            "(paper_id, embedding, content_hash) VALUES (?, ?, ?)",
-            (result.paper_id, _pack(result.vector), result.content_hash),
-        )
-
-
-def table_exists(conn: sqlite3.Connection, table: str) -> bool:
-    return bool(
-        conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
-        ).fetchone()
-    )
-
-
-def load_metadata(conn: sqlite3.Connection) -> tuple[dict, dict]:
-    """Load metadata from FTS5 table. Returns (meta_map, dir_map)."""
-    meta_map, dir_map = {}, {}
-
-    if table_exists(conn, "papers"):
-        conn.row_factory = sqlite3.Row
-        meta_map = {
-            row["paper_id"]: dict(row)
-            for row in conn.execute(
-                "SELECT paper_id, title, authors, year, journal, citation_count, paper_type FROM papers"
-            )
-        }
-
-    if table_exists(conn, "papers_registry"):
-        dir_map = dict(conn.execute("SELECT id, dir_name FROM papers_registry"))
-
-    return meta_map, dir_map
-
-
-def invalidate_faiss(db_path: Path) -> None:
-    """Delete cached FAISS index files."""
-    for p in _faiss_paths(db_path):
-        p.unlink(missing_ok=True)
-
-
-def load_faiss_index(idx_p: Path, ids_p: Path):
-    try:
-        return faiss.read_index(str(idx_p)), json.loads(ids_p.read_text("utf-8"))
-    except Exception as e:
-        _log.debug("Failed to load FAISS: %s", e)
-        return None, None
-
-
-def save_faiss_index(idx_p: Path, ids_p: Path, index, paper_ids):
-    faiss.write_index(index, str(idx_p))
-    ids_p.write_text(json.dumps(paper_ids, ensure_ascii=False) + "\n", encoding="utf-8")
-
-
-def append_faiss(
-    db_path: Path, new_ids: list[str], new_vecs: list[list[float]]
-) -> None:
-    idx_p, ids_p = _faiss_paths(db_path)
-    if not idx_p.exists() or not ids_p.exists():
-        return
-
-    index, paper_ids = load_faiss_index(idx_p, ids_p)
-    if index is None or set(new_ids) & set(paper_ids):
-        invalidate_faiss(db_path)
-        return
-
-    import numpy as np
-
-    arr = np.array(new_vecs, dtype="float32")
-    faiss.normalize_L2(arr)
-    index.add(arr)
-    paper_ids.extend(new_ids)
-
-    save_faiss_index(idx_p, ids_p, index, paper_ids)
-
-
-def unpack_embeddings(rows: list[tuple[str, bytes]]) -> tuple[list[str], np.ndarray]:
-    if not rows:
-        raise FileNotFoundError("No embeddings found")
-
-    expected_len = len(rows[0][1])
-    if expected_len == 0 or expected_len % 4 != 0:
-        raise ValueError(f"Invalid embedding length: {expected_len}")
-    dim = expected_len // 4
-
-    valid_rows = [(pid, vec) for pid, vec in rows if len(vec) == expected_len]
-    if not valid_rows:
-        raise FileNotFoundError("No valid embedding rows")
-
-    paper_ids = [pid for pid, _ in valid_rows]
-    vecs = np.array(
-        [list(struct.unpack(f"{dim}f", vec)) for _, vec in valid_rows], dtype="float32"
-    )
-    faiss.normalize_L2(vecs)
-    return paper_ids, vecs
-
-
-def build_faiss_index(db_path: Path) -> tuple:
-    idx_p, ids_p = _faiss_paths(db_path)
-    if idx_p.exists() and ids_p.exists():
-        index = faiss.read_index(str(idx_p))
-        paper_ids = json.loads(ids_p.read_text("utf-8"))
-        return index, paper_ids
-
-    conn = sqlite3.connect(db_path)
-    try:
-        rows = conn.execute("SELECT paper_id, embedding FROM paper_vectors").fetchall()
-    finally:
-        conn.close()
-
-    paper_ids, vecs = unpack_embeddings(rows)
-    index = faiss.IndexFlatIP(vecs.shape[1])
-    index.add(vecs)  # type: ignore[no-untyped-call]
-
-    save_faiss_index(idx_p, ids_p, index, paper_ids)
-    return index, paper_ids
-
-
-# ============================================================================
 # Vector Index Class (Combines Data + Side Effects)
 # ============================================================================
 
 
 class VectorIndex:
-    """Vector search index with encapsulated DB connection and FAISS."""
+    """Vector search index - fully encapsulated, streamlined."""
 
-    def __init__(self, db_path: Path, config=None) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        config=None,
+        faiss_config: FaissIndexConfig | None = None,
+    ) -> None:
         """Initialize vector index.
 
         Args:
             db_path: SQLite database path.
             config: Optional Config instance for embedding model settings.
+            faiss_config: Optional FAISS index configuration.
         """
         self._db_path = db_path
         self._config = config
+        self._faiss_config = faiss_config or FaissIndexConfig()
         self._conn: sqlite3.Connection | None = None
-        self._faiss_index = None
+        self._faiss_index: faiss.Index | None = None
         self._faiss_ids: list[str] | None = None
         self._store = ModelStore(config)
 
     @property
     def db_path(self) -> Path:
+        """Database path (read-only)."""
         return self._db_path
 
     # -------------------------------------------------------------------------
-    # Connection Management
+    # Core Operations (7 private methods)
     # -------------------------------------------------------------------------
 
-    @property
-    def connection(self) -> sqlite3.Connection:
-        """Lazy database connection."""
+    def _init_db(self) -> sqlite3.Connection:
+        """Initialize database connection and schema (lazy)."""
         if self._conn is None:
             self._conn = sqlite3.connect(self._db_path)
+            self._conn.execute(_SCHEMA)
+            cols = {row[1] for row in self._conn.execute("PRAGMA table_info(paper_vectors)")}
+            if "content_hash" not in cols:
+                self._conn.execute(_MIGRATE_HASH)
         return self._conn
 
-    @property
-    def schema_ready(self) -> None:
-        """Ensure database schema is ready."""
-        conn = self.connection
-        _ensure_schema(conn)
+    def _load_metadata(self) -> tuple[dict, dict]:
+        """Load metadata from papers and papers_registry tables."""
+        conn = self._init_db()
+        meta_map, dir_map = {}, {}
 
-    # -------------------------------------------------------------------------
-    # FAISS Index Management
-    # -------------------------------------------------------------------------
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
 
-    def _ensure_faiss(self) -> tuple:
-        if self._faiss_index is not None:
-            return self._faiss_index, self._faiss_ids
+        if "papers" in tables:
+            conn.row_factory = sqlite3.Row
+            meta_map = {
+                r["paper_id"]: dict(r) for r in conn.execute(
+                    "SELECT paper_id, title, authors, year, journal, citation_count, paper_type FROM papers"
+                )
+            }
 
-        index, paper_ids = build_faiss_index(self._db_path)
-        self._faiss_index = index
-        self._faiss_ids = paper_ids
-        return index, paper_ids
+        if "papers_registry" in tables:
+            dir_map = dict(conn.execute("SELECT id, dir_name FROM papers_registry"))
+
+        return meta_map, dir_map
+
+    def _faiss_paths(self) -> tuple[Path, Path]:
+        """Get FAISS cache paths."""
+        return self._db_path.parent / "faiss.index", self._db_path.parent / "faiss_ids.json"
 
     def _invalidate_cache(self) -> None:
+        """Delete cached FAISS index files."""
         self._faiss_index = None
         self._faiss_ids = None
-        invalidate_faiss(self._db_path)
+        for p in self._faiss_paths():
+            p.unlink(missing_ok=True)
+
+    def _get_faiss(self) -> tuple[faiss.Index, list[str]]:
+        """Get FAISS index - load from cache or build from DB."""
+        if self._faiss_index is not None and self._faiss_ids is not None:
+            return self._faiss_index, self._faiss_ids
+
+        idx_p, ids_p = self._faiss_paths()
+
+        # Try load from cache
+        if idx_p.exists() and ids_p.exists():
+            try:
+                self._faiss_index = faiss.read_index(str(idx_p))
+                self._faiss_ids = json.loads(ids_p.read_text("utf-8"))
+                if self._faiss_ids is None:
+                    self._faiss_ids = []
+                return self._faiss_index, self._faiss_ids  # type: ignore[return-value]
+            except Exception as e:
+                _log.debug("Failed to load FAISS cache: %s", e)
+
+        # Build from database
+        conn = self._init_db()
+        rows = conn.execute(
+            "SELECT paper_id, embedding FROM paper_vectors"
+        ).fetchall()
+
+        if not rows:
+            raise FileNotFoundError("No vectors in database")
+
+        paper_ids = [r[0] for r in rows]
+        dim = len(rows[0][1]) // 4
+        vectors = np.frombuffer(
+            b"".join(r[1] for r in rows), dtype=np.float32
+        ).reshape(-1, dim).astype(np.float32)
+        faiss.normalize_L2(vectors)
+
+        self._faiss_index = self._faiss_config.create_index(dim)
+        self._faiss_index.add(vectors)  # type: ignore[no-untyped-call]
+        self._faiss_ids = paper_ids
+
+        # Save to cache
+        faiss.write_index(self._faiss_index, str(idx_p))
+        ids_p.write_text(json.dumps(paper_ids, ensure_ascii=False) + "\n")
+
+        return self._faiss_index, self._faiss_ids
+
+    def _append_to_faiss(self, new_ids: list[str], new_vecs: list[list[float]]) -> None:
+        """Append new vectors to existing FAISS index."""
+        idx_p, ids_p = self._faiss_paths()
+        if not idx_p.exists() or not ids_p.exists():
+            return
+
+        index, paper_ids = self._get_faiss()
+
+        # Handle None cases - FIX: proper null handling
+        if index is None:
+            self._invalidate_cache()
+            return
+
+        if paper_ids is None:
+            paper_ids = []
+
+        if set(new_ids) & set(paper_ids):
+            self._invalidate_cache()
+            return
+
+        arr = np.array(new_vecs, dtype="float32")
+        faiss.normalize_L2(arr)
+        index.add(arr)  # type: ignore[no-untyped-call]
+        paper_ids.extend(new_ids)
+
+        faiss.write_index(index, str(idx_p))  # type: ignore[no-untyped-call]
+        ids_p.write_text(json.dumps(paper_ids, ensure_ascii=False) + "\n")
+        self._faiss_index = index
+        self._faiss_ids = paper_ids
 
     # -------------------------------------------------------------------------
-    # Index Build Methods
+    # Public API
     # -------------------------------------------------------------------------
+
+    def get_vector_blobs(self) -> list[tuple[str, bytes]]:
+        """Get all paper vectors as (paper_id, embedding_blob).
+
+        Used when you need raw blobs.
+        """
+        return self._init_db().execute(
+            "SELECT paper_id, embedding FROM paper_vectors"
+        ).fetchall()
+
+    def get_vectors(self) -> tuple[list[str], np.ndarray]:
+        """Get all paper vectors as numpy array.
+
+        Returns:
+            Tuple of (paper_ids, embeddings_matrix).
+
+        Used by TopicTrainer for topic modeling.
+        """
+        rows = self.get_vector_blobs()
+        if not rows:
+            return [], np.array([])
+
+        paper_ids = [r[0] for r in rows]
+        dim = len(rows[0][1]) // 4
+        vectors = np.frombuffer(
+            b"".join(r[1] for r in rows), dtype=np.float32
+        ).reshape(-1, dim)
+        faiss.normalize_L2(vectors)
+        return paper_ids, vectors
 
     def rebuild(self, store) -> int:
         """Full rebuild of vector index.
@@ -650,27 +658,24 @@ class VectorIndex:
         Args:
             store: PaperStore instance.
         """
-        self.schema_ready
-        conn = self.connection
-
-        # Clear existing data
+        conn = self._init_db()
         conn.execute("DELETE FROM paper_vectors")
 
-        # Data layer: prepare tasks
         tasks = prepare_embed_tasks(store)
         if not tasks:
             return 0
 
         _log.info("embedding %d papers", len(tasks))
-
-        # Execution: embed
         results = self._store.embed_tasks(tasks)
 
-        # Side effect: save to DB
-        save_embeddings(conn, results)
+        # Direct save using numpy
+        for r in results:
+            conn.execute(
+                "INSERT OR REPLACE INTO paper_vectors (paper_id, embedding, content_hash) VALUES (?, ?, ?)",
+                (r.paper_id, np.array(r.vector, dtype=np.float32).tobytes(), r.content_hash),
+            )
         conn.commit()
 
-        # Side effect: rebuild FAISS
         if results:
             self._invalidate_cache()
 
@@ -682,13 +687,13 @@ class VectorIndex:
         Args:
             store: PaperStore instance.
         """
-        self.schema_ready
-        conn = self.connection
+        conn = self._init_db()
 
-        # Data: load existing hashes
-        existing_hashes = load_existing_hashes(conn)
+        # Load existing hashes inline
+        existing_hashes = {r[0]: r[1] for r in conn.execute(
+            "SELECT paper_id, content_hash FROM paper_vectors"
+        ).fetchall()}
 
-        # Data: prepare tasks
         tasks = prepare_embed_tasks(store)
         to_embed, updated_ids = filter_tasks_by_hash(tasks, existing_hashes)
 
@@ -696,23 +701,20 @@ class VectorIndex:
             return 0
 
         _log.info("embedding %d papers", len(to_embed))
-
-        # Execution: embed
         results = self._store.embed_tasks(to_embed)
 
-        # Side effect: save to DB
-        save_embeddings(conn, results)
+        # Direct save using numpy
+        for r in results:
+            conn.execute(
+                "INSERT OR REPLACE INTO paper_vectors (paper_id, embedding, content_hash) VALUES (?, ?, ?)",
+                (r.paper_id, np.array(r.vector, dtype=np.float32).tobytes(), r.content_hash),
+            )
         conn.commit()
 
-        # Side effect: update FAISS
         if updated_ids:
             self._invalidate_cache()
         elif results:
-            append_faiss(
-                self._db_path,
-                [r.paper_id for r in results],
-                [r.vector for r in results],
-            )
+            self._append_to_faiss([x.paper_id for x in results], [x.vector for x in results])
 
         return len(results)
 
@@ -743,14 +745,13 @@ class VectorIndex:
         Returns:
             List of paper dictionaries with paper_id, title, authors, year, journal, score.
         """
-
         if not self._db_path.exists():
             raise FileNotFoundError(
                 f"Index file not found: {self._db_path}\nRun `scholaraio index` first."
             )
 
         # Check vectors exist
-        conn = self.connection
+        conn = self._init_db()
         has_vectors = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='paper_vectors'"
         ).fetchone()
@@ -759,22 +760,21 @@ class VectorIndex:
                 "Vector index not found. Run `scholaraio embed` first."
             )
 
-        index, faiss_ids = self._ensure_faiss()
+        index, faiss_ids = self._get_faiss()
+        if index is None or not faiss_ids:
+            return []
 
-        # Execution: embed query
+        # Embed query
         q_vec = np.array([self._store.embed_text(query)], dtype="float32")
-        np.linalg.norm(q_vec, axis=1, keepdims=True)
         q_vec /= np.linalg.norm(q_vec, axis=1, keepdims=True)
 
         # Search FAISS
         fetch_k = top_k * 5 if (year or journal or paper_type or paper_ids) else top_k
         fetch_k = min(fetch_k, index.ntotal)
-        scores, indices = index.search(q_vec, fetch_k)
+        scores, indices = index.search(q_vec, fetch_k)  # type: ignore[no-untyped-call]
 
-        # Data: load metadata
-        meta_map, dir_map = load_metadata(conn)
-
-        # Data: prepare results
+        # Load metadata and prepare results
+        meta_map, dir_map = self._load_metadata()
         faiss_results = [
             (faiss_ids[idx], scores[0][i])
             for i, idx in enumerate(indices[0])
@@ -782,7 +782,7 @@ class VectorIndex:
         ]
         results = prepare_search_results(faiss_results, meta_map, dir_map)
 
-        # Data: filter
+        # Filter
         filters = VectorFilterParams(year=year, journal=journal, paper_type=paper_type)
         filtered = filter_results(results, filters, paper_ids)
 
@@ -818,6 +818,3 @@ class VectorIndex:
             self._conn = None
         self._faiss_index = None
         self._faiss_ids = None
-
-
-# ===========================================================================-

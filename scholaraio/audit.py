@@ -57,7 +57,9 @@ def rule_missing_fields(paper_d: Path, data: dict) -> list[Issue]:
         issues = []
         for field_name in missing:
             severity = "error" if field_name == "title" else "warning"
-            issues.append(Issue(pid, severity, f"missing_{field_name}", f"Missing {field_name}"))
+            issues.append(
+                Issue(pid, severity, f"missing_{field_name}", f"Missing {field_name}")
+            )
         return issues
     return []
 
@@ -67,13 +69,22 @@ def rule_file_pairing(paper_d: Path, data: dict) -> list[Issue]:
     pid = paper_d.name
     md_path = paper_d / "paper.md"
     if not md_path.exists():
-        return [Issue(pid, "error", "missing_md", "meta.json exists but paper.md missing")]
-    
+        return [
+            Issue(pid, "error", "missing_md", "meta.json exists but paper.md missing")
+        ]
+
     # Check content length
     try:
         content = md_path.read_text(encoding="utf-8", errors="replace")
         if content and len(content.strip()) < 200:
-            return [Issue(pid, "warning", "short_md", f"paper.md too short ({len(content.strip())} chars)")]
+            return [
+                Issue(
+                    pid,
+                    "warning",
+                    "short_md",
+                    f"paper.md too short ({len(content.strip())} chars)",
+                )
+            ]
     except Exception:
         pass
     return []

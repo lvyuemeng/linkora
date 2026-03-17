@@ -71,7 +71,11 @@ class InitResult:
 
 DEP_GROUPS = {
     "core": [("requests", "requests"), ("yaml", "pyyaml")],
-    "embed": [("sentence_transformers", "sentence-transformers"), ("faiss", "faiss-cpu"), ("numpy", "numpy")],
+    "embed": [
+        ("sentence_transformers", "sentence-transformers"),
+        ("faiss", "faiss-cpu"),
+        ("numpy", "numpy"),
+    ],
     "topics": [("bertopic", "bertopic"), ("pandas", "pandas")],
     "import": [("endnote_utils", "endnote-utils"), ("pyzotero", "pyzotero")],
 }
@@ -85,7 +89,9 @@ DEP_GROUPS = {
 def _check_python() -> CheckItem:
     vi = sys.version_info
     ok = vi >= (3, 10)
-    return CheckItem(CheckCategory.ENV, "python", ok, f"{vi.major}.{vi.minor}.{vi.micro}")
+    return CheckItem(
+        CheckCategory.ENV, "python", ok, f"{vi.major}.{vi.minor}.{vi.micro}"
+    )
 
 
 def _check_deps() -> Iterator[CheckItem]:
@@ -97,20 +103,29 @@ def _check_deps() -> Iterator[CheckItem]:
             except ImportError:
                 missing.append(import_name)
         ok = not missing
-        detail = ", ".join(p for _, p in pkgs) if ok else f"missing: {', '.join(missing)}"
+        detail = (
+            ", ".join(p for _, p in pkgs) if ok else f"missing: {', '.join(missing)}"
+        )
         yield CheckItem(CheckCategory.ENV, f"deps.{group}", ok, detail)
 
 
 def _check_config(cfg: Config) -> CheckItem:
     path = cfg._root / "config.yaml"
     ok = path.exists()
-    return CheckItem(CheckCategory.CONFIG, "config.yaml", ok, "found" if ok else "not found")
+    return CheckItem(
+        CheckCategory.CONFIG, "config.yaml", ok, "found" if ok else "not found"
+    )
 
 
 def _check_local_config(cfg: Config) -> CheckItem:
     path = cfg._root / "config.local.yaml"
     ok = path.exists()
-    return CheckItem(CheckCategory.CONFIG, "config.local.yaml", ok, "found" if ok else "not found (use env vars)")
+    return CheckItem(
+        CheckCategory.CONFIG,
+        "config.local.yaml",
+        ok,
+        "found" if ok else "not found (use env vars)",
+    )
 
 
 def _check_workspace_dir(cfg: Config) -> CheckItem:
@@ -123,7 +138,11 @@ def _check_papers_dir(cfg: Config) -> CheckItem:
     ok = cfg.papers_dir.exists()
     count = 0
     if ok:
-        count = sum(1 for d in cfg.papers_dir.iterdir() if d.is_dir() and (d / "meta.json").exists())
+        count = sum(
+            1
+            for d in cfg.papers_dir.iterdir()
+            if d.is_dir() and (d / "meta.json").exists()
+        )
     detail = f"{cfg.papers_dir} ({count} papers)"
     return CheckItem(CheckCategory.PATHS, "papers_dir", ok, detail)
 
@@ -146,6 +165,7 @@ def _check_llm_service(cfg: Config) -> CheckItem:
     """Check if LLM service is reachable."""
     try:
         import requests
+
         r = requests.get(cfg.llm.base_url.rstrip("/") + "/v1/models", timeout=5)
         ok = r.status_code < 500
         detail = f"reachable ({cfg.llm.model})" if ok else f"error: {r.status_code}"
@@ -159,9 +179,14 @@ def _check_mineru_service(cfg: Config) -> CheckItem:
     """Check if MinerU service is reachable."""
     try:
         import requests
+
         r = requests.get(cfg.ingest.mineru_endpoint, timeout=5)
         ok = r.status_code < 500
-        detail = f"reachable @ {cfg.ingest.mineru_endpoint}" if ok else f"error: {r.status_code}"
+        detail = (
+            f"reachable @ {cfg.ingest.mineru_endpoint}"
+            if ok
+            else f"error: {r.status_code}"
+        )
     except Exception as e:
         ok = False
         detail = f"unreachable: {e}"
@@ -302,7 +327,9 @@ def run_init(force: bool = False) -> InitResult:
         if key:
             local_data.setdefault("llm", {})["api_key"] = key
         if local_data:
-            local_path.write_text(yaml.dump(local_data, allow_unicode=True), encoding="utf-8")
+            local_path.write_text(
+                yaml.dump(local_data, allow_unicode=True), encoding="utf-8"
+            )
             local_created = True
 
     # Create directories

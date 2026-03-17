@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol, TypedDict
 
 from scholaraio.config import LLMConfig
 from scholaraio.http import HTTPClient
@@ -67,6 +67,16 @@ class HTTPHeaders:
         }
 
 
+class LLMPayloadDict(TypedDict):
+    """TypedDict for LLM API payload."""
+
+    model: str
+    messages: list[dict[str, str]]
+    temperature: int
+    max_tokens: int
+    response_format: dict[str, str] | None
+
+
 @dataclass(frozen=True)
 class LLMPayload:
     """LLM request payload structure."""
@@ -77,14 +87,15 @@ class LLMPayload:
     max_tokens: int = 8000
     response_format: dict[str, str] | None = None
 
-    def to_dict(self) -> dict[str, str | list[dict[str, str]] | int | None]:
-        result: dict[str, str | list[dict[str, str]] | int | None] = {
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for API calls."""
+        result: dict[str, Any] = {
             "model": self.model,
             "messages": self.messages,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
-        if self.response_format:
+        if self.response_format is not None:
             result["response_format"] = self.response_format
         return result
 

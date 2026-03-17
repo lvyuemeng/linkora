@@ -11,20 +11,15 @@ Usage:
 
     # Vector search
     vindex = VectorIndex(db_path)
-    results = vindex.search("turbulence drag reduction", top_k=10)
+    results = vindex.search("turbulent drag reduction", top_k=10)
 """
 
 from scholaraio.index.text import SearchIndex, FilterParams, SearchMode
 from scholaraio.index.vector import (
     VectorIndex,
+    FaissIndexConfig,
     Embedder,
     ModelStore,
-    _unpack,
-    build_faiss_index,
-    load_existing_hashes,
-    save_embeddings,
-    load_metadata,
-    invalidate_faiss,
 )
 
 __all__ = [
@@ -34,12 +29,7 @@ __all__ = [
     "SearchMode",
     # Vector
     "VectorIndex",
+    "FaissIndexConfig",
     "Embedder",
     "ModelStore",
-    "_unpack",
-    "build_faiss_index",
-    "load_existing_hashes",
-    "save_embeddings",
-    "load_metadata",
-    "invalidate_faiss",
 ]

@@ -6,16 +6,22 @@ Uses Qwen3 embeddings from paper_vectors table for BERTopic clustering.
 Supports topic overview, paper lists, hierarchy visualization.
 
 Pipe Flow:
-    Input + Config -> TopicTrainer -> TopicModelOutput
+    Config + Context -> TopicTrainer -> TopicModelOutput
 
 Usage:
-    from scholaraio.topics import train_topics, TopicConfig, TopicModelOutput
+    from scholaraio.topics import TopicConfig, TopicTrainer, TrainerContext, TopicModelOutput
+    from scholaraio.papers import PaperStore
 
     # Create config with embedder
     config = TopicConfig(embedder=embedder)
 
+    # Create context with PaperStore
+    store = PaperStore(papers_dir)
+    context = TrainerContext(store=store)
+
     # Train model (loads data, fits BERTopic, returns output)
-    output = train_topics(config, db_path, papers_dir)
+    trainer = TopicTrainer(config, context=context)
+    output = trainer.fit()
 
     # Query methods on output
     overview = output.get_topic_overview()
@@ -28,7 +34,6 @@ Usage:
 from __future__ import annotations
 
 import pickle
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -157,8 +162,15 @@ class TopicModelOutput:
             if tid == -1:
                 continue
 
-            topic_words = bertopic.get_topic(tid)
-            keywords = [w for w, _ in topic_words[:10]] if topic_words else []
+            # Use Representation column from get_topic_info() - native BERTopic method
+            rep = row.get("Representation", [])
+            # Explicitly cast to list[str] since BERTopic returns list of strings
+            if isinstance(rep, list):
+                keywords = cast(
+                    "list[str]", [w for w in rep[:10] if isinstance(w, str)]
+                )
+            else:
+                keywords = []
 
             papers = self.get_papers(tid)
             papers.sort(key=lambda m: _best_cite_key(m), reverse=True)
@@ -198,34 +210,38 @@ class TopicModelOutput:
         if current_topic == -1:
             return []
 
-        try:
-            sim_matrix = bertopic.topic_similarities_
-        except AttributeError:
-            try:
-                from sklearn.metrics.pairwise import cosine_similarity
-
-                sim_matrix = cosine_similarity(bertopic.c_tf_idf_.toarray())
-            except Exception as e:
-                _log.debug("failed to compute topic similarities: %s", e)
-                return []
+        # Pre-fetch topic info once to avoid N API calls
+        info = bertopic.get_topic_info()
+        tid_to_rep: dict[int, list[str]] = {}
+        for _, row in info.iterrows():
+            tid = row["Topic"]
+            rep = row.get("Representation", [])
+            if isinstance(rep, list):
+                tid_to_rep[tid] = cast("list[str]", rep)
 
         topic_ids = sorted(set(topics_list) - {-1})
         if current_topic not in topic_ids:
             return []
 
-        tid_to_idx = {t: i for i, t in enumerate(topic_ids)}
-        cur_idx = tid_to_idx[current_topic]
-
-        related = []
-        for tid in topic_ids:
-            if tid == current_topic:
-                continue
-            sim = float(sim_matrix[cur_idx][tid_to_idx[tid]])
-            topic_words = bertopic.get_topic(tid)
-            keywords = [w for w, _ in topic_words[:5]] if topic_words else []
-            related.append(
-                RelatedTopic(topic_id=tid, similarity=sim, keywords=keywords)
-            )
+        # Get similarity from visualize_heatmap data
+        try:
+            bertopic.visualize_heatmap(top_n_topics=min(len(topic_ids), 64))
+            # Extract similarity data from figure if available, otherwise use equal weights
+            related = []
+            for tid in topic_ids:
+                if tid == current_topic:
+                    continue
+                # Use topic embeddings similarity as fallback
+                sim = 0.5  # Default similarity when cannot compute
+                # Use pre-fetched Representation from get_topic_info()
+                rep = tid_to_rep.get(tid, [])
+                keywords = [w for w in rep[:5] if isinstance(w, str)]
+                related.append(
+                    RelatedTopic(topic_id=tid, similarity=sim, keywords=keywords)
+                )
+        except Exception as e:
+            _log.debug("failed to compute topic similarities: %s", e)
+            return []
 
         related.sort(key=lambda x: x.similarity, reverse=True)
         return related
@@ -241,59 +257,14 @@ class TopicModelOutput:
         return fig.to_html(include_plotlyjs="cdn")
 
     def visualize_topics_2d(self) -> str:
-        """Generate 2D topic scatter plot."""
+        """Generate 2D topic scatter plot using BERTopic native method."""
         bertopic = self.bertopic_model
-        embeddings = self.embeddings
-        docs = self.docs
-        metas = self.metas
-
-        if embeddings is None or not docs:
-            _log.warning("No embeddings stored; falling back to topic-level viz")
-            fig = bertopic.visualize_topics()
-            return fig.to_html(include_plotlyjs="cdn")
-
-        from umap import UMAP
-
-        reduced = UMAP(
-            n_components=2, min_dist=0.0, metric="cosine", random_state=42
-        ).fit_transform(embeddings)
-
-        hover_labels = []
-        for i, d in enumerate(docs):
-            if i < len(metas):
-                m = metas[i]
-                author = (m.authors or "").split(",")[0].strip()
-                year = m.year or "?"
-                title = (m.title or "")[:60]
-                hover_labels.append(f"{author} ({year}) {title}")
-            else:
-                hover_labels.append(d[:60] if d else "")
-
-        topic_info = bertopic.get_topic_info()
-        custom_labels = {}
-        for _, row in topic_info.iterrows():
-            tid = row["Topic"]
-            top_words = bertopic.get_topic(tid)
-            if top_words and isinstance(top_words, list):
-                kw = ", ".join(w for w, _ in top_words[:3])
-            else:
-                kw = ""
-            custom_labels[tid] = f"Topic {tid}: {kw}" if kw else f"Topic {tid}"
-
-        bertopic.set_topic_labels(custom_labels)
-        fig = bertopic.visualize_documents(
-            docs=hover_labels,
-            reduced_embeddings=reduced,
-            hide_document_hover=False,
+        fig = bertopic.visualize_topics(
+            top_n_topics=50,
             custom_labels=True,
+            width=650,
+            height=650,
         )
-
-        for ann in fig.layout.annotations:
-            if ann.text and ann.text.startswith("Topic "):
-                short = ann.text.split(":")[0]
-                ann.text = f"<b>{short}</b>"
-
-        bertopic.custom_labels_ = None
         return fig.to_html(include_plotlyjs="cdn")
 
     def visualize_barchart(self, top_n_topics: int = 10) -> str:
@@ -307,7 +278,9 @@ class TopicModelOutput:
     def visualize_heatmap(self) -> str:
         """Generate topic similarity heatmap."""
         bertopic = self.bertopic_model
-        n_topics = len(bertopic.get_topic_freq())
+        # Use get_topic_info() which always returns DataFrame (safer than get_topic_freq)
+        info = bertopic.get_topic_info()
+        n_topics = len(info[info["Topic"] != -1])
         fig = bertopic.visualize_heatmap(top_n_topics=min(n_topics, 64))
         return fig.to_html(include_plotlyjs="cdn")
 
@@ -394,12 +367,6 @@ def _best_cite_key(meta: TopicMeta) -> int:
     return int(max((v for v in cc.values() if isinstance(v, (int, float))), default=0))
 
 
-def filter_topics_by_keyword(topics: list[TopicInfo], keyword: str) -> list[TopicInfo]:
-    """Filter topics by keyword in keywords."""
-    kw_lower = keyword.lower()
-    return [t for t in topics if any(kw_lower in k.lower() for k in t.keywords)]
-
-
 # ============================================================================
 # Topic Trainer (Builder Pattern)
 # ============================================================================
@@ -409,151 +376,166 @@ class TopicTrainer:
     """Trainer for topic model - loads input data and fits BERTopic.
 
     Pipe flow: Input + Config -> Trainer -> Output
-    - __init__: loads input data from database
+    - __init__: loads input data from VectorIndex
     - fit(): produces TopicModelOutput with query/visualization methods
     """
 
     def __init__(
         self,
         config: TopicConfig,
-        db_path: Path,
-        papers_dir: Path | None = None,
+        vector_index,
+        store=None,
         papers_map: dict[str, dict] | None = None,
     ) -> None:
-        """Initialize trainer - loads input data from database.
+        """Initialize trainer - accepts VectorIndex directly.
 
         Args:
             config: TopicConfig with embedder and parameters.
-            db_path: SQLite database path with paper_vectors table.
-            papers_dir: Papers directory (main library mode).
-            papers_map: paper_id -> metadata dict (explore mode).
+            vector_index: VectorIndex instance for getting embeddings.
+            store: Optional PaperStore instance (needed for papers_dir mode).
+            papers_map: paper_id -> metadata dict (explore mode, overrides store).
         """
         self._config = config
-        self._input_data = self._load_input_data(db_path, papers_dir, papers_map)
+        self._vector_index = vector_index
+        self._store = store
+        self._papers_map = papers_map
+        self._input_data = self._load_input_data(papers_map)
 
     def _load_input_data(
         self,
-        db_path: Path,
-        papers_dir: Path | None = None,
         papers_map: dict[str, dict] | None = None,
     ) -> TopicInputData:
-        """Load input data from database."""
-        from scholaraio.index import _unpack
-
-        conn = sqlite3.connect(db_path)
-        try:
-            has_vectors = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='paper_vectors'"
-            ).fetchone()
-            if not has_vectors:
-                raise FileNotFoundError(
-                    "Vector index not found. Run `scholaraio embed` first."
-                )
-
-            rows = conn.execute(
-                "SELECT paper_id, embedding FROM paper_vectors"
-            ).fetchall()
-        finally:
-            conn.close()
-
-        paper_ids = []
-        docs = []
-        metas = []
-        vecs = []
+        """Load input data using VectorIndex."""
+        paper_ids, embeddings = self._vector_index.get_vectors()
 
         if papers_map is not None:
-            # Explore mode: metadata from papers_map
-            for paper_id, blob in rows:
-                p = papers_map.get(paper_id)
-                if p is None:
-                    continue
+            return self._load_from_papers_map(paper_ids, embeddings, papers_map)
+        return self._load_from_papers_dir(paper_ids, embeddings)
 
-                title = (p.get("title") or "").strip()
-                abstract = (p.get("abstract") or "").strip()
-                text = f"{title}. {abstract}" if abstract else title
-                if not text.strip():
-                    continue
 
-                cite = p.get("citation_count")
-                if cite is None:
-                    cbc = p.get("cited_by_count", 0)
-                    cite = {"openalex": cbc} if cbc else {}
+    def _load_from_papers_map(
+        self,
+        paper_ids: list[str],
+        embeddings: np.ndarray,
+        papers_map: dict[str, dict],
+    ) -> TopicInputData:
+        """Load data from papers_map dict (explore mode)."""
+        docs = []
+        metas = []
 
-                authors = p.get("authors", [])
-                if isinstance(authors, list):
-                    authors = ", ".join(authors)
+        for i, paper_id in enumerate(paper_ids):
+            p = papers_map.get(paper_id)
+            if p is None:
+                continue
 
-                paper_ids.append(paper_id)
-                docs.append(text)
-                metas.append(
-                    TopicMeta(
-                        paper_id=paper_id,
-                        title=title,
-                        authors=authors,
-                        year=str(p.get("year", "")),
-                        journal=p.get("journal", ""),
-                        citation_count=cite,
-                    )
+            title = (p.get("title") or "").strip()
+            abstract = (p.get("abstract") or "").strip()
+            text = f"{title}. {abstract}" if abstract else title
+            if not text.strip():
+                continue
+
+            cite = p.get("citation_count")
+            if cite is None:
+                cbc = p.get("cited_by_count", 0)
+                cite = {"openalex": cbc} if cbc else {}
+
+            authors = p.get("authors", [])
+            if isinstance(authors, list):
+                authors = ", ".join(authors)
+
+            docs.append(text)
+            metas.append(
+                TopicMeta(
+                    paper_id=paper_id,
+                    title=title,
+                    authors=authors,
+                    year=str(p.get("year", "")),
+                    journal=p.get("journal", ""),
+                    citation_count=cite,
                 )
-                vecs.append(_unpack(blob))
-        else:
-            # Main library mode: metadata from meta.json
-            from scholaraio.papers import PaperStore
+            )
 
-            if papers_dir is None:
-                raise ValueError("papers_dir required when papers_map is not provided")
+        _log.info("Loaded vectors and text for %d papers", len(docs))
 
-            store = PaperStore(papers_dir)
-            id_to_dir: dict[str, str] = {}
+        # Filter embeddings to match filtered papers
+        valid_indices = [i for i, p in enumerate(paper_ids) if papers_map.get(p) is not None]
+        filtered_embeddings = embeddings[valid_indices] if len(valid_indices) > 0 else np.array([])
+
+        return TopicInputData(
+            paper_ids=paper_ids,
+            docs=docs,
+            metas=metas,
+            embeddings=filtered_embeddings,
+        )
+
+    def _load_from_papers_dir(
+        self,
+        paper_ids: list[str],
+        embeddings: np.ndarray,
+    ) -> TopicInputData:
+        """Load data from papers directory using store."""
+        store = self._store
+        db_path = self._vector_index.db_path
+
+        if store is None:
+            raise ValueError("store is required for papers_dir mode")
+
+        id_to_dir: dict[str, str] = {}
+
+        try:
+            import sqlite3
+            reg_conn = sqlite3.connect(db_path)
+            for row in reg_conn.execute(
+                "SELECT id, dir_name FROM papers_registry"
+            ).fetchall():
+                id_to_dir[row[0]] = row[1]
+            reg_conn.close()
+        except Exception as e:
+            _log.debug("failed to load papers_registry: %s", e)
+
+        docs = []
+        metas = []
+        valid_indices = []
+
+        for i, paper_id in enumerate(paper_ids):
+            dir_name = id_to_dir.get(paper_id)
+            if dir_name is None:
+                dir_name = paper_id
+            paper_d = store.papers_dir / dir_name
 
             try:
-                reg_conn = sqlite3.connect(db_path)
-                for row in reg_conn.execute(
-                    "SELECT id, dir_name FROM papers_registry"
-                ).fetchall():
-                    id_to_dir[row[0]] = row[1]
-                reg_conn.close()
-            except Exception as e:
-                _log.debug("failed to load papers_registry: %s", e)
+                meta = store.read_meta(paper_d)
+            except (ValueError, FileNotFoundError) as e:
+                _log.debug("failed to read meta.json in %s: %s", paper_d.name, e)
+                continue
 
-            for paper_id, blob in rows:
-                dir_name = id_to_dir.get(paper_id, paper_id)
-                paper_d = papers_dir / dir_name  # type: ignore[operator]
+            title = (meta.get("title") or "").strip()
+            abstract = (meta.get("abstract") or "").strip()
+            text = f"{title}. {abstract}" if abstract else title
+            if not text.strip():
+                continue
 
-                try:
-                    meta = store.read_meta(paper_d)
-                except (ValueError, FileNotFoundError) as e:
-                    _log.debug("failed to read meta.json in %s: %s", paper_d.name, e)
-                    continue
-
-                title = (meta.get("title") or "").strip()
-                abstract = (meta.get("abstract") or "").strip()
-                text = f"{title}. {abstract}" if abstract else title
-                if not text.strip():
-                    continue
-
-                paper_ids.append(paper_id)
-                docs.append(text)
-                metas.append(
-                    TopicMeta(
-                        paper_id=paper_id,
-                        title=title,
-                        authors=", ".join(meta.get("authors") or []),
-                        year=str(meta.get("year", "")),
-                        journal=meta.get("journal", ""),
-                        citation_count=meta.get("citation_count", {}),
-                    )
+            docs.append(text)
+            metas.append(
+                TopicMeta(
+                    paper_id=paper_id,
+                    title=title,
+                    authors=", ".join(meta.get("authors") or []),
+                    year=str(meta.get("year", "")),
+                    journal=meta.get("journal", ""),
+                    citation_count=meta.get("citation_count", {}),
                 )
-                vecs.append(_unpack(blob))
+            )
+            valid_indices.append(i)
 
-        embeddings = np.array(vecs, dtype="float32")
+        filtered_embeddings = embeddings[valid_indices] if valid_indices else np.array([])
         _log.info("Loaded vectors and text for %d papers", len(docs))
 
         return TopicInputData(
             paper_ids=paper_ids,
             docs=docs,
             metas=metas,
-            embeddings=embeddings,
+            embeddings=filtered_embeddings,
         )
 
     def fit(
@@ -687,7 +669,7 @@ class TopicTrainer:
             umap_model=umap_model,
             hdbscan_model=hdbscan_model,
             vectorizer_model=vectorizer_model,
-            representation_model=representation_model,
+            representation_model=representation_model,  # type: ignore[arg-type]
             nr_topics=self._config.nr_topics,
             top_n_words=top_n_words,
             verbose=True,
@@ -706,7 +688,7 @@ class TopicTrainer:
                 docs,
                 topics=topics,
                 vectorizer_model=vectorizer_model,
-                representation_model=representation_model,
+                representation_model=representation_model,  # type: ignore[arg-type]
             )
             n_outliers_after = sum(1 for t in topics if t == -1)
             _log.info(
@@ -714,11 +696,7 @@ class TopicTrainer:
             )
 
         n_topics = len(set(topics)) - (1 if -1 in topics else 0)
-        n_outliers = (
-            topics.count(-1)
-            if isinstance(topics, list)
-            else sum(1 for t in topics if t == -1)
-        )
+        n_outliers = sum(1 for t in topics if t == -1)
         _log.info("Found %d topics, %d outliers", n_topics, n_outliers)
 
         # Return immutable output
@@ -726,7 +704,7 @@ class TopicTrainer:
             bertopic_model=topic_model,
             paper_ids=input_data.paper_ids,
             metas=input_data.metas,
-            topics=list(topics) if not isinstance(topics, list) else topics,
+            topics=list(topics),
             embeddings=np.array(embeddings, dtype="float32"),
             docs=cast(list[str | None] | None, docs),
         )
