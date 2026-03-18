@@ -1,0 +1,5 @@
+# Minimal Configuration
+# Zero-config setup - all defaults are used
+
+name: default
+description: "Minimal workspace - uses all defaults"

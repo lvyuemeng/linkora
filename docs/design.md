@@ -1,4 +1,4 @@
-# Synapse Design
+# linkora Design
 
 > Ideal architecture for a general-purpose local knowledge network.
 
@@ -6,7 +6,7 @@
 
 ## 1. Project Goal
 
-**Synapse** is a local knowledge network that enables AI-powered research and knowledge management. It provides:
+**linkora** is a local knowledge network that enables AI-powered research and knowledge management. It provides:
 
 - **Unified knowledge base** with multiple workspaces
 - **Layered content loading** (L1-L4) for progressive access
@@ -92,9 +92,9 @@ Each workspace is an independent knowledge environment.
 Priority (top → bottom):
 
 1. CLI argument (`--workspace`)
-2. Environment variable (`SYNAPSE_WORKSPACE`)
-3. Workspace-local config (`<workspace>/synapse.yml`)
-4. Global config (`~/.synapse/config.yml`)
+2. Environment variable (`linkora_WORKSPACE`)
+3. Workspace-local config (`<workspace>/linkora.yml`)
+4. Global config (`~/.linkora/config.yml`)
 5. Built-in defaults
 
 ---
@@ -270,20 +270,20 @@ graph LR
 
 ```bash
 # Search
-synapse search "turbulence"
-synapse search "John Smith" --mode author
-synapse search "machine learning" --mode vector
+linkora search "turbulence"
+linkora search "John Smith" --mode author
+linkora search "machine learning" --mode vector
 
 # Index
-synapse index              # Build FTS
-synapse index --type vector --rebuild
+linkora index              # Build FTS
+linkora index --type vector --rebuild
 
 # Audit
-synapse audit --severity error
+linkora audit --severity error
 
 # Diagnostics
-synapse check
-synapse doctor
+linkora check
+linkora doctor
 ```
 
 ---
@@ -390,8 +390,8 @@ class LLMClient(Protocol):
 
 | Variable | Description |
 |----------|-------------|
-| `SYNAPSE_WORKSPACE` | Active workspace name |
-| `SYNAPSE_LLM_API_KEY` | LLM API key |
+| `linkora_WORKSPACE` | Active workspace name |
+| `linkora_LLM_API_KEY` | LLM API key |
 | `DEEPSEEK_API_KEY` | DeepSeek API key (fallback) |
 | `OPENAI_API_KEY` | OpenAI API key (fallback) |
 | `MINERU_API_KEY` | MinerU cloud API key |

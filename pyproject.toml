@@ -5,7 +5,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "linkora"
 version = "0.1.0"
-description = "Scholar All-In-One — local academic literature explorer powered by AI"
+description = "Local Knowledge Network — AI-native research cli powered by local-first architecture"
+
 requires-python = ">=3.12"
 license = "MIT"
 authors = [
@@ -30,18 +31,19 @@ classifiers = [
     "Topic :: Scientific/Engineering",
     "Topic :: Text Processing :: Indexing",
 ]
-dependencies = [
-    "requests>=2.28",
-    "pyyaml>=6.0",
-    "tenacity>=9.1.4",
-]
+dependencies = ["requests>=2.28", "pyyaml>=6.0", "tenacity>=9.1.4"]
 
 [project.urls]
 Homepage = "https://github.com/lvyuemeng/linkora"
 Repository = "https://github.com/lvyuemeng/linkora"
 
 [project.optional-dependencies]
-embed = ["sentence-transformers>=3.0", "numpy>=1.24", "faiss-cpu>=1.7","modelscope>=1.10"]
+embed = [
+    "sentence-transformers>=3.0",
+    "numpy>=1.24",
+    "faiss-cpu>=1.7",
+    "modelscope>=1.10",
+]
 topics = ["linkora[embed]", "bertopic>=0.16", "pandas>=2.0"]
 import = ["endnote-utils>=1.0", "pyzotero>=1.5"]
 mcp = ["mcp>=1.0"]
@@ -57,11 +59,7 @@ linkora = "linkora.cli:main"
 linkora-mcp = "linkora.mcp:main"
 
 [dependency-groups]
-dev = [
-    "pytest>=7.0",
-    "ruff>=0.15.5",
-    "ty>=0.0.23",
-]
+dev = ["pytest>=7.0", "ruff>=0.15.5", "ty>=0.0.23"]
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -71,10 +69,7 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
-addopts = [
-    "-v",
-    "--tb=short",
-]
+addopts = ["-v", "--tb=short"]
 markers = [
     "unit: Unit tests (pure functions)",
     "integration: Integration tests (multiple modules)",
