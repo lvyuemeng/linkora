@@ -1,6 +1,22 @@
-# ScholarAIO Agent Instructions
+# linkora Agent Instructions
 
 > This file provides coding instructions for AI coding agents. **Must use `uv` for all Python operations.**
+
+## Quick Context for AI Agents
+
+AI agents should use `--context` immediately to understand the CLI workflow:
+
+```bash
+# Show design context: CLI workflow and usage patterns
+linkora --context
+```
+
+This provides:
+- CLI workflow (init → add → index → search)
+- Usage patterns for paper ingestion, search, layered loading
+- Communication pattern for user interaction
+
+---
 
 ## Prerequisites
 
@@ -44,8 +60,8 @@ uv add --optional topics bertopic pandas
 uv add --group ...
 
 # Run commands without activation
-uv run python -m scholaraio --help
-uv run scholaraio search "turbulence"
+uv run python -m linkora --help
+uv run linkora search "turbulence"
 
 # Or activate (optional)
 source .venv/bin/activate  # Linux/macOS
@@ -61,15 +77,15 @@ source .venv/bin/activate  # Linux/macOS
 ```bash
 # Check formatting
 uv run ruff check .
-uv run ruff check scholaraio/
+uv run ruff check linkora/
 
 # Auto-fix formatting
 uv run ruff check --fix .
-uv run ruff check --fix scholaraio/
+uv run ruff check --fix linkora/
 
 # Format code
 uv run ruff format .
-uv run ruff format scholaraio/
+uv run ruff format linkora/
 ```
 
 ### Type Checking
@@ -95,10 +111,12 @@ Commands:
 
 ```bash
 # Run tests
-uv run pytest tests/ -v
+uv run -m pytest
 
 # Run with coverage
-uv run pytest --cov=scholaraio tests/
+uv run -m pytest --cov=linkora
+
+# -m / --module for module import
 ```
 
 ---
@@ -186,7 +204,7 @@ Require: `requires-python = ">=3.12"`
 - Use type hints on all public functions
 - Use `TypedDict` for complex dict structures
 - Use `Protocol` for interface definitions
-- Run `uv run mypy scholaraio/` before committing
+- Run `uv run mypy linkora/` before committing
 
 ### User-Facing Text
 
@@ -213,8 +231,8 @@ from pathlib import Path
 
 import yaml
 
-from scholaraio import index
-from scholaraio.config import load_config
+from linkora import index
+from linkora.config import load_config
 ```
 
 ### Error Handling

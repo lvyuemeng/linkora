@@ -1,18 +1,18 @@
-# Synapse Configuration
+# linkora Configuration
 
-> Synapse configuration system with layered resolution and workspace support.
+> linkora configuration system with layered resolution and workspace support.
 
 ## Root Path
 
-The **root path** is where Synapse stores data. It is determined by:
+The **root path** is where linkora stores data. It is determined by:
 
-1. `SYNAPSE_ROOT` environment variable
-2. Walking up from current working directory to find `.synapse` folder or `workspace/` folder
+1. `linkora_ROOT` environment variable
+2. Walking up from current working directory to find `.linkora` folder or `workspace/` folder
 3. Falls back to `cwd` if none found
 
 ```
 # Root resolution (priority order):
-SYNAPSE_ROOT env → .synapse/ or workspace/ found → cwd
+linkora_ROOT env → .linkora/ or workspace/ found → cwd
 ```
 
 ## Layered Resolution
@@ -22,18 +22,18 @@ Configuration is resolved in priority order (highest to lowest):
 | Priority | Source |
 |----------|--------|
 | 1 | CLI argument (`--workspace`) |
-| 2 | Environment variable (`SYNAPSE_WORKSPACE`) |
-| 3 | Workspace-local config (`<root>/workspace/<name>/synapse.yml`) |
-| 4 | Global config (`~/.synapse/config.yml`, `~/.config/synapse/config.yml`) |
+| 2 | Environment variable (`linkora_WORKSPACE`) |
+| 3 | Workspace-local config (`<root>/workspace/<name>/linkora.yml`) |
+| 4 | Global config (`~/.linkora/config.yml`, `~/.config/linkora/config.yml`) |
 | 5 | Built-in defaults |
 
 ## Config File Locations
 
 ```
-~/.synapse/config.yml           # User global config
-~/.config/synapse/config.yml   # XDG config location
+~/.linkora/config.yml           # User global config
+~/.config/linkora/config.yml   # XDG config location
 <root>/config.yaml            # Project config (legacy)
-<root>/workspace/<name>/synapse.yml  # Workspace-local override
+<root>/workspace/<name>/linkora.yml  # Workspace-local override
 ```
 
 ## Config Structure
@@ -41,7 +41,7 @@ Configuration is resolved in priority order (highest to lowest):
 ### Global Config
 
 ```yaml
-# ~/.synapse/config.yml
+# ~/.linkora/config.yml
 
 # Default workspace when none specified
 default_workspace: physics
@@ -113,14 +113,14 @@ topics:
 # Logging configuration
 logging:
   level: INFO
-  file: synapse.log
+  file: linkora.log
   metrics_db: metrics.db
 ```
 
 ### Workspace-Local Override
 
 ```yaml
-# workspace/physics/synapse.yml
+# workspace/physics/linkora.yml
 
 description: "Physics with custom settings"
 
@@ -138,9 +138,9 @@ index:
 
 | Variable | Description |
 |----------|-------------|
-| `SYNAPSE_ROOT` | Override root path for all workspaces |
-| `SYNAPSE_WORKSPACE` | Override workspace name |
-| `SYNAPSE_LLM_API_KEY` | Override LLM API key |
+| `linkora_ROOT` | Override root path for all workspaces |
+| `linkora_WORKSPACE` | Override workspace name |
+| `linkora_LLM_API_KEY` | Override LLM API key |
 
 Service-specific env vars (fallback):
 - `DEEPSEEK_API_KEY`, `OPENAI_API_KEY` - LLM
@@ -152,7 +152,7 @@ Service-specific env vars (fallback):
 ### Python API
 
 ```python
-from scholaraio.config import get_config, load_config, reload_config
+from linkora.config import get_config, load_config, reload_config
 
 # Get singleton config (lazy load)
 cfg = get_config()
@@ -203,7 +203,7 @@ cfg.ensure_dirs()
 Paths are derived from root and workspace:
 
 ```
-root = SYNAPSE_ROOT env → detected → cwd
+root = linkora_ROOT env → detected → cwd
 workspace_dir = <root>/workspace/<name>
 papers_dir   = <workspace_dir>/<sources.local.papers_dir>
 index_db     = <workspace_dir>/index.db

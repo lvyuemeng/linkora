@@ -1,0 +1,152 @@
+# Full Configuration Example
+# Complete configuration with all options documented
+
+# =============================================================================
+# Workspace Configuration
+# =============================================================================
+
+# Workspace name (required for identification)
+name: my-workspace
+description: "Full-featured research workspace"
+
+# Optional: Override root path for this workspace
+# root: /custom/path/to/workspace
+
+# =============================================================================
+# Default Workspace (used when linkora_WORKSPACE is not set)
+# =============================================================================
+
+default_workspace: my-workspace
+
+# =============================================================================
+# All Workspaces
+# =============================================================================
+
+workspace:
+  my-workspace:
+    description: "Full-featured research workspace"
+    # root: /custom/path  # Optional override
+
+  physics:
+    description: "Physics research workspace"
+    root: /data/physics
+
+  default:
+    description: "Default workspace"
+
+# =============================================================================
+# Data Sources Configuration
+# =============================================================================
+
+sources:
+  # Local papers directory
+  local:
+    enabled: true
+    papers_dir: papers
+    # Additional paths to scan for papers
+    paths:
+      - /mnt/library/papers
+      - ~/Documents/research
+
+  # ArXiv integration (future)
+  arxiv:
+    enabled: false
+
+  # OpenAlex API integration
+  openalex:
+    enabled: false
+    # api_key: ""  # Set via OPENALEX_API_KEY env var
+
+  # Zotero integration
+  zotero:
+    enabled: false
+    library_id: ""  # Set via ZOTERO_LIBRARY_ID env var
+    api_key: ""     # Set via ZOTERO_API_KEY env var
+
+  # EndNote XML/RIS import
+  endnote:
+    enabled: true
+
+# =============================================================================
+# Index and Search Configuration
+# =============================================================================
+
+index:
+  # Number of results to return by default
+  top_k: 20
+
+  # Embedding model configuration
+  embed_model: Qwen/Qwen3-Embedding-0.6B
+  embed_device: auto  # auto, cpu, cuda
+  embed_cache: ~/.cache/modelscope/hub/models
+
+  # Vector search top_k (can differ from index top_k)
+  embed_top_k: 10
+
+  # Text chunking for embeddings
+  chunk_size: 800
+  chunk_overlap: 150
+
+# =============================================================================
+# LLM Configuration
+# =============================================================================
+
+llm:
+  # Backend: openai-compat, openai, anthropic
+  backend: openai-compat
+
+  # Model name
+  model: deepseek-chat
+
+  # API endpoint (for openai-compat)
+  base_url: https://api.deepseek.com
+
+  # API key (set via linkora_LLM_API_KEY or DEEPSEEK_API_KEY)
+  api_key: ""
+
+  # Request timeout in seconds
+  timeout: 30
+
+# =============================================================================
+# PDF Ingest Configuration
+# =============================================================================
+
+ingest:
+  # Extractor: regex, llm, auto, robust
+  extractor: robust
+
+  # MinerU configuration
+  mineru_endpoint: http://localhost:8000
+  mineru_cloud_url: https://mineru.net/api/v4
+  mineru_api_key: ""  # Set via MINERU_API_KEY env var
+
+  # Abstract extraction mode: verify, extract, skip
+  abstract_llm_mode: verify
+
+# =============================================================================
+# Topic Modeling Configuration
+# =============================================================================
+
+topics:
+  # Minimum documents per topic
+  min_topic_size: 5
+
+  # Number of topics (0 = auto)
+  nr_topics: 0
+
+  # Model storage directory
+  model_dir: topic_model
+
+# =============================================================================
+# Logging Configuration
+# =============================================================================
+
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR
+  level: INFO
+
+  # Log file (relative to workspace)
+  file: linkora.log
+
+  # Metrics database
+  metrics_db: metrics.db
