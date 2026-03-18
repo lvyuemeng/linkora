@@ -12,25 +12,8 @@ permissions:
   contents: read
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v6
-      - uses: astral-sh/setup-uv@v7
-
-      - run: uv sync --extra full
-      - run: uv build
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: dist
-          path: dist/
-
   publish:
-    needs: build
     runs-on: ubuntu-latest
-
     strategy:
       matrix:
         include:
@@ -42,12 +25,17 @@ jobs:
             token: TEST_PYPI_TOKEN
 
     steps:
-      - uses: actions/download-artifact@v8
-        with:
-          name: dist
-
+      - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v7
 
+      # Build the package
+      - run: uv sync --extra full
+      - run: uv build
+
+      # Optional: debug list
+      - run: ls -la dist/
+
+      # Check token exists
       - name: Ensure token exists
         run: |
           if [ -z "${UV_PUBLISH_TOKEN}" ]; then
@@ -57,8 +45,9 @@ jobs:
         env:
           UV_PUBLISH_TOKEN: ${{ secrets[matrix.token] }}
 
+      # Publish directly from build folder
       - name: Publish to ${{ matrix.name }}
         if: matrix.name == 'pypi' || contains(github.ref_name, 'rc')
-        run: uv publish ${{ matrix.index }}
+        run: uv publish
         env:
           UV_PUBLISH_TOKEN: ${{ secrets[matrix.token] }}

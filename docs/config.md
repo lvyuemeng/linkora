@@ -1,229 +1,161 @@
 # linkora Configuration
 
-> linkora configuration system with layered resolution and workspace support.
-
-## Root Path
-
-The **root path** is where linkora stores data. It is determined by:
-
-1. `linkora_ROOT` environment variable
-2. Walking up from current working directory to find `.linkora` folder or `workspace/` folder
-3. Falls back to `cwd` if none found
-
-```
-# Root resolution (priority order):
-linkora_ROOT env → .linkora/ or workspace/ found → cwd
-```
-
-## Layered Resolution
-
-Configuration is resolved in priority order (highest to lowest):
-
-| Priority | Source |
-|----------|--------|
-| 1 | CLI argument (`--workspace`) |
-| 2 | Environment variable (`linkora_WORKSPACE`) |
-| 3 | Workspace-local config (`<root>/workspace/<name>/linkora.yml`) |
-| 4 | Global config (`~/.linkora/config.yml`, `~/.config/linkora/config.yml`) |
-| 5 | Built-in defaults |
+> Quick reference for linkora configuration. See examples in [`examples/config/`](examples/config/).
 
 ## Config File Locations
 
-```
-~/.linkora/config.yml           # User global config
-~/.config/linkora/config.yml   # XDG config location
-<root>/config.yaml            # Project config (legacy)
-<root>/workspace/<name>/linkora.yml  # Workspace-local override
-```
+| Location | Description |
+|----------|-------------|
+| `~/.linkora/config.yml` | User global config |
+| `~/.config/linkora/config.yml` | XDG config location |
+| `<workspace>/linkora.yml` | Workspace-local override |
 
-## Config Structure
+## Layered Resolution
 
-### Global Config
+Config priority (highest to lowest):
+
+1. CLI argument (`--workspace`)
+2. Environment variable (`linkora_WORKSPACE`)
+3. Workspace-local config
+4. Global config
+5. Built-in defaults
+
+## Quick Config
 
 ```yaml
 # ~/.linkora/config.yml
+default_workspace: research
 
-# Default workspace when none specified
-default_workspace: physics
-
-# Workspace definitions
 workspace:
-  physics:
-    description: "Physics research workspace"
-    root: /data/physics  # Optional: custom root for this workspace
-  
-  default:
-    description: "Default workspace"
+  research:
+    description: "Main research workspace"
 
-# Default sources (can be overridden per workspace)
 sources:
   local:
     enabled: true
     papers_dir: papers
-    paths:  # Additional paper paths
-      - /mnt/library/papers
-      - ~/Documents/research
-  
-  arxiv:
-    enabled: false
-  
-  openalex:
-    enabled: false
-  
-  zotero:
-    enabled: false
-    library_id: ""
-    api_key: ""
-  
-  endnote:
-    enabled: true
 
-# Index configuration
-index:
-  top_k: 20
-  embed_model: Qwen/Qwen3-Embedding-0.6B
-  embed_device: auto
-  embed_cache: ~/.cache/modelscope/hub/models
-  embed_top_k: 10
-  chunk_size: 800
-  chunk_overlap: 150
-
-# LLM configuration
 llm:
   backend: openai-compat
   model: deepseek-chat
   base_url: https://api.deepseek.com
-  api_key: ""
-  timeout: 30
-
-# Ingest configuration
-ingest:
-  extractor: robust
-  mineru_endpoint: http://localhost:8000
-  mineru_cloud_url: https://mineru.net/api/v4
-  mineru_api_key: ""
-  abstract_llm_mode: verify
-
-# Topics configuration
-topics:
-  min_topic_size: 5
-  nr_topics: 0
-  model_dir: topic_model
-
-# Logging configuration
-logging:
-  level: INFO
-  file: linkora.log
-  metrics_db: metrics.db
 ```
 
-### Workspace-Local Override
+## Config Reference
 
-```yaml
-# workspace/physics/linkora.yml
+### Sources
 
-description: "Physics with custom settings"
+| Option | Type | Default | Valid Values | Description |
+|--------|------|---------|--------------|-------------|
+| `sources.local.enabled` | bool | true | - | Enable local papers |
+| `sources.local.papers_dir` | string | "papers" | valid path | Primary papers directory (relative to workspace) |
+| `sources.local.paths` | list[str] | [] | absolute paths | Additional paper paths to scan |
+| `sources.arxiv.enabled` | bool | false | - | Enable ArXiv import |
+| `sources.openalex.enabled` | bool | false | - | Enable OpenAlex API |
+| `sources.zotero.enabled` | bool | false | - | Enable Zotero |
+| `sources.zotero.library_id` | string | "" | alphanumeric | Zotero library ID |
+| `sources.zotero.api_key` | string | "" | Zotero API key | Zotero API key |
+| `sources.zotero.library_type` | string | "user" | "user" \| "group" | Zotero library type |
+| `sources.endnote.enabled` | bool | true | - | Enable EndNote XML/RIS import |
 
-sources:
-  local:
-    paths:
-      - /backup/physics
-      - /mnt/external/physics-papers
+### Index
 
-index:
-  chunk_size: 1000
-```
+| Option | Type | Default | Valid Values | Description |
+|--------|------|---------|--------------|-------------|
+| `index.top_k` | int | 20 | 1-100 | Default result count for search |
+| `index.embed_model` | string | "Qwen/Qwen3-Embedding-0.6B" | HuggingFace model ID | Embedding model for semantic search |
+| `index.embed_device` | string | "auto" | "auto" \| "cpu" \| "cuda" \| "mps" | Device for embedding inference |
+| `index.embed_cache` | string | "~/.cache/modelscope/hub/models" | directory path | Model cache directory |
+| `index.embed_source` | string | "modelscope" | "modelscope" \| "huggingface" | Model download source |
+| `index.embed_top_k` | int | 10 | 1-100 | Top-k results for vector search |
+| `index.chunk_size` | int | 800 | 100-2000 | Text chunk size for embeddings |
+| `index.chunk_overlap` | int | 150 | 0-500 | Overlap between chunks |
+
+### LLM
+
+| Option | Type | Default | Valid Values | Description |
+|--------|------|---------|--------------|-------------|
+| `llm.backend` | string | "openai-compat" | "openai-compat" \| "openai" \| "anthropic" | LLM backend |
+| `llm.model` | string | "deepseek-chat" | model identifier | Model name |
+| `llm.base_url` | string | "https://api.deepseek.com" | URL | API endpoint URL |
+| `llm.api_key` | string | "" | API key string | API key |
+| `llm.timeout` | int | 30 | 10-300 | General request timeout (seconds) |
+| `llm.timeout_toc` | int | 120 | 30-600 | Table of contents extraction timeout |
+| `llm.timeout_clean` | int | 90 | 30-600 | Text cleaning timeout |
+
+### Ingest
+
+| Option | Type | Default | Valid Values | Description |
+|--------|------|---------|--------------|-------------|
+| `ingest.extractor` | string | "robust" | "regex" \| "llm" \| "auto" \| "robust" | PDF extraction method |
+| `ingest.mineru_endpoint` | string | "http://localhost:8000" | URL | MinerU local server endpoint |
+| `ingest.mineru_cloud_url` | string | "https://mineru.net/api/v4" | URL | MinerU cloud API URL |
+| `ingest.mineru_api_key` | string | "" | API key | MinerU API key |
+| `ingest.abstract_llm_mode` | string | "verify" | "verify" \| "extract" \| "skip" | Abstract extraction mode |
+| `ingest.contact_email` | string | "" | email | Contact email for API requests |
+
+### Topics
+
+| Option | Type | Default | Valid Values | Description |
+|--------|------|---------|--------------|-------------|
+| `topics.min_topic_size` | int | 5 | 2-50 | Minimum documents per topic |
+| `topics.nr_topics` | int | 0 | 0-100 | Number of topics (0 = auto-detect) |
+| `topics.model_dir` | string | "topic_model" | directory path | Topic model storage directory |
+
+### Logging
+
+| Option | Type | Default | Valid Values | Description |
+|--------|------|---------|--------------|-------------|
+| `logging.level` | string | "INFO" | "DEBUG" \| "INFO" \| "WARNING" \| "ERROR" | Log level |
+| `logging.file` | string | "linkora.log" | filename | Log file (relative to root) |
+| `logging.max_bytes` | int | 10000000 | 1000000-100000000 | Max log file size before rotation |
+| `logging.backup_count` | int | 3 | 1-10 | Number of rotated log files to keep |
+| `logging.metrics_db` | string | "metrics.db" | filename | Metrics database file |
 
 ## Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `linkora_ROOT` | Override root path for all workspaces |
-| `linkora_WORKSPACE` | Override workspace name |
-| `linkora_LLM_API_KEY` | Override LLM API key |
+| Variable | Valid Values | Description |
+|----------|--------------|-------------|
+| `linkora_ROOT` | directory path | Root directory for all workspaces |
+| `linkora_WORKSPACE` | workspace name | Active workspace name |
+| `linkora_LLM_API_KEY` | API key | Override LLM API key |
+| `DEEPSEEK_API_KEY` | API key | DeepSeek API key (fallback) |
+| `OPENAI_API_KEY` | API key | OpenAI API key (fallback) |
+| `MINERU_API_KEY` | API key | MinerU API key |
+| `ZOTERO_API_KEY` | API key | Zotero API key |
+| `ZOTERO_LIBRARY_ID` | alphanumeric | Zotero library ID |
+| `OPENALEX_API_KEY` | API key | OpenAlex API key |
 
-Service-specific env vars (fallback):
-- `DEEPSEEK_API_KEY`, `OPENAI_API_KEY` - LLM
-- `ZOTERO_API_KEY`, `ZOTERO_LIBRARY_ID` - Zotero
-- `MINERU_API_KEY` - MinerU
-
-## Usage
-
-### Python API
+## Python API
 
 ```python
-from linkora.config import get_config, load_config, reload_config
+from linkora.config import get_config, load_config
 
-# Get singleton config (lazy load)
+# Get config (lazy load)
 cfg = get_config()
 
-# Load with workspace override
+# Load with workspace
 cfg = load_config(workspace="physics")
 
-# Force reload
-cfg = reload_config()
+# Paths
+cfg.root            # Root directory (Path object)
+cfg.workspace_dir   # Workspace directory (Path)
+cfg.papers_dir      # Papers directory (Path)
+cfg.index_db        # SQLite index path (Path)
+cfg.vectors_file    # FAISS vectors file (Path)
+cfg.log_file        # Log file path (Path)
+cfg.metrics_db_path # Metrics DB path (Path)
 
-# Root and paths
-cfg.root              # → /data/physics (or <detected_root>)
-cfg.workspace_dir     # → <root>/workspace/physics
-cfg.papers_dir       # → <root>/workspace/physics/papers
-cfg.extra_paths      # → [/mnt/library/papers, ~/Documents/research]
+# Config access (attributes)
+cfg.sources.local.enabled
+cfg.index.top_k
+cfg.llm.model
 
-# Access sources
-cfg.sources.local.enabled        # → True
-cfg.sources.local.paths          # → ["/mnt/library/papers", "~/Documents/research"]
-cfg.sources.arxiv.enabled       # → False
-cfg.sources.zotero.library_id   # → ""
-
-# Resolve API keys (with env fallback)
-cfg.resolve_llm_api_key()       # → "sk-..."
-cfg.resolve_zotero_api_key()    # → ""
-cfg.resolve_mineru_api_key()    # → ""
+# API key resolution (with env fallback)
+cfg.resolve_llm_api_key()       # -> str
+cfg.resolve_zotero_api_key()    # -> str
+cfg.resolve_mineru_api_key()    # -> str
 
 # Ensure directories exist
-cfg.ensure_dirs()
+cfg.ensure_dirs()  # -> None
 ```
-
-## Config Classes
-
-| Class | Description |
-|-------|-------------|
-| `WorkspaceConfig` | Workspace identity (name, description, root) |
-| `SourcesConfig` | All source configurations |
-| `LocalSourceConfig` | Local source (papers_dir, paths[]) |
-| `IndexConfig` | Search and embedding config |
-| `LLMConfig` | LLM client config |
-| `IngestConfig` | PDF processing config |
-| `TopicsConfig` | Topic modeling config |
-| `LogConfig` | Logging config |
-| `Config` | Main resolved config |
-
-## Path Resolution
-
-Paths are derived from root and workspace:
-
-```
-root = linkora_ROOT env → detected → cwd
-workspace_dir = <root>/workspace/<name>
-papers_dir   = <workspace_dir>/<sources.local.papers_dir>
-index_db     = <workspace_dir>/index.db
-vectors_file = <workspace_dir>/vectors.faiss
-
-# Additional paths
-extra_paths = [<root>/path1, <root>/path2, ...]
-```
-
-### Multiple Paper Paths
-
-The `sources.local.paths` config allows multiple paper storage locations:
-
-```yaml
-sources:
-  local:
-    papers_dir: papers  # Primary storage
-    paths:              # Additional paths to scan
-      - /mnt/library/papers
-      - /backup/papers
-```
-
-Use `cfg.papers_dir` for primary storage and `cfg.extra_paths` for additional locations.

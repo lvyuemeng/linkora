@@ -2,6 +2,8 @@
 
 > **Local Knowledge Network** — AI-native research terminal powered by local-first architecture.
 
+[English](./README.md) | [中文](./README-CN.md)
+
 ---
 
 ## Motive
@@ -35,11 +37,7 @@ Research is fragmented. Papers live in multiple folders, search is scattered acr
 ### Quick Install
 
 ```bash
-# Install as a tool (recommended)
-uv tool install -e .
-
-# Or install as a package
-uv pip install -e .
+uv tool install "linkora[full]"
 ```
 
 ### From Source
@@ -75,7 +73,30 @@ linkora-mcp
 
 ## Configuration
 
-linkora uses **zero-config** by default. All settings are optional.
+linkora **is NOT a zero-config tool** — it requires explicit configuration. See [config.md](./docs/config.md) for full details.
+
+### Quick Setup
+
+```yaml
+# ~/.linkora/config.yml
+default_workspace: research
+
+workspace:
+  research:
+    description: "Main research workspace"
+
+sources:
+  local:
+    enabled: true
+    papers_dir: papers
+
+llm:
+  backend: openai-compat
+  model: deepseek-chat
+  base_url: https://api.deepseek.com
+```
+
+See [`examples/config/full.yml`](examples/config/full.yml) for complete configuration.
 
 ### Workspace Concept
 
@@ -83,7 +104,8 @@ Workspaces provide isolated research environments:
 
 ```
 ~/.linkora/config.yml           # Global config
-<workspace>/linkora.yml         # Workspace-local override
+~/.config/linkora/config.yml   # XDG config location
+<workspace>/linkora.yml        # Workspace-local override
 ```
 
 ### Environment Variables
@@ -92,8 +114,11 @@ Workspaces provide isolated research environments:
 |----------|-------------|
 | `linkora_ROOT` | Root directory for all workspaces |
 | `linkora_WORKSPACE` | Active workspace name |
-| `linkora_LLM_API_KEY` | LLM API key (or `DEEPSEEK_API_KEY`) |
-| `MINERU_API_KEY` | PDF parsing API key |
+| `linkora_LLM_API_KEY` | LLM API key (fallback: `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`) |
+| `MINERU_API_KEY` | PDF parsing API key (MinerU) |
+| `ZOTERO_API_KEY` | Zotero API key |
+| `ZOTERO_LIBRARY_ID` | Zotero library ID |
+| `OPENALEX_API_KEY` | OpenAlex API key |
 
 ### Example Config
 
@@ -144,10 +169,28 @@ See [`docs/design.md`](docs/design.md) for detailed architecture.
 
 ## Development
 
-See [`docs/AGENT.md`](docs/AGENT.md) for AI coding agent instructions.
+Please refer [design](docs/design.md) for architecture.
+
+linkora uses [just](https://github.com/casey/just) for development workflows. However, it's **optional** for convenience.
+
+Install just first, then use the commands below.
 
 ```bash
-# Development setup
+# Show all available commands
+just
+
+# Common commands
+just setup        # Create venv and sync dependencies
+just test         # Run tests
+just lint         # Check linting
+just typecheck    # Type checking
+just check        # All quality checks
+just ci           # Full CI pipeline
+```
+
+### Manual Setup
+
+```bash
 uv venv
 uv sync
 
