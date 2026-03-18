@@ -7,14 +7,14 @@
 
 ## 1. Existing Data Structures to Reuse
 
-### From `scholaraio/papers.py`
+### From `linkora/papers.py`
 
 | Data Structure | Purpose |
 |----------------|---------|
 | `PaperMetadata` | Paper metadata (NOT frozen - mutable fields) |
 | `_extract_lastname(full_name: str) -> str` | Pure function |
 
-### From `scholaraio/llm.py`
+### From `linkora/llm.py`
 
 | Data Structure | Purpose |
 |----------------|---------|
@@ -34,7 +34,7 @@
 ### 2.1 Extraction Types
 
 ```python
-# scholaraio/extract/types.py
+# linkora/extract/types.py
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -79,7 +79,7 @@ class ExtractionOutput:
 ### 2.2 Extractor Config (No Mode String!)
 
 ```python
-# scholaraio/extract/config.py
+# linkora/extract/config.py
 
 from dataclasses import dataclass
 
@@ -102,10 +102,10 @@ class ExtractorConfig:
 ### 3.1 Extractor Protocol
 
 ```python
-# scholaraio/extract/protocol.py
+# linkora/extract/protocol.py
 
 from typing import Protocol
-from scholaraio.extract.types import ExtractionInput, ExtractionOutput
+from linkora.extract.types import ExtractionInput, ExtractionOutput
 
 
 class Extractor(Protocol):
@@ -124,12 +124,12 @@ class Extractor(Protocol):
 ### 3.2 Regex Extractor
 
 ```python
-# scholaraio/extract/regex.py
+# linkora/extract/regex.py
 
 from dataclasses import dataclass
-from scholaraio.papers import PaperMetadata, _extract_lastname
-from scholaraio.extract.protocol import Extractor
-from scholaraio.extract.types import ExtractionInput, ExtractionOutput
+from linkora.papers import PaperMetadata, _extract_lastname
+from linkora.extract.protocol import Extractor
+from linkora.extract.types import ExtractionInput, ExtractionOutput
 
 
 @dataclass(frozen=True)
@@ -181,14 +181,14 @@ regex_extractor = RegexExtractor()
 ### 3.3 LLM Extractor
 
 ```python
-# scholaraio/extract/llm.py
+# linkora/extract/llm.py
 
 from dataclasses import dataclass
-from scholaraio.llm import LLMRunner, LLMRequest, LLMConfig, PromptTemplate
-from scholaraio.http import HTTPClient
-from scholaraio.papers import PaperMetadata, _extract_lastname
-from scholaraio.extract.protocol import Extractor
-from scholaraio.extract.types import ExtractionInput, ExtractionOutput
+from linkora.llm import LLMRunner, LLMRequest, LLMConfig, PromptTemplate
+from linkora.http import HTTPClient
+from linkora.papers import PaperMetadata, _extract_lastname
+from linkora.extract.protocol import Extractor
+from linkora.extract.types import ExtractionInput, ExtractionOutput
 
 
 # Prompt templates - use PromptTemplate from llm.py
@@ -284,7 +284,7 @@ def _parse_llm_response(content: str, source_name: str) -> PaperMetadata:
 ### 4.1 Filename Extraction
 
 ```python
-# scholaraio/extract/filename.py
+# linkora/extract/filename.py
 
 import re
 from dataclasses import dataclass
@@ -309,7 +309,7 @@ def _extract_from_filename(filename: str) -> FilenameMetadata:
     
     Uses _extract_lastname from papers.py.
     """
-    from scholaraio.papers import _extract_lastname
+    from linkora.papers import _extract_lastname
     
     name = filename.split(".")[0]  # Remove extension
     
@@ -342,20 +342,20 @@ def _extract_from_filename(filename: str) -> FilenameMetadata:
 ## 5. Factory (Data Object Dispatch)
 
 ```python
-# scholaraio/extract/__init__.py
+# linkora/extract/__init__.py
 
-from scholaraio.config import Config
-from scholaraio.http import RequestsClient, HTTPClient
-from scholaraio.llm import LLMConfig
-from scholaraio.papers import PaperMetadata
+from linkora.config import Config
+from linkora.http import RequestsClient, HTTPClient
+from linkora.llm import LLMConfig
+from linkora.papers import PaperMetadata
 
-from scholaraio.extract.protocol import Extractor
-from scholaraio.extract.types import ExtractionInput, ExtractionOutput
-from scholaraio.extract.config import ExtractorConfig
-from scholaraio.extract.regex import RegexExtractor, regex_extractor
-from scholaraio.extract.llm import LLMExtractor
-from scholaraio.extract.auto import AutoExtractor
-from scholaraio.extract.robust import RobustExtractor
+from linkora.extract.protocol import Extractor
+from linkora.extract.types import ExtractionInput, ExtractionOutput
+from linkora.extract.config import ExtractorConfig
+from linkora.extract.regex import RegexExtractor, regex_extractor
+from linkora.extract.llm import LLMExtractor
+from linkora.extract.auto import AutoExtractor
+from linkora.extract.robust import RobustExtractor
 
 
 def create_extractor(
@@ -453,7 +453,7 @@ def extract_file(filepath: str | Path, config: Config) -> ExtractionOutput:
 ## 7. File Structure
 
 ```
-scholaraio/extract/
+linkora/extract/
 ├── __init__.py          # extract(), extract_file(), create_extractor()
 ├── protocol.py          # Extractor Protocol
 ├── types.py             # ExtractionInput, ExtractionOutput

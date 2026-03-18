@@ -38,7 +38,7 @@ enrich_toc, enrich_l3, refetch, backfill_abstract, rename_paper
 ### New API (Target: ~150 lines)
 
 ```python
-"""ScholarAIO MCP - Unified API Design."""
+"""linkora MCP - Unified API Design."""
 
 from __future__ import annotations
 
@@ -46,12 +46,12 @@ import json
 
 from mcp.server.fastmcp import FastMCP
 
-from scholaraio.config import get_config
-from scholaraio.log import get_logger
-from scholaraio.index import SearchIndex, VectorIndex
-from scholaraio.papers import PaperStore
+from linkora.config import get_config
+from linkora.log import get_logger
+from linkora.index import SearchIndex, VectorIndex
+from linkora.papers import PaperStore
 
-mcp = FastMCP("scholaraio")
+mcp = FastMCP("linkora")
 _log = get_logger(__name__)
 
 _config = None
@@ -96,7 +96,7 @@ def search(
 
         return json.dumps(results, ensure_ascii=False)
     except FileNotFoundError:
-        return json.dumps({"error": "index_not_found", "message": "Run: scholaraio index"})
+        return json.dumps({"error": "index_not_found", "message": "Run: linkora index"})
     except Exception as e:
         _log.exception("search failed")
         return json.dumps({"error": "internal", "message": str(e)})
@@ -118,9 +118,9 @@ def vector_search(
             results = vidx.search(query, top_k, year, journal, paper_type)
         return json.dumps(results, ensure_ascii=False)
     except ImportError:
-        return json.dumps({"error": "missing_dependency", "install_hint": "pip install scholaraio[embed]"})
+        return json.dumps({"error": "missing_dependency", "install_hint": "pip install linkora[embed]"})
     except FileNotFoundError:
-        return json.dumps({"error": "vectors_not_found", "message": "Run: scholaraio embed"})
+        return json.dumps({"error": "vectors_not_found", "message": "Run: linkora embed"})
     except Exception as e:
         return json.dumps({"error": "internal", "message": str(e)})
 
@@ -150,7 +150,7 @@ def index(
         else:
             return json.dumps({"error": "Invalid mode", "valid_modes": ["fts", "vector"]})
     except ImportError:
-        return json.dumps({"error": "missing_dependency", "install_hint": "pip install scholaraio[embed]"})
+        return json.dumps({"error": "missing_dependency", "install_hint": "pip install linkora[embed]"})
     except Exception as e:
         return json.dumps({"error": "internal", "message": str(e)})
 
@@ -170,7 +170,7 @@ def paper(
         cfg = _get_config()
 
         if action == "show":
-            from scholaraio.loader import PaperData
+            from linkora.loader import PaperData
             paper_d = _resolve_paper(ref, cfg)
             p = PaperData.from_dir(paper_d)
             result = {"title": p.title, "authors": p.authors, "year": p.year, "journal": p.journal}
@@ -183,7 +183,7 @@ def paper(
             return json.dumps(result, ensure_ascii=False)
 
         elif action == "lookup":
-            from scholaraio.index import lookup_paper
+            from linkora.index import lookup_paper
             result = lookup_paper(cfg.index_db, ref)
             return json.dumps(result, ensure_ascii=False)
 
@@ -210,10 +210,10 @@ def citation(
         uuid = meta["id"]
 
         if direction == "references":
-            from scholaraio.index import get_references
+            from linkora.index import get_references
             results = get_references(uuid, cfg.index_db)
         elif direction == "citing":
-            from scholaraio.index import get_citing_papers
+            from linkora.index import get_citing_papers
             results = get_citing_papers(uuid, cfg.index_db)
         else:
             return json.dumps({"error": "Invalid direction", "valid_directions": ["references", "citing"]})
@@ -237,10 +237,10 @@ def topic(
 ) -> str:
     """Topic modeling tools."""
     try:
-        from scholaraio.topics import load_model, get_topic_overview, get_topic_papers
-        from scholaraio.topics import build_topics as _build_topics
+        from linkora.topics import load_model, get_topic_overview, get_topic_papers
+        from linkora.topics import build_topics as _build_topics
     except ImportError:
-        return json.dumps({"error": "missing_dependency", "install_hint": "pip install scholaraio[topics]"})
+        return json.dumps({"error": "missing_dependency", "install_hint": "pip install linkora[topics]"})
 
     try:
         cfg = _get_config()
@@ -290,7 +290,7 @@ def workspace(
 ) -> str:
     """Workspace operations."""
     try:
-        from scholaraio import workspace as ws_mod
+        from linkora import workspace as ws_mod
 
         cfg = _get_config()
         ws_root = cfg._root / "workspace"
@@ -336,8 +336,8 @@ def workspace(
 def _resolve_paper(ref: str, cfg) -> "Path":
     """Resolve paper reference to directory."""
     from pathlib import Path
-    from scholaraio.index import lookup_paper
-    from scholaraio.papers import iter_paper_dirs, read_meta
+    from linkora.index import lookup_paper
+    from linkora.papers import iter_paper_dirs, read_meta
 
     papers_dir = cfg.papers_dir
     d = papers_dir / ref
@@ -365,7 +365,7 @@ def _resolve_paper(ref: str, cfg) -> "Path":
 
 def _resolve_workspace(name: str, cfg) -> "set[str] | None":
     """Resolve workspace to paper IDs."""
-    from scholaraio import workspace as ws_mod
+    from linkora import workspace as ws_mod
     ws_dir = cfg._root / "workspace" / name
     return ws_mod.read_paper_ids(ws_dir) or None
 

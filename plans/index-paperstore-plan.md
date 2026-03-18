@@ -90,7 +90,7 @@ def cmd_index(args, cfg):
 **After:**
 ```python
 def cmd_index(args, cfg):
-    from scholaraio.papers import PaperStore
+    from linkora.papers import PaperStore
     store = PaperStore(cfg.papers_dir)
     with SearchIndex(cfg.index_db) as idx:
         idx.rebuild(store)
@@ -109,6 +109,6 @@ def cmd_index(args, cfg):
 
 | File | Changes |
 |------|---------|
-| scholaraio/index/vector.py | Change method signatures |
-| scholaraio/index/text.py | Change method signatures |
-| scholaraio/cli/commands.py | Create PaperStore before calling |
+| linkora/index/vector.py | Change method signatures |
+| linkora/index/text.py | Change method signatures |
+| linkora/cli/commands.py | Create PaperStore before calling |

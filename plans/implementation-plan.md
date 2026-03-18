@@ -1,4 +1,4 @@
-# ScholarAIO Implementation Plan
+# linkora Implementation Plan
 
 > Connecting design, concrete modules, commands, and configurations.
 
@@ -29,7 +29,7 @@ import logging
 _log = logging.getLogger(__name__)
 
 # New (use singleton):
-from scholaraio.log import get_logger, ui
+from linkora.log import get_logger, ui
 _log = get_logger(__name__)
 ui("Processing %d files", count)
 ```
@@ -70,7 +70,7 @@ from pathlib import Path  # No TYPE_CHECKING guard needed
 ### 4.2 Create index/ Module
 
 ```
-scholaraio/index/
+linkora/index/
 ├── __init__.py          # Exports: SearchIndex, VectorIndex
 ├── text.py             # FTS5 full-text search (renamed from index.py)
 └── vector.py           # FAISS semantic search (renamed from vectors.py)
@@ -81,7 +81,7 @@ scholaraio/index/
 ### 4.3 Module Dependency
 
 ```
-scholaraio/
+linkora/
 ├── config.py           # Configuration (see Section 5)
 ├── papers.py           # Paper storage & metadata
 ├── loader.py           # L1-L4 layered loading
@@ -209,7 +209,7 @@ class LLMConfig:
 class LogConfig:
     """Logging configuration."""
     level: str = "INFO"
-    file: str = "data/scholaraio.log"
+    file: str = "data/linkora.log"
     metrics_db: str = "data/metrics.db"
 ```
 
@@ -217,7 +217,7 @@ class LogConfig:
 ```python
 @dataclass
 class Config:
-    """ScholarAIO configuration."""
+    """linkora configuration."""
     workspace: WorkspaceConfig = field(default_factory=WorkspaceConfig)
     index: IndexConfig = field(default_factory=IndexConfig)
     sources: SourcesConfig = field(default_factory=SourcesConfig)
@@ -273,7 +273,7 @@ Config
 ```
 1. Module Restructure
    ├── 1.1 Delete explore.py
-   ├── 1.2 Create scholaraio/index/ directory
+   ├── 1.2 Create linkora/index/ directory
    ├── 1.3 Move index.py → index/text.py
    └── 1.4 Move vectors.py → index/vector.py
 

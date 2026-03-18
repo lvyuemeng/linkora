@@ -7,9 +7,9 @@
 ```python
 _log = logging.getLogger(__name__)
 ```
-**Should be**: Using singleton pattern from `scholaraio.log`
+**Should be**: Using singleton pattern from `linkora.log`
 ```python
-from scholaraio.log import get_logger
+from linkora.log import get_logger
 _log = get_logger(__name__)
 ```
 
@@ -20,7 +20,7 @@ config: "Config | LLMConfig"
 ```
 **Should be**: Direct import (per implementation-plan.md Section 2)
 ```python
-from scholaraio.config import Config, LLMConfig
+from linkora.config import Config, LLMConfig
 config: Config | LLMConfig
 ```
 

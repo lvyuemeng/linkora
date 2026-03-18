@@ -1,6 +1,6 @@
 # papers.py Refactoring Plan
 
-> Refactor `scholaraio/papers.py` into aligned architecture with `extract.py` and `loader.py`.
+> Refactor `linkora/papers.py` into aligned architecture with `extract.py` and `loader.py`.
 > Based on `loader-redesign-plan.md` philosophy and `docs/AGENT.md` coding standards.
 
 ---
@@ -11,7 +11,7 @@
 
 | Location | Current | Should Be |
 |----------|---------|-----------|
-| Line 18 | `_log = logging.getLogger(__name__)` | `from scholaraio.log import get_logger` |
+| Line 18 | `_log = logging.getLogger(__name__)` | `from linkora.log import get_logger` |
 
 **Reference**: `extract.py` line 47 uses correct pattern.
 
@@ -100,7 +100,7 @@ import logging
 _log = logging.getLogger(__name__)
 
 # NEW:
-from scholaraio.log import get_logger
+from linkora.log import get_logger
 _log = get_logger(__name__)
 ```
 
@@ -111,7 +111,7 @@ _log = get_logger(__name__)
 New file structure:
 
 ```
-scholaraio/
+linkora/
 ├── papers.py              # Keep: PaperMetadata, _extract_lastname, path helpers
 ├── audit.py               # Issue, YearRange, _rule_* functions, format_audit
 ├── filters.py             # PaperFilter Protocol and implementation
@@ -158,7 +158,7 @@ class YearRange(tuple):
 from pathlib import Path
 from typing import Protocol, Callable, List
 
-from scholaraio.audit import Issue
+from linkora.audit import Issue
 
 
 class PaperReader(Protocol):
@@ -200,7 +200,7 @@ DEFAULT_RULES: List[Callable] = [
 ```python
 """Audit report formatter."""
 
-from scholaraio.audit import Issue
+from linkora.audit import Issue
 
 
 def format_audit(issues: list[Issue]) -> str:
@@ -220,7 +220,7 @@ def format_audit(issues: list[Issue]) -> str:
 from dataclasses import dataclass
 from typing import Protocol
 
-from scholaraio.audit import YearRange
+from linkora.audit import YearRange
 
 
 class PaperFilter(Protocol):
@@ -330,8 +330,8 @@ After restructuring:
 
 ```python
 # papers.py - simplified
-from scholaraio.log import get_logger
-from scholaraio.audit import Issue, YearRange, DEFAULT_RULES
+from linkora.log import get_logger
+from linkora.audit import Issue, YearRange, DEFAULT_RULES
 
 _log = get_logger(__name__)
 
@@ -347,8 +347,8 @@ _log = get_logger(__name__)
 2. Fix logging in loader.py (P0)
 3. Remove duplicate PromptTemplate from loader.py, import from llm.py (P1)
 4. Refactor loader.py to use llm.py LLMRunner directly (P2)
-5. Create scholaraio/audit.py (Issue, YearRange, _rule_* functions, format_audit)
-6. Create scholaraio/filters.py (PaperFilter Protocol and implementation)
+5. Create linkora/audit.py (Issue, YearRange, _rule_* functions, format_audit)
+6. Create linkora/filters.py (PaperFilter Protocol and implementation)
 7. Refactor PaperStore (state leak mitigation)
 8. Update all imports across codebase
 9. Test that audit command still works
@@ -360,11 +360,11 @@ _log = get_logger(__name__)
 
 | File | Action |
 |------|--------|
-| `scholaraio/papers.py` | Fix logging, keep core types |
-| `scholaraio/loader.py` | Fix logging, remove duplicate PromptTemplate, use llm.py directly |
-| `scholaraio/audit.py` | CREATE (Issue, YearRange, _rule_* functions, format_audit) |
-| `scholaraio/filters.py` | CREATE (PaperFilter Protocol and implementation) |
-| `scholaraio/extract.py` | Already correct |
+| `linkora/papers.py` | Fix logging, keep core types |
+| `linkora/loader.py` | Fix logging, remove duplicate PromptTemplate, use llm.py directly |
+| `linkora/audit.py` | CREATE (Issue, YearRange, _rule_* functions, format_audit) |
+| `linkora/filters.py` | CREATE (PaperFilter Protocol and implementation) |
+| `linkora/extract.py` | Already correct |
 | CLI commands | Update imports |
 
 ---
@@ -424,8 +424,8 @@ graph TD
 
 ## 7. Dependencies
 
-- `scholaraio/log.py` - Logger singleton
-- `scholaraio/config.py` - Configuration (for paths)
+- `linkora/log.py` - Logger singleton
+- `linkora/config.py` - Configuration (for paths)
 - No new external dependencies
 
 ---
@@ -442,9 +442,9 @@ graph TD
 
 | Location | Status | Should Be |
 |----------|--------|----------|
-| `scholaraio/llm.py` line 123 | ✅ ORIGINAL | Keep |
-| `scholaraio/loader.py` line 43-51 | ❌ DUPLICATE | Import from llm.py |
-| `scholaraio/extract.py` | ✅ Correct | Uses llm.py |
+| `linkora/llm.py` line 123 | ✅ ORIGINAL | Keep |
+| `linkora/loader.py` line 43-51 | ❌ DUPLICATE | Import from llm.py |
+| `linkora/extract.py` | ✅ Correct | Uses llm.py |
 
 **Fix**: Remove duplicate in loader.py, import from llm.py
 
@@ -460,7 +460,7 @@ class PromptTemplate:
         return self.user_template.format(**kwargs)
 
 # loader.py - ADD this import:
-from scholaraio.llm import PromptTemplate
+from linkora.llm import PromptTemplate
 ```
 
 ---
@@ -469,7 +469,7 @@ from scholaraio.llm import PromptTemplate
 
 | Wrapper Class | Wraps | Issue |
 |---------------|-------|-------|
-| `loader.py LLMRunner` (line 312) | `scholaraio.llm.LLMRunner` | Thin wrapper, adds no value |
+| `loader.py LLMRunner` (line 312) | `linkora.llm.LLMRunner` | Thin wrapper, adds no value |
 | `loader.py ContentExtractor` (line 223) | Module-level functions | Should be pure functions |
 | `loader.py StrategyRegistry` (line 124) | Dictionary dispatch | Can be module-level dict |
 
@@ -513,7 +513,7 @@ loader.py:411 - Cannot access attribute "paper_dir" for class "PaperStore"
 
 | Location | Current | Should Be |
 |----------|---------|----------|
-| `loader.py` line 36 | `_log = logging.getLogger(__name__)` | `from scholaraio.log import get_logger` |
+| `loader.py` line 36 | `_log = logging.getLogger(__name__)` | `from linkora.log import get_logger` |
 
 This is mentioned in loader-redesign-plan.md but NOT YET FIXED.
 

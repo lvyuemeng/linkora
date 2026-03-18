@@ -1,6 +1,6 @@
 # TopicTrainer - PaperStore Context Plan (No Backward Compatibility)
 
-> Refactor `TopicTrainer` in `scholaraio/topics.py` to use unified PaperStore context.
+> Refactor `TopicTrainer` in `linkora/topics.py` to use unified PaperStore context.
 > NO backward compatibility - clean break per AGENT.md philosophy.
 > Based on `implementation-plan.md`: "If an existing API is broken/incompatible, leave it alone"
 
@@ -189,9 +189,9 @@ trainer = TopicTrainer(config, context=context, papers_map=papers_map)
 
 | File | Changes |
 |------|---------|
-| `scholaraio/topics.py` | Add TrainerContext, refactor TopicTrainer.__init__ |
-| `scholaraio/mcp.py` | Update topic build to use TrainerContext |
-| `scholaraio/cli/commands.py` | Update if topics command exists |
+| `linkora/topics.py` | Add TrainerContext, refactor TopicTrainer.__init__ |
+| `linkora/mcp.py` | Update topic build to use TrainerContext |
+| `linkora/cli/commands.py` | Update if topics command exists |
 
 ---
 
@@ -199,11 +199,11 @@ trainer = TopicTrainer(config, context=context, papers_map=papers_map)
 
 ```bash
 # Type check
-uv run ty check scholaraio/topics.py
+uv run ty check linkora/topics.py
 
 # Format
-uv run ruff format scholaraio/topics.py
-uv run ruff check scholaraio/topics.py
+uv run ruff format linkora/topics.py
+uv run ruff check linkora/topics.py
 ```
 
 ---

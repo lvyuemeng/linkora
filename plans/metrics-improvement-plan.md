@@ -1,6 +1,6 @@
 # metrics.py Refactoring Plan
 
-> Refactor `scholaraio/metrics.py` to align with AGENT.md philosophy and module patterns from `config.py`, `llm.py`, and `index/text.py`.
+> Refactor `linkora/metrics.py` to align with AGENT.md philosophy and module patterns from `config.py`, `llm.py`, and `index/text.py`.
 > Based on `docs/AGENT.md` coding standards and `plans/implementation-plan.md` principles.
 
 ---
@@ -65,7 +65,7 @@ MetricsEvent → record() → MetricsBackend → query() → MetricsResult
 ### 1.1 Event Data Classes
 
 ```python
-# scholaraio/metrics/types.py
+# linkora/metrics/types.py
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -154,7 +154,7 @@ class MetricsEvent:
 ### 1.2 Query Data Classes
 
 ```python
-# scholaraio/metrics/types.py (continued)
+# linkora/metrics/types.py (continued)
 
 @dataclass(frozen=True)
 class TimeRange:
@@ -225,7 +225,7 @@ class LLMSummary:
 ### 2.1 MetricsStore with Semantic Grouping
 
 ```python
-# scholaraio/metrics.py - refactor in place
+# linkora/metrics.py - refactor in place
 
 class MetricsStore:
     """SQLite-backed metrics store - uses typed data classes."""
@@ -248,7 +248,7 @@ class MetricsStore:
 ### 2.2 Convenience Factory Functions
 
 ```python
-# scholaraio/metrics/__init__.py
+# linkora/metrics/__init__.py
 
 def record_llm(
     name: str,
@@ -344,7 +344,7 @@ class MetricsStore:
 ## 5. Files Structure
 
 ```
-scholaraio/metrics.py  # Single file - refactor in place
+linkora/metrics.py  # Single file - refactor in place
 ```
 
 ---

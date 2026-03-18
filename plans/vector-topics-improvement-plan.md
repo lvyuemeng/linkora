@@ -380,7 +380,7 @@ class VectorIndex:
             "SELECT name FROM sqlite_master WHERE type='table' AND name='paper_vectors'"
         ).fetchone()
         if not has_vectors:
-            raise FileNotFoundError("Vector index not found. Run `scholaraio embed` first.")
+            raise FileNotFoundError("Vector index not found. Run `linkora embed` first.")
         
         index, faiss_ids = self._get_faiss()
         if index is None:

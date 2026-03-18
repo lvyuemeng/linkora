@@ -1,7 +1,7 @@
 # Type Check Fix Plan
 
 > Based on `ty check` results from AGENT.md standards.
-> Fixed issues in `scholaraio/llm.py` and `scholaraio/topics.py`.
+> Fixed issues in `linkora/llm.py` and `linkora/topics.py`.
 
 ---
 
@@ -25,8 +25,8 @@ Based on the newest BERTopic API:
 
 | File | Errors | Warnings |
 |------|--------|----------|
-| `scholaraio/llm.py` | 1 | 0 |
-| `scholaraio/topics.py` | 13 | 1 |
+| `linkora/llm.py` | 1 | 0 |
+| `linkora/topics.py` | 13 | 1 |
 | **Total** | **14** | **1** |
 
 ---
@@ -289,8 +289,8 @@ def _create_bertopic_model(...) -> BERTopic:
 
 | File | Approach |
 |------|----------|
-| `scholaraio/llm.py` | Redesign LLMPayload with TypedDict |
-| `scholaraio/topics.py` | Use BERTopic native methods, remove wheel recreation |
+| `linkora/llm.py` | Redesign LLMPayload with TypedDict |
+| `linkora/topics.py` | Use BERTopic native methods, remove wheel recreation |
 
 **Design Principles:**
 1. **Don't recreate wheels** - Use BERTopic native methods

@@ -1,6 +1,6 @@
 # index/ Module Improvement Plan
 
-> Refactor `scholaraio/index/text.py` (FTS5) and `scholaraio/index/vector.py` (FAISS) to align with AGENT.md philosophy.
+> Refactor `linkora/index/text.py` (FTS5) and `linkora/index/vector.py` (FAISS) to align with AGENT.md philosophy.
 > Based on `docs/AGENT.md` coding standards.
 
 ---
@@ -66,7 +66,7 @@ Delete lines ~823-1021 (Legacy API section), keep only:
 ```python
 # Remove: import logging
 # Add:
-from scholaraio.log import get_logger
+from linkora.log import get_logger
 _log = get_logger(__name__)
 ```
 
@@ -88,9 +88,9 @@ Remove exports for deleted functions (if any were exported).
 ### Step 5: Verify
 
 ```bash
-uv run ruff check scholaraio/index/
-uv run ruff format scholaraio/index/
-uv run mypy scholaraio/index/
+uv run ruff check linkora/index/
+uv run ruff format linkora/index/
+uv run mypy linkora/index/
 ```
 
 ---
@@ -107,6 +107,6 @@ uv run mypy scholaraio/index/
 
 | File | Action |
 |------|--------|
-| scholaraio/index/vector.py | Remove legacy functions, fix logging |
-| scholaraio/cli/commands.py | Fix broken unified_search call |
-| scholaraio/index/__init__.py | Update exports if needed |
+| linkora/index/vector.py | Remove legacy functions, fix logging |
+| linkora/cli/commands.py | Fix broken unified_search call |
+| linkora/index/__init__.py | Update exports if needed |

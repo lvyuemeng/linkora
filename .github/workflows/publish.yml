@@ -1,0 +1,63 @@
+# PyPI Publishing Workflow
+# Builds and publishes package to PyPI on tag push
+
+name: Publish
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+
+      - run: uv build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        include:
+          - name: pypi
+            index: ""
+            token: PYPI_TOKEN
+          - name: testpypi
+            index: "--index testpypi"
+            token: TEST_PYPI_TOKEN
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Ensure token exists
+        run: |
+          if [ -z "${UV_PUBLISH_TOKEN}" ]; then
+            echo "Missing token for ${{ matrix.name }}"
+            exit 1
+          fi
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets[matrix.token] }}
+
+      - name: Publish to ${{ matrix.name }}
+        if: matrix.name == 'pypi' || contains(github.ref_name, 'rc')
+        run: uv publish ${{ matrix.index }}
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets[matrix.token] }}

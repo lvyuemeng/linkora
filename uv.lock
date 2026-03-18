@@ -1603,7 +1603,7 @@ wheels = [
 ]
 
 [[package]]
-name = "scholaraio"
+name = "linkora"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
@@ -1666,10 +1666,10 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "pyzotero", marker = "extra == 'import'", specifier = ">=1.5" },
     { name = "requests", specifier = ">=2.28" },
-    { name = "scholaraio", extras = ["embed"], marker = "extra == 'full'" },
-    { name = "scholaraio", extras = ["embed"], marker = "extra == 'topics'" },
-    { name = "scholaraio", extras = ["import"], marker = "extra == 'full'" },
-    { name = "scholaraio", extras = ["topics"], marker = "extra == 'full'" },
+    { name = "linkora", extras = ["embed"], marker = "extra == 'full'" },
+    { name = "linkora", extras = ["embed"], marker = "extra == 'topics'" },
+    { name = "linkora", extras = ["import"], marker = "extra == 'full'" },
+    { name = "linkora", extras = ["topics"], marker = "extra == 'full'" },
     { name = "sentence-transformers", marker = "extra == 'embed'", specifier = ">=3.0" },
     { name = "tenacity", specifier = ">=9.1.4" },
 ]

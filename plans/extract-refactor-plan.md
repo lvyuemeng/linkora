@@ -1,6 +1,6 @@
 # extract.py Refactoring Plan
 
-> Issues found in `scholaraio/extract.py` and planned fixes based on implementation-plan.md philosophy.
+> Issues found in `linkora/extract.py` and planned fixes based on implementation-plan.md philosophy.
 
 ---
 
@@ -10,9 +10,9 @@
 
 | Line | Import Statement | Problem |
 |------|------------------|---------|
-| 68 | `from scholaraio.ingest.metadata import extract_metadata_from_markdown` | File `scholaraio/ingest/metadata.py` does NOT exist |
+| 68 | `from linkora.ingest.metadata import extract_metadata_from_markdown` | File `linkora/ingest/metadata.py` does NOT exist |
 | 138 | Same as above | Same |
-| 124-128 | `from scholaraio.ingest.metadata import (PaperMetadata, _extract_from_filename, _extract_lastname)` | - `PaperMetadata` is in `scholaraio.papers`<br>- `_extract_lastname` is in `scholaraio.papers`<br>- `_extract_from_filename` does NOT exist anywhere |
+| 124-128 | `from linkora.ingest.metadata import (PaperMetadata, _extract_from_filename, _extract_lastname)` | - `PaperMetadata` is in `linkora.papers`<br>- `_extract_lastname` is in `linkora.papers`<br>- `_extract_from_filename` does NOT exist anywhere |
 
 ### 1.2 Missing Functions (Critical)
 
@@ -25,7 +25,7 @@
 
 | Issue | Location | Fix |
 |-------|----------|-----|
-| Old logging style | Line 27: `_log = logging.getLogger(__name__)` | Use `from scholaraio.log import get_logger` |
+| Old logging style | Line 27: `_log = logging.getLogger(__name__)` | Use `from linkora.log import get_logger` |
 | TYPE_CHECKING guard | Line 25 | Remove guard, import Path directly |
 | Scattered imports | Lines 68, 124-128, 138, 292-296 | Move to module level |
 
@@ -33,15 +33,15 @@
 
 ## 2. Root Cause Analysis
 
-The code in `extract.py` was written with references to a non-existent module `scholaraio/ingest/metadata.py`. This appears to be either:
+The code in `extract.py` was written with references to a non-existent module `linkora/ingest/metadata.py`. This appears to be either:
 
 1. A planned refactoring that was never completed
 2. Code that was accidentally broken during a previous reorganization
 
 The actual implementations exist in:
-- `scholaraio.papers.PaperMetadata` ✅
-- `scholaraio.papers._extract_lastname` ✅
-- `scholaraio.papers._extract_from_filename` ❌ (MISSING - needs implementation)
+- `linkora.papers.PaperMetadata` ✅
+- `linkora.papers._extract_lastname` ✅
+- `linkora.papers._extract_from_filename` ❌ (MISSING - needs implementation)
 
 ---
 
@@ -50,7 +50,7 @@ The actual implementations exist in:
 ### 3.1 Step 1: Implement Missing Functions in papers.py
 
 ```python
-# Add to scholaraio/papers.py
+# Add to linkora/papers.py
 
 def _extract_from_filename(filepath: Path) -> "PaperMetadata":
     """Extract metadata from filename patterns.
@@ -75,31 +75,31 @@ Replace all broken imports:
 
 ```python
 # OLD (broken):
-from scholaraio.ingest.metadata import (
+from linkora.ingest.metadata import (
     PaperMetadata,
     _extract_from_filename,
     _extract_lastname,
 )
 
 # NEW (correct):
-from scholaraio.papers import PaperMetadata
-from scholaraio.papers import _extract_lastname, _extract_from_filename
+from linkora.papers import PaperMetadata
+from linkora.papers import _extract_lastname, _extract_from_filename
 ```
 
 ### 3.3 Step 3: Implement extract_metadata_from_markdown
 
 Either:
-- Create `scholaraio/ingest/metadata.py` with this function, OR
-- Move the function to `scholaraio/papers.py` and update imports
+- Create `linkora/ingest/metadata.py` with this function, OR
+- Move the function to `linkora/papers.py` and update imports
 
-**Recommendation**: Create `scholaraio/ingest/metadata.py` as a thin wrapper that calls into papers.py, for backward compatibility if other modules reference it.
+**Recommendation**: Create `linkora/ingest/metadata.py` as a thin wrapper that calls into papers.py, for backward compatibility if other modules reference it.
 
 ```python
-# scholaraio/ingest/metadata.py (NEW FILE)
+# linkora/ingest/metadata.py (NEW FILE)
 """Metadata extraction utilities - backward compatibility wrapper."""
 
 from pathlib import Path
-from scholaraio.papers import PaperMetadata
+from linkora.papers import PaperMetadata
 
 
 def extract_metadata_from_markdown(filepath: Path) -> PaperMetadata:
@@ -123,7 +123,7 @@ def extract_metadata_from_markdown(filepath: Path) -> PaperMetadata:
 _log = logging.getLogger(__name__)
 
 # NEW:
-from scholaraio.log import get_logger
+from linkora.log import get_logger
 _log = get_logger(__name__)
 ```
 
@@ -145,11 +145,11 @@ Move all imports from inside methods to module level:
 
 | Line | Import | Move To |
 |------|---------|---------|
-| 68 | `from scholaraio.ingest.metadata import extract_metadata_from_markdown` | Module level |
-| 124-128 | `from scholaraio.ingest.metadata import (...)` | Module level |
+| 68 | `from linkora.ingest.metadata import extract_metadata_from_markdown` | Module level |
+| 124-128 | `from linkora.ingest.metadata import (...)` | Module level |
 | 138 | Same as line 68 | Module level |
-| 168 | `from scholaraio.llm import LLMRunner, LLMRequest` | Module level |
-| 292-296 | `from scholaraio.ingest.metadata import (...)` | Module level |
+| 168 | `from linkora.llm import LLMRunner, LLMRequest` | Module level |
+| 292-296 | `from linkora.ingest.metadata import (...)` | Module level |
 
 ---
 
@@ -157,7 +157,7 @@ Move all imports from inside methods to module level:
 
 ```
 1. Implement _extract_from_filename in papers.py
-2. Create scholaraio/ingest/metadata.py with extract_metadata_from_markdown
+2. Create linkora/ingest/metadata.py with extract_metadata_from_markdown
 3. Fix imports in extract.py (point to correct modules)
 4. Migrate logging style to singleton pattern
 5. Remove TYPE_CHECKING guard
@@ -171,15 +171,15 @@ Move all imports from inside methods to module level:
 
 | File | Action |
 |------|--------|
-| `scholaraio/papers.py` | Add `_extract_from_filename()` function |
-| `scholaraio/ingest/metadata.py` | CREATE - backward compatibility wrapper |
-| `scholaraio/extract.py` | Fix imports, logging, remove TYPE_CHECKING |
+| `linkora/papers.py` | Add `_extract_from_filename()` function |
+| `linkora/ingest/metadata.py` | CREATE - backward compatibility wrapper |
+| `linkora/extract.py` | Fix imports, logging, remove TYPE_CHECKING |
 
 ---
 
 ## 6. Configuration Reference
 
-From `scholaraio/config.py`:
+From `linkora/config.py`:
 - `config.ingest.extractor` - Controls which extractor to use (regex/auto/robust/llm)
 - Extractor mode is read in `get_extractor()` function (line 393-434)
 
@@ -187,11 +187,11 @@ From `scholaraio/config.py`:
 
 ## 7. Dependencies
 
-- `scholaraio/log.py` - Logger singleton (NEW logging style)
-- `scholaraio/config.py` - Configuration
-- `scholaraio/papers.py` - PaperMetadata, helper functions
-- `scholaraio/llm.py` - LLM client (used by LLMExtractor, RobustExtractor)
-- `scholaraio/http.py` - HTTP client (RequestsClient)
+- `linkora/log.py` - Logger singleton (NEW logging style)
+- `linkora/config.py` - Configuration
+- `linkora/papers.py` - PaperMetadata, helper functions
+- `linkora/llm.py` - LLM client (used by LLMExtractor, RobustExtractor)
+- `linkora/http.py` - HTTP client (RequestsClient)
 
 ---
 
@@ -199,7 +199,7 @@ From `scholaraio/config.py`:
 
 | Issue | Severity | Fix |
 |-------|----------|-----|
-| Missing `scholaraio/ingest/metadata.py` | Critical | Create file with `extract_metadata_from_markdown` |
+| Missing `linkora/ingest/metadata.py` | Critical | Create file with `extract_metadata_from_markdown` |
 | Missing `_extract_from_filename` | Critical | Implement in `papers.py` |
 | Old logging style | Medium | Use singleton from `log.py` |
 | TYPE_CHECKING guard | Low | Import Path directly |

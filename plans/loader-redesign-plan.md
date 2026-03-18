@@ -1,8 +1,8 @@
 # loader.py Redesign Plan (Single File - Final)
 
-> Refactor `scholaraio/loader.py` into a single efficient file.
+> Refactor `linkora/loader.py` into a single efficient file.
 > No backward compatibility. Data pipe flow pattern.
-> Aligned with `scholaraio/extract.py` patterns.
+> Aligned with `linkora/extract.py` patterns.
 
 ---
 
@@ -173,7 +173,7 @@ class LoadResult:
 
 ```python
 """
-loader.py — ScholarAIO Paper Content Loader
+loader.py — linkora Paper Content Loader
 ==========================================
 
 L1: title/authors/year/journal/doi  ← JSON fields (from meta.json)
@@ -190,7 +190,7 @@ Data Pipe Flow (aligned with extract.py):
     ExtractionOutput → process_result → LoadResult
 
 Usage:
-    from scholaraio.loader import PaperLoader
+    from linkora.loader import PaperLoader
     loader = PaperLoader(papers_dir, config)
     result = loader.load_toc(paper_id)
     result = loader.load_conclusion(paper_id)
@@ -205,11 +205,11 @@ from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
 
-from scholaraio.config import Config
-from scholaraio.llm import LLMRunner, LLMRequest
-from scholaraio.http import RequestsClient
-from scholaraio.log import get_logger
-from scholaraio.papers import PaperStore
+from linkora.config import Config
+from linkora.llm import LLMRunner, LLMRequest
+from linkora.http import RequestsClient
+from linkora.log import get_logger
+from linkora.papers import PaperStore
 
 _log = get_logger(__name__)
 
@@ -276,7 +276,7 @@ class LoadResult:
 
 
 # Use PromptTemplate from llm.py
-from scholaraio.llm import PromptTemplate
+from linkora.llm import PromptTemplate
 
 _PROMPTS: dict[Strategy, PromptTemplate] = {
     Strategy.TOC: PromptTemplate(

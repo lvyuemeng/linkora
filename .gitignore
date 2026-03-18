@@ -15,7 +15,6 @@ build/
 # Tests & Lint & IDE
 .mypy_cache/
 .ruff_cache/
-tests/
 .pytest_cache/
 .vscode/
 

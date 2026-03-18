@@ -3,12 +3,13 @@ requires = ["setuptools>=42"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "scholaraio"
+name = "linkora"
 version = "0.1.0"
 description = "Scholar All-In-One — local academic literature explorer powered by AI"
 requires-python = ">=3.12"
 license = "MIT"
 authors = [
+    # The original project creator
     { name = "Zimo Liao", email = "zimoliao@mail.ustc.edu.cn" },
     { name = "nostalgia", email = "lv15623448685@gmail.com" },
 ]
@@ -19,14 +20,11 @@ keywords = [
     "knowledge-base",
     "semantic-search",
     "mcp",
-    "claude",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
@@ -39,25 +37,24 @@ dependencies = [
 ]
 
 [project.urls]
-# Homepage = "https://github.com/zimoliao/scholaraio"
-# Repository = "https://github.com/zimoliao/scholaraio"
-# Issues = "https://github.com/zimoliao/scholaraio/issues"
+Homepage = "https://github.com/lvyuemeng/linkora"
+Repository = "https://github.com/lvyuemeng/linkora"
 
 [project.optional-dependencies]
 embed = ["sentence-transformers>=3.0", "numpy>=1.24", "faiss-cpu>=1.7","modelscope>=1.10"]
-topics = ["scholaraio[embed]", "bertopic>=0.16", "pandas>=2.0"]
+topics = ["linkora[embed]", "bertopic>=0.16", "pandas>=2.0"]
 import = ["endnote-utils>=1.0", "pyzotero>=1.5"]
 mcp = ["mcp>=1.0"]
 full = [
-    "scholaraio[embed]",
-    "scholaraio[topics]",
-    "scholaraio[import]",
+    "linkora[embed]",
+    "linkora[topics]",
+    "linkora[import]",
     "curl-cffi>=0.5",
 ]
 
 [project.scripts]
-scholaraio = "scholaraio.cli:main"
-scholaraio-mcp = "scholaraio.mcp:main"
+linkora = "linkora.cli:main"
+linkora-mcp = "linkora.mcp:main"
 
 [dependency-groups]
 dev = [
@@ -68,3 +65,17 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+addopts = [
+    "-v",
+    "--tb=short",
+]
+markers = [
+    "unit: Unit tests (pure functions)",
+    "integration: Integration tests (multiple modules)",
+]
