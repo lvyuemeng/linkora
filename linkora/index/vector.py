@@ -167,6 +167,30 @@ _MIGRATE_HASH = (
     "ALTER TABLE paper_vectors ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''"
 )
 
+
+def decode_vectors(rows: list[tuple]) -> tuple[list[str], np.ndarray]:
+    """Decode vector blobs from database to numpy array.
+
+    Args:
+        rows: List of (paper_id, embedding_blob) tuples.
+
+    Returns:
+        (paper_ids, vectors_matrix).
+    """
+    if not rows:
+        return [], np.array([])
+
+    paper_ids = [r[0] for r in rows]
+    dim = len(rows[0][1]) // 4
+    vectors = (
+        np.frombuffer(b"".join(r[1] for r in rows), dtype=np.float32)
+        .reshape(-1, dim)
+        .astype(np.float32)
+    )
+
+    return paper_ids, vectors
+
+
 # ============================================================================
 # ModelStore Singleton (Resource Management)
 # ============================================================================
@@ -570,7 +594,7 @@ class VectorIndex:
                 self._faiss_ids = json.loads(ids_p.read_text("utf-8"))
                 if self._faiss_ids is None:
                     self._faiss_ids = []
-                return self._faiss_index, self._faiss_ids  # type: ignore[return-value]
+                return self._faiss_index, self._faiss_ids
             except Exception as e:
                 _log.debug("Failed to load FAISS cache: %s", e)
 
@@ -581,17 +605,12 @@ class VectorIndex:
         if not rows:
             raise FileNotFoundError("No vectors in database")
 
-        paper_ids = [r[0] for r in rows]
-        dim = len(rows[0][1]) // 4
-        vectors = (
-            np.frombuffer(b"".join(r[1] for r in rows), dtype=np.float32)
-            .reshape(-1, dim)
-            .astype(np.float32)
-        )
+        paper_ids, vectors = decode_vectors(rows)
         faiss.normalize_L2(vectors)
 
-        self._faiss_index = self._faiss_config.create_index(dim)
-        self._faiss_index.add(vectors)  # type: ignore[no-untyped-call]
+        self._faiss_index = self._faiss_config.create_index(vectors.shape[1])
+        n = vectors.shape[0]
+        self._faiss_index.add(n, vectors)
         self._faiss_ids = paper_ids
 
         # Save to cache
@@ -622,10 +641,11 @@ class VectorIndex:
 
         arr = np.array(new_vecs, dtype="float32")
         faiss.normalize_L2(arr)
-        index.add(arr)  # type: ignore[no-untyped-call]
+        n = arr.shape[0]
+        index.add(n, arr)
         paper_ids.extend(new_ids)
 
-        faiss.write_index(index, str(idx_p))  # type: ignore[no-untyped-call]
+        faiss.write_index(index, str(idx_p))
         ids_p.write_text(json.dumps(paper_ids, ensure_ascii=False) + "\n")
         self._faiss_index = index
         self._faiss_ids = paper_ids
@@ -792,12 +812,16 @@ class VectorIndex:
 
         # Embed query
         q_vec = np.array([self._store.embed_text(query)], dtype="float32")
-        q_vec /= np.linalg.norm(q_vec, axis=1, keepdims=True)
+        faiss.normalize_L2(q_vec)
 
         # Search FAISS
         fetch_k = top_k * 5 if (year or journal or paper_type or paper_ids) else top_k
         fetch_k = min(fetch_k, index.ntotal)
-        scores, indices = index.search(q_vec, fetch_k)  # type: ignore[no-untyped-call]
+        n = q_vec.shape[0]
+        distances = np.empty((n, fetch_k), dtype=np.float32)
+        labels = np.empty((n, fetch_k), dtype=np.int64)
+        index.search(n, q_vec, fetch_k, distances, labels)
+        scores, indices = distances, labels
 
         # Load metadata and prepare results
         meta_map, dir_map = self._load_metadata()

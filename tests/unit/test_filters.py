@@ -121,9 +121,7 @@ class TestPaperFilterParams:
         assert f.matches({}) is False
 
         # Wrong types
-        assert f.matches(
-            {"year": "2024", "journal": None, "authors": 123}
-        ) is False
+        assert f.matches({"year": "2024", "journal": None, "authors": 123}) is False
 
         # Valid
         assert (

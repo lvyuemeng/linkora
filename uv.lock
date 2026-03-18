@@ -579,6 +579,88 @@ wheels = [
 ]
 
 [[package]]
+name = "linkora"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "pyyaml" },
+    { name = "requests" },
+    { name = "tenacity" },
+]
+
+[package.optional-dependencies]
+embed = [
+    { name = "faiss-cpu" },
+    { name = "modelscope" },
+    { name = "numpy" },
+    { name = "sentence-transformers" },
+]
+full = [
+    { name = "bertopic" },
+    { name = "curl-cffi" },
+    { name = "endnote-utils" },
+    { name = "faiss-cpu" },
+    { name = "mcp" },
+    { name = "modelscope" },
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "pyzotero" },
+    { name = "sentence-transformers" },
+]
+import = [
+    { name = "endnote-utils" },
+    { name = "pyzotero" },
+]
+mcp = [
+    { name = "mcp" },
+]
+topics = [
+    { name = "bertopic" },
+    { name = "faiss-cpu" },
+    { name = "modelscope" },
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "sentence-transformers" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+    { name = "ty" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "bertopic", marker = "extra == 'topics'", specifier = ">=0.16" },
+    { name = "curl-cffi", marker = "extra == 'full'", specifier = ">=0.5" },
+    { name = "endnote-utils", marker = "extra == 'import'", specifier = ">=1.0" },
+    { name = "faiss-cpu", marker = "extra == 'embed'", specifier = ">=1.7" },
+    { name = "linkora", extras = ["embed"], marker = "extra == 'full'" },
+    { name = "linkora", extras = ["embed"], marker = "extra == 'topics'" },
+    { name = "linkora", extras = ["import"], marker = "extra == 'full'" },
+    { name = "linkora", extras = ["mcp"], marker = "extra == 'full'" },
+    { name = "linkora", extras = ["topics"], marker = "extra == 'full'" },
+    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.0" },
+    { name = "modelscope", marker = "extra == 'embed'", specifier = ">=1.10" },
+    { name = "numpy", marker = "extra == 'embed'", specifier = ">=1.24" },
+    { name = "pandas", marker = "extra == 'topics'", specifier = ">=2.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "pyzotero", marker = "extra == 'import'", specifier = ">=1.5" },
+    { name = "requests", specifier = ">=2.28" },
+    { name = "sentence-transformers", marker = "extra == 'embed'", specifier = ">=3.0" },
+    { name = "tenacity", specifier = ">=9.1.4" },
+]
+provides-extras = ["embed", "topics", "import", "mcp", "full"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=7.0" },
+    { name = "ruff", specifier = ">=0.15.5" },
+    { name = "ty", specifier = ">=0.0.23" },
+]
+
+[[package]]
 name = "llvmlite"
 version = "0.46.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1600,86 +1682,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/4a/d8/0c8a7dc9b41dcac53c4cbf9df2b9c83e0e0097203de8b37a712b345c0be5/safetensors-0.7.0-cp38-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:b0f6d66c1c538d5a94a73aa9ddca8ccc4227e6c9ff555322ea40bdd142391dd4", size = 677368, upload-time = "2025-11-19T15:18:41.627Z" },
     { url = "https://files.pythonhosted.org/packages/05/e5/cb4b713c8a93469e3c5be7c3f8d77d307e65fe89673e731f5c2bfd0a9237/safetensors-0.7.0-cp38-abi3-win32.whl", hash = "sha256:c74af94bf3ac15ac4d0f2a7c7b4663a15f8c2ab15ed0fc7531ca61d0835eccba", size = 326423, upload-time = "2025-11-19T15:18:45.74Z" },
     { url = "https://files.pythonhosted.org/packages/5d/e6/ec8471c8072382cb91233ba7267fd931219753bb43814cbc71757bfd4dab/safetensors-0.7.0-cp38-abi3-win_amd64.whl", hash = "sha256:d1239932053f56f3456f32eb9625590cc7582e905021f94636202a864d470755", size = 341380, upload-time = "2025-11-19T15:18:44.427Z" },
-]
-
-[[package]]
-name = "linkora"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "pyyaml" },
-    { name = "requests" },
-    { name = "tenacity" },
-]
-
-[package.optional-dependencies]
-embed = [
-    { name = "faiss-cpu" },
-    { name = "modelscope" },
-    { name = "numpy" },
-    { name = "sentence-transformers" },
-]
-full = [
-    { name = "bertopic" },
-    { name = "curl-cffi" },
-    { name = "endnote-utils" },
-    { name = "faiss-cpu" },
-    { name = "modelscope" },
-    { name = "numpy" },
-    { name = "pandas" },
-    { name = "pyzotero" },
-    { name = "sentence-transformers" },
-]
-import = [
-    { name = "endnote-utils" },
-    { name = "pyzotero" },
-]
-mcp = [
-    { name = "mcp" },
-]
-topics = [
-    { name = "bertopic" },
-    { name = "faiss-cpu" },
-    { name = "modelscope" },
-    { name = "numpy" },
-    { name = "pandas" },
-    { name = "sentence-transformers" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-    { name = "ty" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "bertopic", marker = "extra == 'topics'", specifier = ">=0.16" },
-    { name = "curl-cffi", marker = "extra == 'full'", specifier = ">=0.5" },
-    { name = "endnote-utils", marker = "extra == 'import'", specifier = ">=1.0" },
-    { name = "faiss-cpu", marker = "extra == 'embed'", specifier = ">=1.7" },
-    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.0" },
-    { name = "modelscope", marker = "extra == 'embed'", specifier = ">=1.10" },
-    { name = "numpy", marker = "extra == 'embed'", specifier = ">=1.24" },
-    { name = "pandas", marker = "extra == 'topics'", specifier = ">=2.0" },
-    { name = "pyyaml", specifier = ">=6.0" },
-    { name = "pyzotero", marker = "extra == 'import'", specifier = ">=1.5" },
-    { name = "requests", specifier = ">=2.28" },
-    { name = "linkora", extras = ["embed"], marker = "extra == 'full'" },
-    { name = "linkora", extras = ["embed"], marker = "extra == 'topics'" },
-    { name = "linkora", extras = ["import"], marker = "extra == 'full'" },
-    { name = "linkora", extras = ["topics"], marker = "extra == 'full'" },
-    { name = "sentence-transformers", marker = "extra == 'embed'", specifier = ">=3.0" },
-    { name = "tenacity", specifier = ">=9.1.4" },
-]
-provides-extras = ["embed", "topics", "import", "mcp", "full"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=7.0" },
-    { name = "ruff", specifier = ">=0.15.5" },
-    { name = "ty", specifier = ">=0.0.23" },
 ]
 
 [[package]]

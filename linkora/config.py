@@ -319,32 +319,28 @@ class Config:
 
     @property
     def workspace_dir(self) -> Path:
-        return (self.root / "workspace" / self.workspace.name).resolve()
+        return self.root / "workspace" / self.workspace.name
 
     @property
     def papers_dir(self) -> Path:
-        return (self.workspace_dir / self.sources.local.papers_dir).resolve()
-
-    @property
-    def extra_paths(self) -> list[Path]:
-        """Additional paper paths from local source."""
-        return [self.root / p for p in self.sources.local.paths if p]
+        # Papers directory is a fixed subdirectory of the workspace, not from sources config
+        return self.workspace_dir / "papers"
 
     @property
     def index_db(self) -> Path:
-        return (self.workspace_dir / "index.db").resolve()
+        return self.workspace_dir / "index.db"
 
     @property
     def vectors_file(self) -> Path:
-        return (self.workspace_dir / "vectors.faiss").resolve()
+        return self.workspace_dir / "vectors.faiss"
 
     @property
     def log_file(self) -> Path:
-        return (self._root / self.log.file).resolve()
+        return self._root / self.log.file
 
     @property
     def metrics_db_path(self) -> Path:
-        return (self._root / self.log.metrics_db).resolve()
+        return self._root / self.log.metrics_db
 
     # API key resolution
     def resolve_llm_api_key(self) -> str:

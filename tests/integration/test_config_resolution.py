@@ -23,19 +23,51 @@ from linkora.config import (
 
 def make_test_config(**overrides) -> Config:
     """Create a Config object with default values for testing."""
-    defaults = {
-        "workspace": WorkspaceConfig(name="default"),
-        "workspace_store": {"default": WorkspaceConfig(name="default")},
-        "default_workspace": "default",
-        "sources": SourcesConfig(),
-        "index": IndexConfig(),
-        "llm": LLMConfig(),
-        "ingest": IngestConfig(),
-        "topics": TopicsConfig(),
-        "log": LogConfig(),
-    }
-    defaults.update(overrides)
-    return Config(**defaults)
+    workspace = WorkspaceConfig(name="default")
+    workspace_store = {"default": WorkspaceConfig(name="default")}
+    default_workspace = "default"
+    sources = SourcesConfig()
+    index = IndexConfig()
+    llm = LLMConfig()
+    ingest = IngestConfig()
+    topics = TopicsConfig()
+    log = LogConfig()
+    root = Path.cwd()
+
+    # Apply overrides
+    if "workspace" in overrides:
+        workspace = overrides["workspace"]
+    if "workspace_store" in overrides:
+        workspace_store = overrides["workspace_store"]
+    if "default_workspace" in overrides:
+        default_workspace = overrides["default_workspace"]
+    if "sources" in overrides:
+        sources = overrides["sources"]
+    if "index" in overrides:
+        index = overrides["index"]
+    if "llm" in overrides:
+        llm = overrides["llm"]
+    if "ingest" in overrides:
+        ingest = overrides["ingest"]
+    if "topics" in overrides:
+        topics = overrides["topics"]
+    if "log" in overrides:
+        log = overrides["log"]
+    if "_root" in overrides:
+        root = overrides["_root"]
+
+    return Config(
+        workspace=workspace,
+        workspace_store=workspace_store,
+        default_workspace=default_workspace,
+        sources=sources,
+        index=index,
+        llm=llm,
+        ingest=ingest,
+        topics=topics,
+        log=log,
+        _root=root,
+    )
 
 
 class TestConfigResolution:

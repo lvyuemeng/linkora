@@ -109,9 +109,7 @@ class TestRuleTitleMatch:
             meta = {"title": "Test Title"}
             import json
 
-            (paper_d / "meta.json").write_text(
-                json.dumps(meta), encoding="utf-8"
-            )
+            (paper_d / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
 
             # Create paper.md with matching H1
             (paper_d / "paper.md").write_text(
@@ -131,9 +129,7 @@ class TestRuleTitleMatch:
             meta = {"title": "Test Title"}
             import json
 
-            (paper_d / "meta.json").write_text(
-                json.dumps(meta), encoding="utf-8"
-            )
+            (paper_d / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
 
             # Create paper.md with different H1
             (paper_d / "paper.md").write_text(

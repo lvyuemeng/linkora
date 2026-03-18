@@ -675,8 +675,7 @@ class TopicTrainer:
             umap_model=umap_model,
             hdbscan_model=hdbscan_model,
             vectorizer_model=vectorizer_model,
-            representation_model=representation_model,  # type: ignore[arg-type]
-            nr_topics=self._config.nr_topics,
+            representation_model=representation_model,  # type: ignore[invalid-argument-type]
             top_n_words=top_n_words,
             verbose=True,
         )
@@ -694,7 +693,7 @@ class TopicTrainer:
                 docs,
                 topics=topics,
                 vectorizer_model=vectorizer_model,
-                representation_model=representation_model,  # type: ignore[arg-type]
+                representation_model=representation_model,  # type: ignore[invalid-argument-type]
             )
             n_outliers_after = sum(1 for t in topics if t == -1)
             _log.info(
