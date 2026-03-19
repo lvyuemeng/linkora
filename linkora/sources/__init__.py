@@ -1,15 +1,21 @@
-"""Data source adapters (local files, Paperlib, etc.)
+"""Data source adapters (local files, remote APIs).
 
-Refactored to use PaperSource Protocol with unified interface.
-
-Note: All source classes are lazy-imported to support optional dependencies.
+Redesigned to use PaperSource Protocol with unified interface.
+No backward compatibility - fresh Protocol design.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from linkora.sources.protocol import PaperSource, SourceError
+from linkora.sources.protocol import (
+    PaperCandidate,
+    PaperQuery,
+    PaperSource,
+    SourceDispatcher,
+    SourceError,
+    matches_query,
+)
 
 if TYPE_CHECKING:
     from linkora.sources.local import LocalSource
@@ -18,8 +24,14 @@ if TYPE_CHECKING:
     from linkora.sources.openalex import OpenAlexSource
 
 __all__ = [
+    # Protocol and types
     "PaperSource",
+    "PaperQuery",
+    "PaperCandidate",
+    "SourceDispatcher",
     "SourceError",
+    "matches_query",
+    # Source classes
     "LocalSource",
     "EndnoteSource",
     "ZoteroSource",

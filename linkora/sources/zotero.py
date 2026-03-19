@@ -1,6 +1,7 @@
 """sources/zotero.py — Zotero Web API / Local SQLite import.
 
-Refactored to use ZoteroSource class with PaperSource Protocol.
+Redesigned with separated contexts - local (SQLite) and remote (API).
+Implements PaperSource Protocol with unified search() + fetch_by_id() API.
 """
 
 from __future__ import annotations
@@ -11,8 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator
 
-from linkora.extract import _extract_lastname
 from linkora.log import get_logger
+from linkora.sources.protocol import PaperCandidate, PaperQuery, matches_query
 
 if TYPE_CHECKING:
     from linkora.http import HTTPClient
@@ -75,11 +76,11 @@ def _creators_to_authors(creators: list[dict]) -> list[str]:
     return authors
 
 
-def _item_to_dict(item_data: dict, source_label: str) -> dict:
-    """Convert Zotero item to standardized dict."""
+def _item_to_candidate(item_data: dict, source_label: str) -> PaperCandidate:
+    """Convert Zotero item to PaperCandidate."""
     authors = _creators_to_authors(item_data.get("creators", []))
-    first_author = authors[0] if authors else ""
-    first_author_lastname = _extract_lastname(first_author) if first_author else ""
+    doi = _clean_doi(item_data.get("DOI", ""))
+    paper_id = doi or item_data.get("title", "")
 
     journal = (
         item_data.get("publicationTitle")
@@ -91,25 +92,20 @@ def _item_to_dict(item_data: dict, source_label: str) -> dict:
     item_type = item_data.get("itemType", "")
     paper_type = ITEM_TYPE_MAP.get(item_type, item_type)
 
-    return {
-        "id": _clean_doi(item_data.get("DOI", "")) or item_data.get("title", ""),
-        "title": item_data.get("title", ""),
-        "authors": authors,
-        "first_author": first_author,
-        "first_author_lastname": first_author_lastname,
-        "year": _parse_zotero_date(item_data.get("date", "")),
-        "doi": _clean_doi(item_data.get("DOI", "")),
-        "journal": journal,
-        "abstract": item_data.get("abstractNote", ""),
-        "paper_type": paper_type,
-        "volume": item_data.get("volume", "") or "",
-        "issue": item_data.get("issue", "") or "",
-        "pages": item_data.get("pages", "") or "",
-        "publisher": item_data.get("publisher", "") or "",
-        "issn": item_data.get("ISSN", "") or "",
-        "source_file": source_label,
-        "extraction_method": "zotero",
-    }
+    return PaperCandidate(
+        id=paper_id,
+        doi=doi,
+        title=item_data.get("title", ""),
+        authors=authors,
+        year=_parse_zotero_date(item_data.get("date", "")),
+        journal=journal or None,
+        abstract=item_data.get("abstractNote") or None,
+        cited_by_count=0,
+        paper_type=paper_type,
+        pdf_url=None,
+        source="zotero",
+        source_id=item_data.get("key"),
+    )
 
 
 # ============================================================================
@@ -119,88 +115,190 @@ def _item_to_dict(item_data: dict, source_label: str) -> dict:
 
 @dataclass(frozen=True)
 class ZoteroSource:
-    """Import from Zotero API or local SQLite as paper source.
+    """Zotero source with separated contexts.
 
-    Implements PaperSource Protocol for unified access to Zotero data.
+    Two operating modes:
+    - Local: SQLite database (file-based, offline)
+    - Remote: Zotero Web API (network-based, requires library_id/api_key)
 
-    Example:
+    Usage:
+        # Local mode (SQLite)
+        source = ZoteroSource(db_path=Path("zotero.sqlite"))
+        for paper in source.search(query):
+            ...
+
+        # Remote mode (API)
         from linkora.http import RequestsClient
         client = RequestsClient()
-        source = ZoteroSource(http_client=client, library_id="123456", api_key="xxx")
-        for paper in source.fetch():
-            print(paper["title"])
+        source = ZoteroSource(
+            http_client=client,
+            library_id="123456",
+            api_key="xxx"
+        )
+        for paper in source.search(query):
+            ...
     """
 
+    # === Local Context (SQLite mode) ===
+    db_path: Path | None = None
+
+    # === Remote Context (API mode) ===
     library_id: str = ""
     api_key: str = ""
     library_type: str = "user"
+
+    # === Shared ===
     http_client: HTTPClient | None = None
+
+    # === Context Detection ===
+    @property
+    def _is_local_mode(self) -> bool:
+        """Check if using local SQLite mode."""
+        return self.db_path is not None and self.db_path.exists()
+
+    @property
+    def _is_remote_mode(self) -> bool:
+        """Check if using remote API mode."""
+        return bool(self.library_id and self.api_key)
 
     @property
     def name(self) -> str:
         return "zotero"
 
-    def fetch(
-        self,
-        db_path: Path | None = None,
-        collection_key: str | None = None,
-        item_types: list[str] | None = None,
-        **kwargs,
-    ) -> Iterator[dict]:
-        """Fetch papers from Zotero.
+    # === PaperSource Protocol ===
 
-        If db_path is provided, use local SQLite mode.
-        Otherwise, use API mode if library_id and api_key are set.
+    def search(self, query: PaperQuery) -> Iterator[PaperCandidate]:
+        """Search papers matching query.
+
+        Delegates to appropriate context based on configuration.
+
+        Args:
+            query: PaperQuery with search criteria
+
+        Yields:
+            PaperCandidate instances matching the query
         """
-        if db_path and db_path.exists():
-            yield from self._fetch_local(db_path, collection_key, item_types)
+        if not self._is_local_mode and not self._is_remote_mode:
+            _log.warning("No active Zotero context (local or remote)")
             return
 
-        if self.library_id and self.api_key:
-            yield from self._fetch_api(collection_key, item_types)
+        if self._is_local_mode:
+            yield from self._search_local(query)
+        elif self._is_remote_mode:
+            yield from self._search_remote(query)
+
+    def fetch_by_id(self, paper_id: str) -> PaperCandidate | None:
+        """Fetch paper by DOI or Zotero item key.
+
+        Delegates to appropriate context based on configuration.
+
+        Args:
+            paper_id: DOI (preferred) or Zotero item key
+
+        Returns:
+            PaperCandidate if found, None otherwise
+        """
+        if not self._is_local_mode and not self._is_remote_mode:
+            _log.warning("No active Zotero context (local or remote)")
+            return None
+
+        if self._is_local_mode:
+            return self._fetch_local_by_id(paper_id)
+        elif self._is_remote_mode:
+            return self._fetch_remote_by_id(paper_id)
+        return None
+
+    # === Local Context Implementation ===
+
+    def _search_local(self, query: PaperQuery) -> Iterator[PaperCandidate]:
+        """Search papers from local SQLite database."""
+        if not self.db_path:
             return
 
-        _log.warning("No db_path or library_id/api_key provided")
-
-    def _fetch_local(
-        self,
-        db_path: Path,
-        collection_key: str | None = None,
-        item_types: list[str] | None = None,
-    ) -> Iterator[dict]:
-        """Fetch from local SQLite database."""
-        conn = sqlite3.connect(f"file:{db_path}?immutable=1", uri=True)
+        conn = sqlite3.connect(f"file:{self.db_path}?immutable=1", uri=True)
         conn.row_factory = sqlite3.Row
 
         try:
-            # Get collection filter
-            item_id_filter = self._get_collection_filter(conn, collection_key)
-
-            # Get items
-            items = self._query_items(conn, item_types, item_id_filter)
+            # Get all items
+            items = self._query_items(conn, None, None)
 
             for item_id, item_type in items:
                 item_data = self._fetch_item_data(conn, item_id, item_type)
-                yield _item_to_dict(item_data, "zotero.sqlite")
+                candidate = _item_to_candidate(item_data, "zotero.sqlite")
+
+                # Filter by query
+                if matches_query(candidate, query):
+                    yield candidate
 
         finally:
             conn.close()
 
-    def _get_collection_filter(
-        self,
-        conn: sqlite3.Connection,
-        collection_key: str | None,
-    ) -> set[int] | None:
-        """Get item IDs for a collection."""
-        if not collection_key:
+    def _fetch_local_by_id(self, paper_id: str) -> PaperCandidate | None:
+        """Fetch paper by ID from local SQLite database."""
+        if not self.db_path:
             return None
+
+        conn = sqlite3.connect(f"file:{self.db_path}?immutable=1", uri=True)
+        conn.row_factory = sqlite3.Row
+
+        try:
+            # Try to find by DOI
+            candidate = self._fetch_by_doi(conn, paper_id)
+            if candidate:
+                return candidate
+
+            # Try by title
+            return self._fetch_by_title(conn, paper_id)
+
+        finally:
+            conn.close()
+
+    def _fetch_by_doi(
+        self, conn: sqlite3.Connection, paper_id: str
+    ) -> PaperCandidate | None:
+        """Fetch paper by DOI from local database."""
+        # Single optimized query: JOIN items, itemTypes with DOI filter
+        row = conn.execute(
+            """
+            SELECT i.itemID, it.typeName
+            FROM items i
+            JOIN itemTypes it ON i.itemTypeID = it.itemTypeID
+            JOIN itemData id_doi ON i.itemID = id_doi.itemID
+            JOIN fields f_doi ON id_doi.fieldID = f_doi.fieldID
+            JOIN itemDataValues idv_doi ON id_doi.valueID = idv_doi.valueID
+            WHERE f_doi.fieldName = 'DOI' AND idv_doi.value LIKE ?
+            """,
+            (f"%{paper_id}%",),
+        ).fetchone()
+
+        if not row:
+            return None
+
+        item_id, item_type = row
+        item_data = self._fetch_item_data(conn, item_id, item_type)
+        return _item_to_candidate(item_data, "zotero.sqlite")
+
+    def _fetch_by_title(
+        self, conn: sqlite3.Connection, paper_id: str
+    ) -> PaperCandidate | None:
+        """Fetch paper by title from local database."""
         rows = conn.execute(
-            "SELECT itemID FROM collectionItems ci "
-            "JOIN collections c ON ci.collectionID = c.collectionID "
-            "WHERE c.key = ?",
-            (collection_key,),
+            "SELECT i.itemID, it.typeName "
+            "FROM items i "
+            "JOIN itemTypes it ON i.itemTypeID = it.itemTypeID "
+            "JOIN itemData id ON i.itemID = id.itemID "
+            "JOIN fields f ON id.fieldID = f.fieldID "
+            "JOIN itemDataValues idv ON id.valueID = idv.valueID "
+            "WHERE f.fieldName = 'title' AND idv.value LIKE ?",
+            (f"%{paper_id}%",),
         ).fetchall()
-        return {r["itemID"] for r in rows}
+
+        if not rows:
+            return None
+
+        item_id, item_type = rows[0]
+        item_data = self._fetch_item_data(conn, item_id, item_type)
+        return _item_to_candidate(item_data, "zotero.sqlite")
 
     def _query_items(
         self,
@@ -269,37 +367,72 @@ class ZoteroSource:
         ]
         return item_data
 
-    def _fetch_api(
-        self,
-        collection_key: str | None = None,
-        item_types: list[str] | None = None,
-    ) -> Iterator[dict]:
-        """Fetch from Zotero Web API."""
+    # === Remote Context Implementation ===
+
+    def _search_remote(self, query: PaperQuery) -> Iterator[PaperCandidate]:
+        """Search papers from Zotero Web API."""
         from pyzotero import zotero as pyzotero
+
+        if not self.http_client:
+            _log.warning("http_client required for remote mode")
+            return
 
         zot = pyzotero.Zotero(self.library_id, self.library_type, self.api_key)
 
+        # Build query - limited search capabilities
         query_kwargs: dict = {}
-        if item_types:
-            query_kwargs["itemType"] = " || ".join(item_types)
 
-        if collection_key:
-            items = zot.everything(zot.collection_items(collection_key, **query_kwargs))
-        else:
+        if query.title:
+            # Zotero API doesn't support full-text search, use itemType filter only
+            pass
+
+        try:
             items = zot.everything(zot.items(**query_kwargs))
 
-        # Filter out attachments and notes
-        items = [
-            it
-            for it in items
-            if it.get("data", {}).get("itemType")
-            not in ("attachment", "note", "linkAttachment")
-        ]
+            # Filter out attachments and notes
+            items = [
+                it
+                for it in items
+                if it.get("data", {}).get("itemType")
+                not in ("attachment", "note", "linkAttachment")
+            ]
 
-        for item in items:
-            data = item.get("data", {})
-            yield _item_to_dict(data, "zotero-api")
+            for item in items:
+                data = item.get("data", {})
+                candidate = _item_to_candidate(data, "zotero-api")
 
-    def count(self, db_path: Path | None = None, **kwargs) -> int:
-        """Count papers in Zotero source."""
-        return sum(1 for _ in self.fetch(db_path=db_path))
+                if matches_query(candidate, query):
+                    yield candidate
+
+        except Exception as e:
+            _log.error("Zotero API error: %s", e)
+
+    def _fetch_remote_by_id(self, paper_id: str) -> PaperCandidate | None:
+        """Fetch paper by DOI or key from Zotero Web API."""
+        from pyzotero import zotero as pyzotero
+
+        if not self.http_client:
+            _log.warning("http_client required for remote mode")
+            return None
+
+        zot = pyzotero.Zotero(self.library_id, self.library_type, self.api_key)
+
+        try:
+            # Check if it's a DOI
+            if paper_id.startswith("10."):
+                # Search by DOI
+                items = zot.everything(zot.items(filter={"DOI": paper_id}))
+                if items:
+                    data = items[0].get("data", {})
+                    return _item_to_candidate(data, "zotero-api")
+            else:
+                # Assume it's a Zotero key
+                item = zot.item(paper_id)
+                if item:
+                    data = item.get("data", {})
+                    return _item_to_candidate(data, "zotero-api")
+
+        except Exception as e:
+            _log.debug("Failed to fetch Zotero item: %s", e)
+
+        return None

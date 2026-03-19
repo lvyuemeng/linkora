@@ -151,6 +151,20 @@ class PaperStore:
             self._meta_cache.pop(paper_d, None)
             self._md_cache.pop(paper_d, None)
 
+    # --- Path Helpers ---
+
+    def paper_dir(self, dir_name: str) -> Path:
+        """Get paper directory path."""
+        return self.papers_dir / dir_name
+
+    def meta_path(self, dir_name: str) -> Path:
+        """Get meta.json path."""
+        return self.papers_dir / dir_name / "meta.json"
+
+    def md_path(self, dir_name: str) -> Path:
+        """Get paper.md path."""
+        return self.papers_dir / dir_name / "paper.md"
+
     # --- Audit Pipeline ---
 
     def audit(
@@ -249,26 +263,12 @@ def parse_year_range(year: str) -> YearRange:
     return YearRange(y, y)
 
 
-# =============================================================================
-# Backward-Compatible Functions (for legacy imports)
-# =============================================================================
-
-
-def iter_paper_dirs(papers_dir: Path) -> Iterator[Path]:
-    """Iterate paper directories (backward compatibility)."""
-    store = PaperStore(papers_dir)
-    return store.iter_papers()
-
-
-def read_meta(paper_d: Path) -> dict:
-    """Read meta.json (backward compatibility)."""
-    papers_dir = paper_d.parent.parent
-    store = PaperStore(papers_dir)
-    return store.read_meta(paper_d)
-
-
-def write_meta(paper_d: Path, data: dict) -> None:
-    """Write meta.json (backward compatibility)."""
-    papers_dir = paper_d.parent.parent
-    store = PaperStore(papers_dir)
-    return store.write_meta(paper_d, data)
+__all__ = [
+    "PaperMetadata",
+    "PaperStore",
+    "Issue",
+    "YearRange",
+    "generate_uuid",
+    "best_citation",
+    "parse_year_range",
+]

@@ -55,6 +55,10 @@ class HTTPClient(Protocol):
         """Make PUT request."""
         ...
 
+    def close(self) -> None:
+        """Close client and release resources."""
+        ...
+
 
 @dataclass(frozen=True)
 class HTTPResponse:
@@ -160,3 +164,8 @@ class RequestsClient:
     ) -> HTTPResponse:
         """Make PUT request using requests library."""
         return self._request("PUT", url, data=data, headers=headers, timeout=timeout)
+
+    def close(self) -> None:
+        """Close client and release resources."""
+        # Requests session is created per-request, no persistent connection to close
+        pass

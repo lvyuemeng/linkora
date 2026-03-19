@@ -25,16 +25,30 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
+from enum import Enum, auto
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Callable
 
-from linkora.llm import LLMRunner, PromptTemplate
+from linkora.config import Config
+from linkora.llm import LLMRunner, LLMRequest, PromptTemplate
 from linkora.log import get_logger
 
-if TYPE_CHECKING:
-    from linkora.config import Config
-
 _log = get_logger(__name__)
+
+
+# ============================================================================
+#  Strategy Keys (Enum for type safety)
+# ============================================================================
+
+
+class StrategyKey(Enum):
+    """Strategy keys for extraction pipeline."""
+
+    TOC = auto()
+    CONCLUSION_SELECT = auto()
+    CONCLUSION_FALLBACK = auto()
+    CONCLUSION_VALIDATE = auto()
+
 
 # ============================================================================
 # Prompt definitions
@@ -107,40 +121,52 @@ Return JSON only: {{"conclusion": "<cleaned text or null>", "reason": "<one sent
 )
 
 
+# ============================================================================
+#  Prompt and Strategy Dictionaries (Dictionary Dispatch)
+# ============================================================================
+
+
+# Prompt templates by strategy key
+_PROMPTS: dict[StrategyKey, PromptTemplate] = {
+    StrategyKey.TOC: _TOC_PROMPT,
+    StrategyKey.CONCLUSION_SELECT: _CONCLUSION_SELECT_PROMPT,
+    StrategyKey.CONCLUSION_FALLBACK: _CONCLUSION_FALLBACK_PROMPT,
+    StrategyKey.CONCLUSION_VALIDATE: _CONCLUSION_VALIDATE_PROMPT,
+}
+
+
+# String to enum mapping
+_STRATEGY_MAP: dict[str, StrategyKey] = {
+    "toc": StrategyKey.TOC,
+    "conclusion_select": StrategyKey.CONCLUSION_SELECT,
+    "conclusion_fallback": StrategyKey.CONCLUSION_FALLBACK,
+    "conclusion_validate": StrategyKey.CONCLUSION_VALIDATE,
+}
+
+
 class StrategyRegistry:
-    """Registry that resolves entire pipeline by strategy key."""
+    """Registry that resolves entire pipeline by strategy key.
+
+    Uses dictionary dispatch instead of if/elif chains per AGENT.md guidelines.
+    """
 
     @staticmethod
     def get_prompt(key: str) -> PromptTemplate:
-        """Get prompt template by key."""
-        prompts = {
-            "toc": _TOC_PROMPT,
-            "conclusion_select": _CONCLUSION_SELECT_PROMPT,
-            "conclusion_fallback": _CONCLUSION_FALLBACK_PROMPT,
-            "conclusion_validate": _CONCLUSION_VALIDATE_PROMPT,
-        }
-        if key not in prompts:
+        """Get prompt template by key (dict dispatch)."""
+        strategy = _STRATEGY_MAP.get(key)
+        if strategy is None:
             raise ValueError(f"Unknown strategy: {key}")
-        return prompts[key]
+        return _PROMPTS[strategy]
 
     @staticmethod
     def prepare(key: str, lines: list[str], meta: dict) -> str:
-        """Prepare prompt data by key."""
-        if key == "toc":
-            headers = ContentExtractor.extract_headers(lines)
-            return "\n".join(
-                f"Line {h['line']}: {'#' * h['level']} {h['text']}" for h in headers
-            )
-        elif key == "conclusion_select":
-            headers = ContentExtractor.extract_headers(lines)
-            return "\n".join(
-                f"Line {h['line']}: {'#' * h['level']} {h['text']}" for h in headers
-            )
-        elif key == "conclusion_fallback":
-            return ContentExtractor.sample_lines(lines)
-        elif key == "conclusion_validate":
-            return meta.get("_text_to_validate", "")
-        return ""
+        """Prepare prompt data by key (dict dispatch)."""
+        strategy = _STRATEGY_MAP.get(key)
+        if strategy is None:
+            return ""
+
+        # Dictionary dispatch for prepare
+        return _PREPARE_FNS[strategy](lines, meta)
 
     @staticmethod
     def parse(key: str, raw: str) -> dict:
@@ -158,47 +184,94 @@ class StrategyRegistry:
             except json.JSONDecodeError:
                 result = {}
 
-        if key == "toc":
-            return {"toc": result.get("toc", [])}
-        elif key == "conclusion_select":
+        # All non-toc strategies return result as-is
+        if key != "toc":
             return result
-        elif key == "conclusion_fallback":
-            return result
-        elif key == "conclusion_validate":
-            return result
-        return {}
+        return {"toc": result.get("toc", [])}
 
     @staticmethod
     def process(key: str, parsed: dict, lines: list[str]) -> str | None:
-        """Process parsed result by key."""
-        if key == "toc":
-            toc = parsed.get("toc", [])
-            if not toc:
-                return None
-            return json.dumps(toc)
+        """Process parsed result by key (dict dispatch)."""
+        strategy = _STRATEGY_MAP.get(key)
+        if strategy is None:
+            return None
+        return _PROCESS_FNS[strategy](parsed, lines)
 
-        elif key == "conclusion_select":
-            start_line = parsed.get("line")
-            if not start_line:
-                return None
-            headers = ContentExtractor.extract_headers(lines)
-            end_line = ContentExtractor.find_next_section_line(headers, start_line)
-            return ContentExtractor.slice_lines(lines, start_line, end_line)
 
-        elif key == "conclusion_fallback":
-            start_line = parsed.get("start_line")
-            end_line = parsed.get("end_line")
-            if not start_line:
-                return None
-            return ContentExtractor.slice_lines(lines, start_line, end_line)
+# ============================================================================
+#  Helper Functions for Dictionary Dispatch
+# ============================================================================
 
-        elif key == "conclusion_validate":
-            conclusion = parsed.get("conclusion")
-            if not conclusion or len(conclusion.strip()) < 50:
-                return None
-            return conclusion.strip()
 
+def _prepare_headers(lines: list[str], meta: dict) -> str:
+    """Prepare headers string from lines."""
+    headers = ContentExtractor.extract_headers(lines)
+    return "\n".join(
+        f"Line {h['line']}: {'#' * h['level']} {h['text']}" for h in headers
+    )
+
+
+def _prepare_sample(lines: list[str], meta: dict) -> str:
+    """Prepare sample lines for fallback."""
+    return ContentExtractor.sample_lines(lines)
+
+
+def _prepare_validate(lines: list[str], meta: dict) -> str:
+    """Prepare text for validation."""
+    return meta.get("_text_to_validate", "")
+
+
+# Prepare dispatch dictionary
+_PREPARE_FNS: dict[StrategyKey, Callable[[list[str], dict], str]] = {
+    StrategyKey.TOC: _prepare_headers,
+    StrategyKey.CONCLUSION_SELECT: _prepare_headers,
+    StrategyKey.CONCLUSION_FALLBACK: _prepare_sample,
+    StrategyKey.CONCLUSION_VALIDATE: _prepare_validate,
+}
+
+
+def _process_toc(parsed: dict, lines: list[str]) -> str | None:
+    """Process TOC result."""
+    toc = parsed.get("toc", [])
+    if not toc:
         return None
+    return json.dumps(toc)
+
+
+def _process_conclusion_select(parsed: dict, lines: list[str]) -> str | None:
+    """Process conclusion selection result."""
+    start_line = parsed.get("line")
+    if not start_line:
+        return None
+    headers = ContentExtractor.extract_headers(lines)
+    end_line = ContentExtractor.find_next_section_line(headers, start_line)
+    return ContentExtractor.slice_lines(lines, start_line, end_line)
+
+
+def _process_conclusion_fallback(parsed: dict, lines: list[str]) -> str | None:
+    """Process conclusion fallback result."""
+    start_line = parsed.get("start_line")
+    end_line = parsed.get("end_line")
+    if not start_line:
+        return None
+    return ContentExtractor.slice_lines(lines, start_line, end_line)
+
+
+def _process_conclusion_validate(parsed: dict, lines: list[str]) -> str | None:
+    """Process conclusion validation result."""
+    conclusion = parsed.get("conclusion")
+    if not conclusion or len(conclusion.strip()) < 50:
+        return None
+    return conclusion.strip()
+
+
+# Process dispatch dictionary
+_PROCESS_FNS: dict[StrategyKey, Callable[[dict, list[str]], str | None]] = {
+    StrategyKey.TOC: _process_toc,
+    StrategyKey.CONCLUSION_SELECT: _process_conclusion_select,
+    StrategyKey.CONCLUSION_FALLBACK: _process_conclusion_fallback,
+    StrategyKey.CONCLUSION_VALIDATE: _process_conclusion_validate,
+}
 
 
 # ============================================================================
@@ -296,30 +369,32 @@ class ContentExtractor:
 
 
 class PaperEnricher:
-    """Orchestrates TOC and conclusion extraction."""
+    """Orchestrates TOC and conclusion extraction.
 
-    def __init__(self, papers_dir: Path) -> None:
-        """Initialize with papers directory."""
+    Data pipe flow:
+        1. Initialize with config and runner (dependencies)
+        2. Call enrich_toc/enrich_conclusion with paper_id
+    """
+
+    def __init__(
+        self,
+        papers_dir: Path,
+        config: Config,
+        runner: LLMRunner,
+    ) -> None:
+        """Initialize with papers directory, config, and runner."""
         from linkora.papers import PaperStore
 
         self._store = PaperStore(papers_dir)
         self._papers_dir = papers_dir
-
-    def _get_runner(self, config: Config):
-        """Get LLM runner for config."""
-        from linkora.http import RequestsClient
-        from linkora.llm import LLMRunner as LLMRunnerImpl
-
-        api_key = config.llm.resolve_api_key()
-        http_client = RequestsClient()
-        return LLMRunnerImpl(config.llm, http_client, api_key)
+        self._config = config
+        self._runner = runner
 
     def _execute(
         self,
         strategy_key: str,
         lines: list[str],
         meta: dict,
-        runner,
         *,
         timeout: int | None = None,
     ) -> tuple[str | None, str]:
@@ -333,32 +408,51 @@ class PaperEnricher:
             **{"headers": prompt_data, "sample": prompt_data, "text": prompt_data}
         )
 
-        # Execute with retry
-        raw, reason = runner.execute(prompt, max_retries=2, timeout=timeout)
+        # Create LLMRequest with injected config
+        request = LLMRequest(
+            prompt=prompt,
+            config=self._config.llm,
+            system=prompt_template.system,
+            json_mode=True,
+            timeout=timeout,
+            max_retries=2,
+            purpose=f"loader.{strategy_key}",
+        )
+
+        # Execute with injected runner
+        result = self._runner.execute(request)
+        raw = result.content if result else None
+
         if not raw:
-            return None, f"{strategy_key}-{reason}"
+            return None, f"{strategy_key}-no-response"
 
         # Parse
         parsed = StrategyRegistry.parse(strategy_key, raw)
 
         # Process
-        result = StrategyRegistry.process(strategy_key, parsed, lines)
-        if result:
-            return result, strategy_key
+        processed = StrategyRegistry.process(strategy_key, parsed, lines)
+        if processed:
+            return processed, strategy_key
 
         return None, f"{strategy_key}-process-failed"
 
     def enrich_toc(
         self,
         paper_id: str,
-        config: Config,
         *,
         force: bool = False,
     ) -> bool:
-        """Enrich TOC for a paper."""
-        from linkora.papers import paper_dir
+        """Enrich TOC for a paper.
 
-        paper_d = paper_dir(self._papers_dir, paper_id)
+        Args:
+            paper_id: Paper ID
+            force: Force re-extraction even if TOC exists
+
+        Returns:
+            True if TOC extracted successfully
+        """
+        # Use store's paper_dir method instead of standalone function
+        paper_d = self._store.paper_dir(paper_id)
         if not paper_d.exists():
             _log.error(f"Paper directory not found: {paper_d}")
             return False
@@ -379,9 +473,9 @@ class PaperEnricher:
             return False
 
         lines = md.splitlines()
-        runner = self._get_runner(config)
 
-        result, method = self._execute("toc", lines, meta, runner)
+        # Use injected runner via _execute
+        result, method = self._execute("toc", lines, meta)
         if not result:
             _log.error(f"TOC extraction failed: {method}")
             return False
@@ -406,14 +500,20 @@ class PaperEnricher:
     def enrich_conclusion(
         self,
         paper_id: str,
-        config: Config,
         *,
         force: bool = False,
     ) -> bool:
-        """Enrich conclusion for a paper."""
-        from linkora.papers import paper_dir
+        """Enrich conclusion for a paper.
 
-        paper_d = paper_dir(self._papers_dir, paper_id)
+        Args:
+            paper_id: Paper ID
+            force: Force re-extraction even if conclusion exists
+
+        Returns:
+            True if conclusion extracted successfully
+        """
+        # Use store's paper_dir method
+        paper_d = self._store.paper_dir(paper_id)
         if not paper_d.exists():
             _log.error(f"Paper directory not found: {paper_d}")
             return False
@@ -437,7 +537,6 @@ class PaperEnricher:
             return False
 
         lines = md.splitlines()
-        runner = self._get_runner(config)
 
         # Try strategies in order: TOC-based → select from headers → fallback
         extract_strategies = [
@@ -447,12 +546,12 @@ class PaperEnricher:
         ]
 
         for strategy_name, extract_fn in extract_strategies:
-            extracted, method = extract_fn(lines, meta, runner)
+            extracted, method = extract_fn(lines, meta)
             if not extracted:
                 continue
 
-            # Validate
-            validated, val_method = self._validate(extracted, runner)
+            # Validate using injected runner
+            validated, val_method = self._validate(extracted)
             if validated:
                 meta["l3_conclusion"] = validated
                 meta["l3_extraction_method"] = f"{method}+{val_method}"
@@ -472,7 +571,6 @@ class PaperEnricher:
         self,
         lines: list[str],
         meta: dict,
-        runner: LLMRunner,
     ) -> tuple[str | None, str]:
         """Extract conclusion from existing TOC."""
         toc = meta.get("toc")
@@ -500,7 +598,6 @@ class PaperEnricher:
         self,
         lines: list[str],
         meta: dict,
-        runner,
     ) -> tuple[str | None, str]:
         """Extract conclusion by selecting from headers."""
         headers = ContentExtractor.extract_headers(lines)
@@ -508,45 +605,24 @@ class PaperEnricher:
             return None, "no-headers"
 
         _log.debug("[Select] found %d headers", len(headers))
-        return self._execute("conclusion_select", lines, meta, runner)
+        return self._execute("conclusion_select", lines, meta)
 
     def _extract_fallback(
         self,
         lines: list[str],
         meta: dict,
-        runner,
     ) -> tuple[str | None, str]:
         """Extract conclusion using fallback (direct line numbers)."""
         _log.debug("[Fallback] switching to fallback")
-        return self._execute("conclusion_fallback", lines, meta, runner)
+        return self._execute("conclusion_fallback", lines, meta)
 
     def _validate(
         self,
         text: str,
-        runner,
     ) -> tuple[str | None, str]:
         """Validate and clean conclusion text."""
         if len(text.strip()) < 100:
             return None, "text-too-short"
 
         meta = {"_text_to_validate": text}
-        return self._execute("conclusion_validate", [], meta, runner, timeout=30)
-
-
-# ============================================================================
-# Update Callers: CLI, MCP Server, Pipeline
-# ============================================================================
-
-# Note: The following files need to be updated to use PaperEnricher:
-# - linkora/cli.py (cmd_enrich_toc, cmd_enrich_l3)
-# - linkora/mcp_server.py (enrich_toc, enrich_l3)
-# - linkora/ingest/pipeline.py
-#
-# Replace:
-#   from linkora.loader import enrich_toc, enrich_l3
-#   enrich_toc(json_path, md_path, config)
-#
-# With:
-#   from linkora.loader import PaperEnricher
-#   enricher = PaperEnricher(papers_dir)
-#   enricher.enrich_toc(paper_id, config)
+        return self._execute("conclusion_validate", [], meta, timeout=30)

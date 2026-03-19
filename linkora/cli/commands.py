@@ -19,6 +19,279 @@ IndexType = Literal["fts", "vector"]
 
 
 # ============================================================================
+#  Add Command Helpers (moved from ingest/__init__.py)
+# ============================================================================
+
+
+def _parse_year_arg(year_val: str | None) -> tuple[int | None, int | None]:
+    """Parse year argument into start/end tuple."""
+    if not year_val:
+        return None, None
+
+    year_str = str(year_val)
+    if "-" not in year_str:
+        year = int(year_str)
+        return year, year
+
+    parts = year_str.split("-", 1)
+    start = int(parts[0]) if parts[0] else None
+    end = int(parts[1]) if parts[1] else None
+    return start, end
+
+
+def _build_query(
+    doi_val: str,
+    issn_val: str,
+    author_val: str,
+    title_val: str,
+    year_start: int | None,
+    year_end: int | None,
+    freeform_query: str,
+):
+    """Build PaperQuery from parsed arguments."""
+    from linkora.sources.protocol import PaperQuery
+
+    has_structured = any([doi_val, issn_val, author_val, title_val, year_start])
+
+    if has_structured:
+        return PaperQuery(
+            doi=doi_val,
+            issn=issn_val,
+            author=author_val,
+            title=title_val,
+            year_start=year_start,
+            year_end=year_end,
+        )
+
+    if freeform_query:
+        return _parse_freeform_query(freeform_query)
+
+    return PaperQuery()
+
+
+def _parse_freeform_query(query_str: str):
+    """Parse free-form query string into PaperQuery."""
+    import re
+
+    from linkora.sources.protocol import PaperQuery
+
+    query_str = query_str.strip()
+
+    # DOI detection
+    if re.match(r"^10\.\d{4,}/", query_str):
+        return PaperQuery(doi=query_str)
+
+    # arXiv detection
+    if re.match(r"^\d{4}\.\d{4,5}$", query_str):
+        return PaperQuery(title=query_str)
+
+    # Default: title search
+    return PaperQuery(title=query_str)
+
+
+def cmd_add(args: argparse.Namespace, ctx: AppContext) -> None:
+    """Add papers from various sources."""
+    # Import core matching functions (local - not via ingest/__init__.py)
+    from linkora.ingest.matching import DefaultDispatcher, match_papers
+
+    # Extract query arguments with type hints (AGENT.md compliant)
+    doi_val: str = getattr(args, "doi", "") or ""
+    issn_val: str = getattr(args, "issn", "") or ""
+    author_val: str = getattr(args, "author", "") or ""
+    title_val: str = getattr(args, "title", "") or ""
+    freeform_query: str = getattr(args, "query", "") or ""
+
+    # Parse year and build query (use local helpers)
+    year_start, year_end = _parse_year_arg(getattr(args, "year", None))
+    query = _build_query(
+        doi_val, issn_val, author_val, title_val, year_start, year_end, freeform_query
+    )
+
+    if query.is_empty:
+        ui(
+            "Error: Query cannot be empty. Use --doi, --issn, --author, --title, or free-form query."
+        )
+        return
+
+    # Setup dispatcher with injected dependencies (context separation)
+    config = ctx.config
+    local_pdf_dir = config.resolve_local_source_dir()
+    http_client = ctx.http_client()
+
+    try:
+        dispatcher = DefaultDispatcher(
+            local_pdf_dir=local_pdf_dir, http_client=http_client
+        )
+
+        limit: int = getattr(args, "limit", 5) or 5
+        ui(f"Searching for papers: {query}")
+        ui(f"Using {len(dispatcher.select(query))} source(s)")
+
+        # Match papers
+        matched = match_papers(query=query, dispatcher=dispatcher, limit=limit)
+
+        if not matched:
+            ui("No papers found.")
+            return
+
+        ui(f"Found {len(matched)} papers:")
+        for i, paper in enumerate(matched, 1):
+            score = paper.get("_match_score", 0)
+            title = paper.get("title", "Untitled")[:60]
+            doi = paper.get("doi", "")
+            source = paper.get("_match_source", "unknown")
+            ui(f"  {i}. {title}...")
+            ui(f"     DOI: {doi} | Score: {score:.0f} | Source: {source}")
+
+        if getattr(args, "dry_run", False):
+            ui("(dry-run mode, not saving)")
+            return
+
+        # Process papers (placeholder for actual implementation)
+        ui(f"\nAdd command implementation pending - found {len(matched)} papers to add")
+    finally:
+        if http_client:
+            http_client.close()
+
+
+def cmd_enrich(args: argparse.Namespace, ctx: AppContext) -> None:
+    """Enrich papers with TOC and conclusions.
+
+    Uses PaperEnricher from loader.py with context injection.
+    """
+    paper_id = getattr(args, "paper", None)
+    extract_toc = getattr(args, "toc", False)
+    extract_conclusion = getattr(args, "conclusion", False)
+    limit = getattr(args, "limit", None)
+    force = getattr(args, "force", False)
+
+    # Default: extract both if neither specified
+    if not extract_toc and not extract_conclusion:
+        extract_toc = True
+        extract_conclusion = True
+
+    # Get enricher from context (lazy init)
+    enricher = ctx.paper_enricher()
+    store = ctx.paper_store()
+
+    # Get papers to process
+    if paper_id:
+        papers = [paper_id]
+    else:
+        papers = [p.name for p in store.iter_papers()]
+        if limit:
+            papers = papers[:limit]
+
+    if not papers:
+        ui("No papers found to enrich")
+        return
+
+    ui(
+        f"Enriching {len(papers)} paper(s) (toc={extract_toc}, conclusion={extract_conclusion}, force={force})"
+    )
+
+    success_count = 0
+    for pid in papers:
+        try:
+            toc_ok = False
+            conc_ok = False
+
+            if extract_toc:
+                toc_ok = enricher.enrich_toc(pid, force=force)
+
+            if extract_conclusion:
+                conc_ok = enricher.enrich_conclusion(pid, force=force)
+
+            if toc_ok or conc_ok:
+                success_count += 1
+                _log.debug("Enriched %s: toc=%s, conclusion=%s", pid, toc_ok, conc_ok)
+
+        except Exception as e:
+            _log.error("Failed to enrich %s: %s", pid, e)
+
+    ui(f"Enriched {success_count}/{len(papers)} papers successfully")
+
+
+def cmd_audit(args: argparse.Namespace, ctx: AppContext) -> None:
+    """Audit paper data quality."""
+    store = ctx.paper_store()
+    issues = store.audit()
+    if not issues:
+        ui("No issues found.")
+        return
+    if args.severity:
+        issues = [i for i in issues if i.severity == args.severity]
+    ui(f"Found {len(issues)} issues:\n")
+    for issue in issues:
+        prefix = {"error": "[ERROR]", "warning": "[WARNING]", "info": "[INFO]"}.get(
+            issue.severity, ""
+        )
+        ui(f"{prefix} {issue.rule}: {issue.message}")
+        ui(f"  Paper: {issue.paper_id}\n")
+
+    if args.fix:
+        ui(f"Auto-fix not yet implemented for {len(issues)} issues")
+
+
+# ============================================================================
+#  Unified Index Command
+# ============================================================================
+
+
+def cmd_index(args: argparse.Namespace, ctx: AppContext) -> None:
+    """Unified index command with --type flag.
+
+    Types:
+        fts     - Build FTS5 full-text index
+        vector  - Build vector index (requires faiss)
+    """
+    index_type: IndexType = args.type
+    rebuild = args.rebuild
+
+    papers_store_dir = ctx.config.papers_store_dir
+    if not papers_store_dir.exists():
+        _log.error("papers_store_dir does not exist: %s", papers_store_dir)
+        return
+
+    store = ctx.paper_store()
+
+    if index_type == "fts":
+        action = "Rebuilding" if rebuild else "Building"
+        ui(f"{action} FTS index: {papers_store_dir} -> {ctx.config.index_db}")
+        with ctx.search_index() as idx:
+            count = idx.rebuild(store) if rebuild else idx.update(store)
+        ui(f"Done, indexed {count} papers.")
+    elif index_type == "vector":
+        try:
+            with ctx.vector_index() as vidx:
+                action = "Rebuilding" if rebuild else "Building"
+                ui(f"{action} vectors: {papers_store_dir} -> {ctx.config.index_db}")
+                count = vidx.rebuild(store) if rebuild else vidx.update(store)
+            ui(f"Done, embedded {count} papers.")
+        except ImportError as e:
+            _log.error("Missing dependency for vector index: %s", e)
+
+
+# ============================================================================
+#  Top Cited Command
+# ============================================================================
+
+
+def cmd_top_cited(args: argparse.Namespace, ctx: AppContext) -> None:
+    """Get top-cited papers."""
+    top_k = args.top if args.top is not None else ctx.config.index.top_k
+    filters = {
+        "year": getattr(args, "year", None),
+        "journal": getattr(args, "journal", None),
+        "paper_type": getattr(args, "paper_type", None),
+    }
+
+    with ctx.search_index() as idx:
+        results = idx.top_cited(top_k=top_k, **filters)
+    print_results_list(results, f"Found {len(results)} papers (top-cited)")
+
+
+# ============================================================================
 #  Unified Search Command
 # ============================================================================
 
@@ -90,106 +363,8 @@ _SEARCH_HANDLERS: dict[SearchMode, Callable[[AppContext, str, int, dict], None]]
 
 
 # ============================================================================
-#  Top Cited Command
-# ============================================================================
-
-
-def cmd_top_cited(args: argparse.Namespace, ctx: AppContext) -> None:
-    """Get top-cited papers."""
-    top_k = args.top if args.top is not None else ctx.config.index.top_k
-    filters = {
-        "year": getattr(args, "year", None),
-        "journal": getattr(args, "journal", None),
-        "paper_type": getattr(args, "paper_type", None),
-    }
-
-    with ctx.search_index() as idx:
-        results = idx.top_cited(top_k=top_k, **filters)
-    print_results_list(results, f"Found {len(results)} papers (top-cited)")
-
-
-# ============================================================================
-#  Unified Index Command
-# ============================================================================
-
-
-def cmd_index(args: argparse.Namespace, ctx: AppContext) -> None:
-    """Unified index command with --type flag.
-
-    Types:
-        fts     - Build FTS5 full-text index
-        vector  - Build vector index (requires faiss)
-    """
-    index_type: IndexType = args.type
-    rebuild = args.rebuild
-
-    papers_dir = ctx.config.papers_dir
-    if not papers_dir.exists():
-        _log.error("papers_dir does not exist: %s", papers_dir)
-        return
-
-    store = ctx.paper_store()
-
-    if index_type == "fts":
-        action = "Rebuilding" if rebuild else "Building"
-        ui(f"{action} FTS index: {papers_dir} -> {ctx.config.index_db}")
-        with ctx.search_index() as idx:
-            count = idx.rebuild(store) if rebuild else idx.update(store)
-        ui(f"Done, indexed {count} papers.")
-    elif index_type == "vector":
-        try:
-            with ctx.vector_index() as vidx:
-                action = "Rebuilding" if rebuild else "Building"
-                ui(f"{action} vectors: {papers_dir} -> {ctx.config.index_db}")
-                count = vidx.rebuild(store) if rebuild else vidx.update(store)
-            ui(f"Done, embedded {count} papers.")
-        except ImportError as e:
-            _log.error("Missing dependency for vector index: %s", e)
-
-
-# ============================================================================
 #  System Commands
 # ============================================================================
-
-
-def cmd_audit(args: argparse.Namespace, ctx: AppContext) -> None:
-    """Audit paper data quality."""
-    store = ctx.paper_store()
-    issues = store.audit()
-    if not issues:
-        ui("No issues found.")
-        return
-    if args.severity:
-        issues = [i for i in issues if i.severity == args.severity]
-    ui(f"Found {len(issues)} issues:\n")
-    for issue in issues:
-        prefix = {"error": "[ERROR]", "warning": "[WARNING]", "info": "[INFO]"}.get(
-            issue.severity, ""
-        )
-        ui(f"{prefix} {issue.rule}: {issue.message}")
-        ui(f"  Paper: {issue.paper_id}\n")
-
-    if args.fix:
-        ui(f"Auto-fix not yet implemented for {len(issues)} issues")
-
-
-def cmd_doctor(args: argparse.Namespace, ctx: AppContext) -> None:
-    """Full health check (with network) or quick check (no network)."""
-    from linkora.setup import cmd_doctor as doctor_check
-
-    if args.light:
-        from linkora.setup import cmd_check
-
-        cmd_check(args)
-    else:
-        doctor_check(args)
-
-
-def cmd_init(args: argparse.Namespace, ctx: AppContext) -> None:
-    """Interactive setup wizard."""
-    from linkora.setup import cmd_init as init_wizard
-
-    init_wizard(args)
 
 
 def cmd_metrics(args: argparse.Namespace, ctx: AppContext) -> None:
@@ -256,6 +431,25 @@ def cmd_metrics(args: argparse.Namespace, ctx: AppContext) -> None:
                 ui(f"  model={model}")
 
 
+def cmd_doctor(args: argparse.Namespace, ctx: AppContext) -> None:
+    """Full health check (with network) or quick check (no network)."""
+    from linkora.setup import cmd_doctor as doctor_check
+
+    if args.light:
+        from linkora.setup import cmd_check
+
+        cmd_check(args)
+    else:
+        doctor_check(args)
+
+
+def cmd_init(args: argparse.Namespace, ctx: AppContext) -> None:
+    """Interactive setup wizard."""
+    from linkora.setup import cmd_init as init_wizard
+
+    init_wizard(args)
+
+
 # ============================================================================
 #  Command Registration
 # ============================================================================
@@ -306,6 +500,43 @@ def register_all(subparsers) -> None:
         help="Paper type filter: review / journal-article etc. (LIKE)",
     )
 
+    """Register 'add' command with argparse."""
+    p = subparsers.add_parser("add", help="Add papers from various sources")
+    p.set_defaults(func=cmd_add)
+
+    # Structured query arguments (recommended)
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--doi", help="DOI identifier (exact match)")
+    g.add_argument("--issn", help="Journal ISSN")
+    g.add_argument("--author", help="Author name")
+    g.add_argument("--title", help="Paper title")
+
+    # Year filter
+    p.add_argument("--year", help="Year or range (e.g., 2024, 2020-2024)")
+
+    # Free-form fallback (for backward compatibility)
+    p.add_argument("query", nargs="?", help="Free-form query (fallback)")
+
+    # Options
+    p.add_argument("--source", "-s", help="Primary source (local, openalex, auto)")
+    p.add_argument(
+        "--limit", "-n", type=int, default=5, help="Max papers to fetch (default: 5)"
+    )
+    p.add_argument("--cache", "-c", action="store_true", help="Cache as symlinks")
+    p.add_argument("--dry-run", action="store_true", help="Preview only")
+
+    """Register 'enrich' command with argparse."""
+    p = subparsers.add_parser(
+        "enrich",
+        help="Enrich papers with TOC and conclusions",
+    )
+    p.set_defaults(func=cmd_enrich)
+    p.add_argument("--paper", type=str, help="Specific paper ID (directory name)")
+    p.add_argument("--toc", action="store_true", help="Extract TOC")
+    p.add_argument("--conclusion", action="store_true", help="Extract conclusion")
+    p.add_argument("--limit", type=int, help="Max papers to process")
+    p.add_argument("--force", action="store_true", help="Force re-extraction")
+
     # Unified index command with --type
     p = subparsers.add_parser("index", help="Build search index")
     p.set_defaults(func=cmd_index)
@@ -316,6 +547,14 @@ def register_all(subparsers) -> None:
         default="fts",
         help="Index type (default: fts)",
     )
+
+    # Metrics command
+    p = subparsers.add_parser("metrics", help="Show metrics")
+    p.set_defaults(func=cmd_metrics)
+    p.add_argument("--last", type=int, default=20)
+    p.add_argument("--category", default="llm")
+    p.add_argument("--since")
+    p.add_argument("--summary", action="store_true")
 
     # Audit command
     p = subparsers.add_parser("audit", help="Audit data quality")
@@ -335,14 +574,6 @@ def register_all(subparsers) -> None:
     p.add_argument(
         "--force", action="store_true", help="Force overwrite existing config"
     )
-
-    # Metrics command
-    p = subparsers.add_parser("metrics", help="Show metrics")
-    p.set_defaults(func=cmd_metrics)
-    p.add_argument("--last", type=int, default=20)
-    p.add_argument("--category", default="llm")
-    p.add_argument("--since")
-    p.add_argument("--summary", action="store_true")
 
 
 __all__ = ["register_all"]

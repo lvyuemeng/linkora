@@ -135,15 +135,15 @@ def _check_workspace_dir(cfg: Config) -> CheckItem:
 
 
 def _check_papers_dir(cfg: Config) -> CheckItem:
-    ok = cfg.papers_dir.exists()
+    ok = cfg.papers_store_dir.exists()
     count = 0
     if ok:
         count = sum(
             1
-            for d in cfg.papers_dir.iterdir()
+            for d in cfg.papers_store_dir.iterdir()
             if d.is_dir() and (d / "meta.json").exists()
         )
-    detail = f"{cfg.papers_dir} ({count} papers)"
+    detail = f"{cfg.papers_store_dir} ({count} papers)"
     return CheckItem(CheckCategory.PATHS, "papers_dir", ok, detail)
 
 

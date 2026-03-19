@@ -1,7 +1,6 @@
-"""sources/openalex.py — OpenAlex API paper source for journal exploration.
+"""sources/openalex.py — OpenAlex API paper source.
 
-Refactored to use OpenAlexSource class with PaperSource Protocol.
-Uses HTTPClient interface for network requests.
+Redesigned to use PaperSource Protocol with search() + fetch_by_id().
 """
 
 from __future__ import annotations
@@ -11,6 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Iterator
 
 from linkora.log import get_logger
+from linkora.sources.protocol import PaperCandidate, PaperQuery
 
 if TYPE_CHECKING:
     from linkora.http import HTTPClient
@@ -52,8 +52,10 @@ def _reconstruct_abstract(inverted_index: dict | None) -> str:
     return " ".join(w for _, w in word_positions)
 
 
-def _parse_work_item(item: dict) -> dict:
-    """Parse OpenAlex work item to standardized paper dict."""
+def _parse_work_to_candidate(
+    item: dict, source_name: str = "openalex"
+) -> PaperCandidate:
+    """Parse OpenAlex work item to PaperCandidate."""
     doi_raw = item.get("doi") or ""
     doi = doi_raw.replace("https://doi.org/", "") if doi_raw else ""
 
@@ -69,36 +71,41 @@ def _parse_work_item(item: dict) -> dict:
     raw_title = item.get("title") or ""
     clean_title = re.sub(r"<[^>]+>", "", raw_title)
 
-    return {
-        "openalex_id": item.get("id", ""),
-        "doi": doi,
-        "title": clean_title,
-        "abstract": abstract,
-        "authors": authors,
-        "year": item.get("publication_year"),
-        "cited_by_count": item.get("cited_by_count", 0),
-        "type": item.get("type", ""),
-    }
+    # Get journal name from primary location
+    journal = None
+    primary_location = item.get("primary_location", {})
+    source = primary_location.get("source") or {}
+    journal = source.get("display_name")
+
+    openalex_id = item.get("id", "")
+
+    return PaperCandidate(
+        id=doi or openalex_id,
+        doi=doi,
+        title=clean_title,
+        authors=authors,
+        year=item.get("publication_year"),
+        journal=journal,
+        abstract=abstract if abstract and not _is_boilerplate(abstract) else None,
+        cited_by_count=item.get("cited_by_count", 0),
+        paper_type=item.get("type"),
+        pdf_url=None,
+        source=source_name,
+        source_id=openalex_id,
+    )
 
 
 # ============================================================================
-#  OpenAlexSource (PaperSource Protocol)
+#  OpenAlexSource Implementation
 # ============================================================================
 
 
 @dataclass(frozen=True)
 class OpenAlexSource:
-    """OpenAlex API paper source for journal exploration.
+    """OpenAlex API paper source.
 
-    Implements PaperSource Protocol for unified access to OpenAlex data.
-    Requires HTTP client to be injected.
-
-    Example:
-        from linkora.http import RequestsClient
-        client = RequestsClient()
-        source = OpenAlexSource(http_client=client)
-        for paper in source.fetch(issn="0022-1120", year_range="2020-2025"):
-            print(paper["title"])
+    Redesigned to use PaperSource Protocol.
+    Requires HTTPClient injection.
     """
 
     http_client: HTTPClient
@@ -107,14 +114,87 @@ class OpenAlexSource:
     def name(self) -> str:
         return "openalex"
 
-    def _fetch_page(
+    def search(self, query: PaperQuery) -> Iterator[PaperCandidate]:
+        """Search papers by ISSN, author, or title.
+
+        Args:
+            query: PaperQuery with search criteria
+
+        Yields:
+            PaperCandidate instances matching the query
+        """
+        if query.issn:
+            yield from self._search_by_issn(query)
+
+        if query.author:
+            yield from self._search_by_author(query)
+
+        if query.title:
+            yield from self._search_by_title(query)
+
+    def _search_by_issn(self, query: PaperQuery) -> Iterator[PaperCandidate]:
+        """Search by journal ISSN."""
+        if not query.issn:
+            return
+
+        year_range = self._build_year_filter(query)
+        cursor = "*"
+
+        while cursor:
+            papers, cursor = self._fetch_issn_page(query.issn, cursor, year_range)
+            if not papers:
+                break
+            for item in papers:
+                yield _parse_work_to_candidate(item, self.name)
+
+    def _search_by_author(self, query: PaperQuery) -> Iterator[PaperCandidate]:
+        """Search by author name."""
+        if not query.author:
+            return
+
+        year_range = self._build_year_filter(query)
+        cursor = "*"
+
+        while cursor:
+            papers, cursor = self._fetch_search_page(
+                f"author.name:{query.author}", cursor, year_range
+            )
+            if not papers:
+                break
+            for item in papers:
+                yield _parse_work_to_candidate(item, self.name)
+
+    def _search_by_title(self, query: PaperQuery) -> Iterator[PaperCandidate]:
+        """Search by paper title."""
+        if not query.title:
+            return
+
+        year_range = self._build_year_filter(query)
+        cursor = "*"
+
+        while cursor:
+            papers, cursor = self._fetch_search_page(query.title, cursor, year_range)
+            if not papers:
+                break
+            for item in papers:
+                yield _parse_work_to_candidate(item, self.name)
+
+    def _build_year_filter(self, query: PaperQuery) -> str | None:
+        """Build OpenAlex year filter string."""
+        if not query.year_start:
+            return None
+        if query.year_end:
+            return f"{query.year_start}-{query.year_end}"
+        return f"{query.year_start}-{query.year_start}"
+
+    def _fetch_issn_page(
         self,
         issn: str,
         cursor: str,
         year_range: str | None = None,
         per_page: int = _PER_PAGE,
     ) -> tuple[list[dict], str | None]:
-        """Fetch one page of results from OpenAlex."""
+        """Fetch one page of results by ISSN."""
         filt = f"primary_location.source.issn:{issn}"
         if year_range:
             filt += f",publication_year:{year_range}"
@@ -128,6 +208,30 @@ class OpenAlexSource:
             "sort": "publication_year:asc",
         }
 
+        return self._do_request(params)
+
+    def _fetch_search_page(
+        self,
+        search_term: str,
+        cursor: str,
+        year_range: str | None = None,
+        per_page: int = _PER_PAGE,
+    ) -> tuple[list[dict], str | None]:
+        """Fetch one page of search results."""
+        params = {
+            "search": search_term,
+            "per_page": per_page,
+            "cursor": cursor,
+            "select": "id,title,publication_year,doi,authorships,abstract_inverted_index,"
+            "primary_location,cited_by_count,type",
+        }
+        if year_range:
+            params["filter"] = f"publication_year:{year_range}"
+
+        return self._do_request(params)
+
+    def _do_request(self, params: dict) -> tuple[list[dict], str | None]:
+        """Execute request and parse response."""
         resp = self.http_client.get(_OA_WORKS, params=params, timeout=30)
 
         # Handle rate limiting
@@ -137,39 +241,33 @@ class OpenAlexSource:
         resp.raise_for_status()
         data = resp.json()
 
-        papers = [_parse_work_item(item) for item in data.get("results", [])]
+        papers = data.get("results", [])
         next_cursor = data.get("meta", {}).get("next_cursor")
         return papers, next_cursor
 
-    def fetch(
-        self,
-        issn: str,
-        year_range: str | None = None,
-        **kwargs,
-    ) -> Iterator[dict]:
-        """Fetch papers from OpenAlex API.
+    def fetch_by_id(self, paper_id: str) -> PaperCandidate | None:
+        """Fetch paper by DOI.
 
         Args:
-            issn: Journal ISSN.
-            year_range: Year range filter (e.g., "2020-2025").
-            **kwargs: Additional parameters (page_size, etc.).
+            paper_id: DOI (preferred) or OpenAlex ID
 
-        Yields:
-            Paper dicts with openalex_id, doi, title, abstract, authors, etc.
+        Returns:
+            PaperCandidate if found, None otherwise
         """
-        page_size = kwargs.get("page_size", _PER_PAGE)
-        cursor = "*"
+        # Check if it's a DOI
+        if paper_id.startswith("10."):
+            url = f"{_OA_WORKS}/doi:{paper_id}"
+        else:
+            # Assume it's an OpenAlex ID
+            url = f"{_OA_WORKS}/{paper_id}"
 
-        while cursor:
-            papers, cursor = self._fetch_page(issn, cursor, year_range, page_size)
-            if not papers:
-                break
-            yield from papers
-
-    def count(self, issn: str, **kwargs) -> int:
-        """Get total paper count from OpenAlex.
-
-        Note: OpenAlex doesn't provide count without fetching.
-        This is a placeholder - actual count comes after fetch.
-        """
-        return 0
+        try:
+            resp = self.http_client.get(url, timeout=30)
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            data = resp.json()
+            return _parse_work_to_candidate(data, self.name)
+        except Exception as e:
+            _log.debug("Failed to fetch paper by ID %s: %s", paper_id, e)
+            return None

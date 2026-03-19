@@ -115,8 +115,13 @@ uv run -m pytest
 
 # Run with coverage
 uv run -m pytest --cov=linkora
-
 # -m / --module for module import
+```
+
+Read [justfile](/justfile) for `just` command related workflow.
+
+```bash
+just ci # for ci check.
 ```
 
 ---

@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from linkora.config import Config
     from linkora.http import HTTPClient
     from linkora.llm import LLMRunner
+    from linkora.loader import PaperEnricher
     from linkora.papers import PaperStore
     from linkora.index import SearchIndex, VectorIndex
 
@@ -71,7 +72,7 @@ class AppContext:
         if self._paper_store is None:
             from linkora.papers import PaperStore
 
-            self._paper_store = PaperStore(self.config.papers_dir)
+            self._paper_store = PaperStore(self.config.papers_store_dir)
         return self._paper_store
 
     def search_index(self) -> "SearchIndex":
@@ -88,6 +89,19 @@ class AppContext:
         from linkora.index import VectorIndex
 
         return VectorIndex(self.config.index_db)
+
+    def paper_enricher(self) -> "PaperEnricher":
+        """Get or create paper enricher (lazy init).
+
+        Uses config and LLM runner from context.
+        """
+        from linkora.loader import PaperEnricher
+
+        return PaperEnricher(
+            papers_dir=self.config.papers_store_dir,
+            config=self.config,
+            runner=self.llm_runner(),
+        )
 
     def close(self) -> None:
         """Close all resources."""

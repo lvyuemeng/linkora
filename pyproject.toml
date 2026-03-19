@@ -45,19 +45,21 @@ embed = [
     "modelscope>=1.10",
 ]
 topics = ["linkora[embed]", "bertopic>=0.16", "pandas>=2.0"]
-import = ["endnote-utils>=1.0", "pyzotero>=1.5"]
-mcp = ["mcp>=1.0"]
+import = [
+    "endnote-utils>=1.0",
+    "pyzotero>=1.5",
+    "rapidfuzz>=3.14.3",
+    "tqdm>=4.67.3",
+]
 full = [
     "linkora[embed]",
     "linkora[topics]",
     "linkora[import]",
-    "linkora[mcp]",
     "curl-cffi>=0.5",
 ]
 
 [project.scripts]
 linkora = "linkora.cli:main"
-linkora-mcp = "linkora.mcp:main"
 
 [dependency-groups]
 dev = ["pytest>=7.0", "ruff>=0.15.5", "ty>=0.0.23"]

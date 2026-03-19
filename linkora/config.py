@@ -322,8 +322,8 @@ class Config:
         return self.root / "workspace" / self.workspace.name
 
     @property
-    def papers_dir(self) -> Path:
-        # Papers directory is a fixed subdirectory of the workspace, not from sources config
+    def papers_store_dir(self) -> Path:
+        # Papers store directory - where linkora manages papers
         return self.workspace_dir / "papers"
 
     @property
@@ -366,11 +366,30 @@ class Config:
     def ensure_dirs(self) -> None:
         for d in (
             self.workspace_dir,
-            self.papers_dir,
+            self.papers_store_dir,
             self.log_file.parent,
             self.metrics_db_path.parent,
         ):
             d.mkdir(parents=True, exist_ok=True)
+
+    def resolve_local_source_dir(self) -> Path | None:
+        """Resolve the local source PDF directory from config.
+
+        Returns:
+            Path to local source directory, or None if not configured
+        """
+        if not self.sources.local.enabled:
+            return None
+
+        local_path = self.sources.local.papers_dir
+        if not local_path:
+            return None
+
+        # Resolve relative to workspace root
+        path = Path(local_path)
+        if path.is_absolute():
+            return path.resolve()
+        return (self.root / path).resolve()
 
 
 # ============== Singleton ==============
