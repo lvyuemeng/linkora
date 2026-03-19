@@ -1,6 +1,7 @@
-# linkora Design
+# linkora Design - Updated
 
 > Ideal architecture for a general-purpose local knowledge network.
+> Updated: Multiple local paths support with efficiency focus
 
 ---
 
@@ -12,6 +13,7 @@
 - **Layered content loading** (L1-L4) for progressive access
 - **Semantic retrieval** via embeddings and vector search
 - **Source-agnostic** paper ingestion from multiple formats
+- **Multiple local sources** with efficient unified indexing
 
 ### Core Principles
 
@@ -21,6 +23,7 @@
 | AI-Native | Designed for AI coding agents with JSON output |
 | Zero Config | Environment variables auto-detected, smart defaults |
 | Functional Design | Pure functions, pipeline composition, dataclass-based state |
+| Efficiency-First | Minimize memory usage, reuse caches, lazy initialization |
 
 ---
 
@@ -32,12 +35,14 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │ Layer 3: Entry Points                                           │
 │   ├── cli/          CLI commands                                │
-│   ├── mcp.py        MCP server for AI agents                     │
+│   ├── mcp.py        MCP server for AI agents                    │
 │   └── export.py     BibTeX export                               │
 ├─────────────────────────────────────────────────────────────────┤
 │ Layer 2: Features                                               │
 │   ├── topics.py     BERTopic clustering                          │
 │   └── sources/     PaperSource Protocol + implementations       │
+│       ├── local.py  Multi-path LocalSource (UPDATED)            │
+│       └── ...       Other sources                               │
 ├─────────────────────────────────────────────────────────────────┤
 │ Layer 1: Core Data                                              │
 │   ├── loader.py     L1-L4 layered loading                      │
@@ -49,13 +54,13 @@
 │ Layer 0: Foundation                                              │
 │   ├── config.py    Configuration loading & resolution           │
 │   ├── log.py       Logging singleton                            │
-│   ├── papers.py    PaperStore, metadata handling                 │
+│   ├── papers.py    PaperStore, metadata handling                │
 │   ├── audit.py     Data quality auditing                        │
 │   ├── filters.py   Protocol-based filtering                     │
-│   ├── llm.py       LLM client abstraction                       │
+│   ├── llm.py       LLM client abstraction                      │
 │   ├── http.py      HTTP client Protocol                         │
 │   ├── mineru.py    PDF parsing (MinerU)                         │
-│   └── metrics.py   Metrics collection                           │
+│   └── metrics.py   Metrics collection                          │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -63,335 +68,290 @@
 
 | Module | Responsibility | Key Types |
 |--------|---------------|-----------|
-| `config.py` | Config loading, workspace resolution | `Config`, `WorkspaceConfig`, `IndexConfig`, `SourcesConfig` |
-| `papers.py` | Paper storage, metadata CRUD | `PaperStore`, `PaperMetadata` |
-| `index/text.py` | FTS5 full-text search | `SearchIndex`, `FilterParams` |
-| `index/vector.py` | FAISS semantic search | `VectorIndex`, `FaissIndexConfig`, `Embedder` |
-| `loader.py` | L1-L4 content loading | `PaperLoader`, `LoadResult` |
-| `extract.py` | Metadata extraction | `Extractor`, `ExtractionInput`, `ExtractionOutput` |
-| `topics.py` | Topic modeling | `TopicTrainer`, `TopicConfig`, `TopicModelOutput` |
-| `sources/` | Data source integration | `PaperSource`, `LocalSource`, `OpenAlexSource` |
+| `config.py` | Config loading, workspace resolution, multi-path resolution | `Config`, `LocalSourceConfig`, `resolve_local_source_paths()` |
+| `sources/local.py` | Multi-path local PDF scanning with unified cache | `LocalSource`, `MultiPathLocalSource` |
+| `ingest/matching.py` | Source dispatcher for paper matching | `DefaultDispatcher` |
+| `cli/context.py` | Lazy context injection for commands | `AppContext` |
+| `cli/commands.py` | CLI command handlers | `cmd_add`, `cmd_search`, etc. |
 
 ---
 
-## 3. Workspace
+## 3. Configuration
 
-Each workspace is an independent knowledge environment.
+### LocalSourceConfig (Updated for Multiple Paths)
 
+```python
+@dataclass(frozen=True)
+class LocalSourceConfig:
+    enabled: bool = True
+    papers_dir: str = "papers"           # Primary path (workspace relative)
+    paths: list[str] = field(default_factory=list)  # Additional absolute/relative paths
 ```
-<workspace>/
-├── workspace.json    # workspace metadata
-├── index.db         # SQLite FTS5 index
-├── papers/          # canonical paper storage
-├── vectors.faiss    # FAISS vector index (optional)
-└── topic_model/     # BERTopic model (optional)
+
+### Path Resolution
+
+```python
+def resolve_local_source_paths(self) -> list[Path]:
+    """Resolve all local source paths from config.
+    
+    Returns:
+        List of paths: papers_dir + additional paths.
+        Resolved relative to config file root, NOT workspace root.
+    """
 ```
 
-### Configuration Resolution
-
-Priority (top → bottom):
-
-1. CLI argument (`--workspace`)
-2. Environment variable (`linkora_WORKSPACE`)
-3. Workspace-local config (`<workspace>/linkora.yml`)
-4. Global config (`~/.linkora/config.yml`)
-5. Built-in defaults
+**Resolution Priority:**
+1. Primary `papers_dir` (workspace-relative or absolute)
+2. Additional paths from `paths` list (absolute or config-root-relative)
 
 ---
 
-## 4. Layered Loading (L1-L4)
+## 4. Multi-Path Local Source (Efficiency-Focused Design)
 
-| Level | Content | Source | Access Pattern |
-|-------|---------|--------|----------------|
-| L1 | title, authors, year, journal, doi | `index.db` | Direct SQL query |
-| L2 | abstract | `meta.json` | File read |
-| L3 | structural sections | `chunks.jsonl` | LLM extraction |
-| L4 | full markdown | `paper.md` | File read |
+### Design Decision: Unified Index with Shared Cache
 
-**Design Principle**: Metadata queries never require filesystem scanning.
+For **efficiency in speed and memory**, multiple local paths are managed as a **single unified source** with:
+- One shared index covering all paths
+- Single file hash cache across all paths
+- Deduplication at candidate level
+- Single-threaded sequential scan (avoids thread overhead)
 
----
+### Architecture
 
-## 5. Data Directory
-
-```
-papers/
-└── <AuthorYear-ShortTitle>/
-    ├── meta.json          # PaperMetadata (L1-L2)
-    ├── paper.md          # Full text (L4)
-    ├── chunks.jsonl      # Extracted sections (L3)
-    └── images/           # Extracted figures
-```
-
-### meta.json Schema
-
-```json
-{
-  "id": "<uuid>",
-  "title": "...",
-  "authors": [...],
-  "year": 2024,
-  "journal": "...",
-  "doi": "...",
-  "abstract": "...",
-  "source": "local|openalex|zotero|endnote"
-}
+```mermaid
+graph TB
+    subgraph "LocalSource (Multi-Path)"
+        A[pdf_dirs: list[Path]] --> B[Unified Index Builder]
+        B --> C[Shared Cache: dict[Path, str]]
+        C --> D[Query Processor]
+        D --> E[Deduplicator]
+    end
+    
+    F[PaperQuery] --> D
+    E --> G[Iterator[PaperCandidate]]
 ```
 
-- `id`: Stable UUID (never changes)
-- Directory names are human-readable and may change
-- UUID in metadata remains stable across renames
+### Key Design Points
 
----
+| Aspect | Approach | Benefit |
+|--------|----------|---------|
+| Index Storage | Single dict keyed by DOI/filename | O(1) lookup, unified cache |
+| File Hashing | One MD5 per file, stored in shared dict | Avoids re-hashing on re-scan |
+| Change Detection | Compare hash dict against filesystem | Minimal I/O on unchanged dirs |
+| Search | Sequential scan with early exit | Memory efficient |
+| Deduplication | By DOI first, then by filename | Consistent ordering |
 
-## 6. Context State
-
-### Config Context
-
-The `Config` object is the central context provider:
+### LocalSource API (Updated)
 
 ```python
 @dataclass
-class Config:
-    workspace: WorkspaceConfig       # Current workspace identity
-    workspace_store: dict[str, WorkspaceConfig]  # All workspaces
-    sources: SourcesConfig          # Data source settings
-    index: IndexConfig             # Search & embedding config
-    llm: LLMConfig                 # LLM API settings
-    ingest: IngestConfig           # PDF processing config
-    topics: TopicsConfig           # Topic modeling config
-    log: LogConfig                 # Logging config
-    _root: Path                    # Root directory
+class LocalSource:
+    """Scan user's downloaded PDFs on filesystem (read-only).
+    
+    Now supports multiple paths with unified indexing.
+    
+    Attributes:
+        pdf_dirs: List of root directories to scan
+        recursive: Enable recursive scanning
+    """
+    
+    pdf_dirs: list[Path]  # Changed from single pdf_dir
+    recursive: bool = True
+    
+    # Cached state - unified across all paths
+    _index: dict[str, Path] = field(default_factory=dict, init=False, repr=False)
+    _file_hashes: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _path_sources: dict[Path, str] = field(default_factory=dict, init=False, repr=False)  # Track which path each file came from
 ```
 
-### Path Properties
+### Breaking Change: Constructor Signature
 
-| Property | Returns |
-|----------|---------|
-| `config.root` | Project root path |
-| `config.workspace_dir` | Workspace directory |
-| `config.papers_dir` | Papers storage |
-| `config.index_db` | SQLite database path |
-| `config.vectors_file` | FAISS index path |
+**Old:**
+```python
+LocalSource(pdf_dir: Path)
+```
 
-### PaperStore Context
+**New:**
+```python
+LocalSource(pdf_dirs: list[Path])  # Accepts list, maintains backward compat via overload
+```
+
+---
+
+## 5. Source Dispatcher (Updated)
+
+### DefaultDispatcher (Updated for Multi-Path)
 
 ```python
-class PaperStore:
-    """Paper storage with optional caching."""
+class DefaultDispatcher:
+    """Source dispatcher - updated for multi-path local sources."""
     
-    papers_dir: Path
-    
-    def iter_papers(self) -> Iterator[Path]: ...
-    def read_meta(self, paper_d: Path) -> dict: ...
-    def read_md(self, paper_d: Path) -> str | None: ...
-    def audit(self) -> list[Issue]: ...
+    def __init__(
+        self,
+        local_pdf_dirs: list[Path] | None = None,  # Changed from single path
+        http_client=None,
+    ):
+        self._local_pdf_dirs = local_pdf_dirs or []
+        self._http_client = http_client
+        self._local_source: PaperSource | None = None
+        # ... other sources
 ```
 
-### Search Index Context
+**Key Change:** Single `LocalSource` instance handles all paths, not multiple instances.
+
+---
+
+## 6. Context Injection (Improved)
+
+### Current Pattern (to be improved)
 
 ```python
-# FTS Index
-with SearchIndex(cfg.index_db) as idx:
-    results = idx.search(query, top_k=20)
-
-# Vector Index  
-with VectorIndex(cfg.index_db) as vidx:
-    results = vidx.search(query, top_k=10)
+# In commands.py - BROKEN (method doesn't exist!)
+def cmd_add(args, ctx: AppContext):
+    local_pdf_dir = ctx.config.resolve_local_source_dir()  # ERROR!
 ```
+
+### Improved Pattern
+
+```python
+# Option 1: Direct config access (recommended for clarity)
+def cmd_add(args, ctx: AppContext):
+    paths = ctx.config.resolve_local_source_paths()  # Returns list[Path]
+    dispatcher = DefaultDispatcher(local_pdf_dirs=paths, http_client=ctx.http_client())
+
+# Option 2: Context method (for repeated use)
+@dataclass
+class AppContext:
+    # ... existing fields
+    
+    def source_dispatcher(self) -> DefaultDispatcher:
+        """Get or create source dispatcher with multi-path support."""
+        if self._dispatcher is None:
+            paths = self.config.resolve_local_source_paths()
+            self._dispatcher = DefaultDispatcher(
+                local_pdf_dirs=paths,
+                http_client=self.http_client()
+            )
+        return self._dispatcher
+```
+
+### Context Methods Summary
+
+| Method | Purpose | Lazy? |
+|--------|---------|-------|
+| `http_client()` | HTTP requests | Yes |
+| `llm_runner()` | LLM inference | Yes |
+| `paper_store()` | Paper CRUD | Yes |
+| `search_index()` | FTS search | No (context manager) |
+| `vector_index()` | Vector search | No (context manager) |
+| `paper_enricher()` | TOC/conclusion extraction | Yes |
+| `source_dispatcher()` | Paper sources (NEW) | Yes |
 
 ---
 
 ## 7. Workflows
 
-### Search Workflow
+### Add Command Flow (Updated)
 
 ```mermaid
 graph LR
-    A[User Query] --> B{--mode}
-    B -->|fts| C[FTS5 Search]
-    B -->|author| D[Author Search]
-    B -->|vector| E[Vector Search]
-    B -->|hybrid| F[Hybrid Search]
-    B -->|cited| G[Citation Search]
-    C --> H[Results]
-    D --> H
-    E --> H
-    F --> H
-    G --> H
+    A[cmd_add] --> B[ctx.source_dispatcher]
+    B --> C[LocalSource<br/>pdf_dirs=list[Path]]
+    C --> D[Unified Index Builder]
+    D --> E[Search All Paths]
+    E --> F[Deduplicate Results]
+    F --> G[Score & Rank]
+    G --> H[Return Candidates]
 ```
 
-### Index Building Workflow
+### Multi-Path Index Building
 
 ```mermaid
-graph LR
-    A[papers/] --> B[PaperStore]
-    B --> C{--type}
-    C -->|fts| D[SearchIndex.rebuild]
-    C -->|vector| E[VectorIndex.rebuild]
-    D --> F[index.db]
-    E --> G[vectors.faiss]
-```
-
-### Data Extraction Pipeline
-
-```mermaid
-graph LR
-    A[PDF File] --> B[ExtractionInput]
-    B --> C{extractor}
-    C -->|regex| D[RegexExtractor]
-    C -->|llm| E[LLMExtractor]
-    C -->|auto| F[AutoExtractor]
-    C -->|robust| G[RobustExtractor]
-    D --> H[ExtractionOutput]
-    E --> H
-    F --> H
-    G --> H
-    H --> I[PaperMetadata]
+graph TB
+    A[pdf_dirs: list[Path]] --> B{For each path}
+    B --> C[Glob *.pdf recursive]
+    C --> D[Compute MD5 hash]
+    D --> E[Update unified index]
+    E --> F[Store path source]
+    B --> G[Dedupe by DOI]
+    G --> H[Final index]
 ```
 
 ---
 
 ## 8. CLI Commands
 
-### Unified Command Structure
-
-| Command | Flags | Description |
-|---------|-------|-------------|
-| `search` | `--mode fts\|author\|vector\|hybrid\|cited` | Search papers |
-| `index` | `--type fts\|vector` | Build search index |
-| `audit` | `--severity error\|warning\|info` | Data quality audit |
-| `check` | - | Quick diagnostics |
-| `doctor` | - | Full health check |
-| `init` | `--force` | Setup wizard |
-| `metrics` | `--summary\|--last N` | Show LLM metrics |
-
-### Usage Examples
+### Add Command (Updated)
 
 ```bash
-# Search
-linkora search "turbulence"
-linkora search "John Smith" --mode author
-linkora search "machine learning" --mode vector
+# Search local PDFs from multiple paths
+linkora add --doi 10.1234/example
+linkora add --title "machine learning"
+linkora add "quantum physics"  # Freeform
 
-# Index
-linkora index              # Build FTS
-linkora index --type vector --rebuild
+# Shows which sources are used
+# Using 2 source(s)  # Now shows multi-path local source as 1
+```
 
-# Audit
-linkora audit --severity error
+### Configuration Example
 
-# Diagnostics
-linkora check
-linkora doctor
+```yaml
+# ~/.linkora/config.yaml
+sources:
+  local:
+    enabled: true
+    papers_dir: papers           # Workspace-relative
+    paths:                      # Additional paths
+      - /data/research/pdfs
+      - ~/Dropbox/papers
+      - ${LINKORA_EXTRA_PAPERS}  # Env var support
 ```
 
 ---
 
-## 9. Data Sources
+## 9. Breaking Changes Summary
 
-### PaperSource Protocol
-
-All sources implement unified interface:
-
-```python
-class PaperSource(Protocol):
-    @property
-    def name(self) -> str: ...
-    
-    def fetch(self, **kwargs) -> Iterator[dict]: ...
-    
-    def count(self, **kwargs) -> int: ...
-```
-
-### Implementations
-
-| Source | Description | Protocol Method |
-|--------|-------------|-----------------|
-| `LocalSource` | Scan workspace papers/ | `fetch(papers_dir)` |
-| `OpenAlexSource` | OpenAlex API | `fetch(issn, year_range)` |
-| `ZoteroSource` | Zotero library | `fetch(library_id, api_key)` |
-| `EndnoteSource` | EndNote XML/RIS | `fetch(paths)` |
+| Change | Old | New | Impact |
+|--------|-----|-----|--------|
+| Config method | `resolve_local_source_dir()` (doesn't exist) | `resolve_local_source_paths()` | Fix broken code |
+| LocalSource ctor | `LocalSource(pdf_dir: Path)` | `LocalSource(pdf_dirs: list[Path])` | API change |
+| DefaultDispatcher | `local_pdf_dir: Path` | `local_pdf_dirs: list[Path]` | API change |
+| Source count | Multiple local = N sources | Multiple local = 1 source | UI change |
 
 ---
 
-## 10. Configuration Schema
+## 10. Implementation Plan
 
-### WorkspaceConfig
+### Phase 1: Fix Broken Code
+- [ ] Add `resolve_local_source_dir()` as alias or fix commands.py to use `resolve_local_source_paths()`
 
-```python
-@dataclass(frozen=True)
-class WorkspaceConfig:
-    name: str = "default"
-    description: str = ""
-    root: str = ""  # Optional override
-```
+### Phase 2: Update LocalSource
+- [ ] Modify `LocalSource.__init__` to accept `pdf_dirs: list[Path]`
+- [ ] Update `_build_index()` to scan all paths
+- [ ] Add `_path_sources` tracking for source identification
+- [ ] Update `_search_sequential()` and `_search_parallel()` for multi-path
 
-### IndexConfig
+### Phase 3: Update Dispatcher
+- [ ] Modify `DefaultDispatcher.__init__` to accept `local_pdf_dirs: list[Path]`
+- [ ] Create single `LocalSource` with all paths
 
-```python
-@dataclass(frozen=True)
-class IndexConfig:
-    top_k: int = 20
-    embed_model: str = "Qwen/Qwen3-Embedding-0.6B"
-    embed_device: str = "auto"
-    chunk_size: int = 800
-    chunk_overlap: int = 150
-```
+### Phase 4: Update Context
+- [ ] Add `source_dispatcher()` method to `AppContext`
+- [ ] Update `cmd_add()` to use context method
 
-### SourcesConfig
-
-```python
-@dataclass(frozen=True)
-class SourcesConfig:
-    local: LocalSourceConfig
-    openalex: OpenAlexSourceConfig
-    zotero: ZoteroSourceConfig
-    endnote: EndnoteSourceConfig
-```
+### Phase 5: Documentation
+- [ ] Update docs/design.md (this file)
+- [ ] Add examples/config for multi-path
 
 ---
 
-## 11. Key Design Patterns
-
-### Data Pipe Flow
-
-```
-ImmutableInput → Stage1 → ImmutableResult → Stage2 → ImmutableResult → Output
-```
-
-All intermediate results are frozen dataclasses. No mutable state passed between stages.
-
-### Context Injection
-
-Instead of passing paths directly, use context objects:
-
-```python
-# Instead of
-def search(query: str, db_path: Path, papers_dir: Path): ...
-
-# Use
-def search(query: str, index: SearchIndex, store: PaperStore): ...
-```
-
-### Protocol-Based DI
-
-```python
-class PDFClient(Protocol):
-    def call(self, pdf_path: Path, opts: ParseOptions) -> dict: ...
-
-class LLMClient(Protocol):
-    def complete(self, request: LLMRequest) -> LLMResult: ...
-```
-
----
-
-## 12. Environment Variables
+## 11. Environment Variables
 
 | Variable | Description |
 |----------|-------------|
 | `linkora_WORKSPACE` | Active workspace name |
 | `linkora_LLM_API_KEY` | LLM API key |
+| `linkora_EXTRA_PAPERS` | Additional local PDF paths (NEW) |
 | `DEEPSEEK_API_KEY` | DeepSeek API key (fallback) |
 | `OPENAI_API_KEY` | OpenAI API key (fallback) |
 | `MINERU_API_KEY` | MinerU cloud API key |

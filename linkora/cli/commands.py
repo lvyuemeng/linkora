@@ -115,12 +115,12 @@ def cmd_add(args: argparse.Namespace, ctx: AppContext) -> None:
 
     # Setup dispatcher with injected dependencies (context separation)
     config = ctx.config
-    local_pdf_dir = config.resolve_local_source_dir()
+    local_pdf_dirs = config.resolve_local_source_paths()
     http_client = ctx.http_client()
 
     try:
         dispatcher = DefaultDispatcher(
-            local_pdf_dir=local_pdf_dir, http_client=http_client
+            local_pdf_dirs=local_pdf_dirs, http_client=http_client
         )
 
         limit: int = getattr(args, "limit", 5) or 5

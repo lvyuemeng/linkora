@@ -41,15 +41,15 @@ class DefaultDispatcher:
     - Title -> OpenAlex (best for title search)
     - Fallback -> Try local first, then remote
 
-    Caches source instances for efficiency.
+    Supports multiple local paths with unified indexing for efficiency.
     """
 
     def __init__(
         self,
-        local_pdf_dir: Path | None = None,
+        local_pdf_dirs: list[Path] | None = None,
         http_client=None,
     ):
-        self._local_pdf_dir = local_pdf_dir
+        self._local_pdf_dirs = local_pdf_dirs or []
         self._http_client = http_client
         # Cache source instances
         self._local_source: PaperSource | None = None
@@ -63,10 +63,10 @@ class DefaultDispatcher:
 
         from linkora.sources import LocalSource, OpenAlexSource
 
-        # Create local source if configured
-        if self._local_pdf_dir:
+        # Create local source if configured (supports multiple paths)
+        if self._local_pdf_dirs:
             try:
-                self._local_source = LocalSource(pdf_dir=self._local_pdf_dir)
+                self._local_source = LocalSource(pdf_dirs=self._local_pdf_dirs)
             except Exception as e:
                 _log.debug("LocalSource failed: %s", e)
 
@@ -189,7 +189,7 @@ def _score_title(query_title: str | None, candidate_title: str | None) -> float:
     if not query_title or not candidate_title:
         return 0.0
     if _has_rapidfuzz and fuzz_module:
-        title_score = fuzz_module.ratio(query_title.lower(), candidate_title.lower())  # type: ignore[union-attr]
+        title_score = fuzz_module.ratio(query_title.lower(), candidate_title.lower())
         return title_score
     # Fallback to simple substring match
     return 50 if query_title.lower() in candidate_title.lower() else 0

@@ -12,12 +12,18 @@ Layered resolution (priority top → bottom):
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
 
 ENV_PREFIX = "linkora_"
+
+# Workspace fields can only be defined in global config
+WORKSPACE_FIELDS = {"workspace", "default_workspace"}
+# Workspace-local config can only override these fields
+ALLOWED_WORKSPACE_LOCAL = {"sources"}
 
 
 # ============== Config Dataclasses ==============
@@ -135,11 +141,33 @@ class LogConfig:
 
 
 def _load_yaml(path: Path | None) -> dict:
-    if path and path.exists():
+    """Load YAML file, trying .yaml and .yml extensions.
+
+    Args:
+        path: Path to config file (without extension)
+
+    Returns:
+        Loaded config dict, or empty dict if not found
+    """
+    if not path:
+        return {}
+
+    # Try .yaml first, then .yml
+    yaml_path = Path(str(path) + ".yaml")
+    yml_path = Path(str(path) + ".yml")
+
+    actual_path = None
+    if yaml_path.exists():
+        actual_path = yaml_path
+    elif yml_path.exists():
+        actual_path = yml_path
+
+    if actual_path:
         import yaml
 
-        with open(path, encoding="utf-8") as f:
+        with open(actual_path, encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
+
     return {}
 
 
@@ -158,35 +186,41 @@ def _merge_dicts(*dicts: dict) -> dict:
 def _find_root() -> Path:
     """Find root directory for the application.
 
-    Priority (highest to lowest):
-    1. CLI argument (--workspace)
-    2. Environment variable (linkora_ROOT)
-    3. Project markers (.linkora, workspace/, config.yaml) walking up from cwd
-    4. Platform-specific user data directory (default for installed CLI)
+    Priority:
+    1. Environment variable (linkora_ROOT)
+    2. Platform-specific user data directory
 
-    User data directories:
-    - Linux/macOS: ~/.local/share/linkora
-    - Windows: %APPDATA%/linkora
+    Raises warning if both env and default data dir have config files (collision).
     """
-    # First check environment variable
+    import logging
+
+    _log = logging.getLogger(__name__)
+
+    # Check environment variable
     env_root = os.environ.get(f"{ENV_PREFIX}ROOT")
     if env_root:
-        return Path(env_root).expanduser().resolve()
+        env_path = Path(env_root).expanduser().resolve()
 
-    # Walk up from current directory looking for project markers
-    current = Path.cwd()
-    for _ in range(6):
-        if (current / ".linkora").exists() or (current / "workspace").exists():
-            return current
-        if (current / "config.yaml").exists():
-            return current
-        parent = current.parent
-        if parent == current:
-            break
-        current = parent
+        # Check if default data dir also has config (collision warning)
+        default_dir = _get_user_data_dir()
+        has_env_config = (env_path / "config.yaml").exists() or (
+            env_path / "config.yml"
+        ).exists()
+        has_default_config = (default_dir / "config.yaml").exists() or (
+            default_dir / "config.yml"
+        ).exists()
 
-    # Fall back to platform-specific user data directory
-    # This is suitable for CLI tools installed in binary path
+        if has_env_config and has_default_config:
+            _log.warning(
+                "Config in both env root (%s) and default data dir (%s). "
+                "Using env root.",
+                env_path,
+                default_dir,
+            )
+
+        return env_path
+
+    # Use platform-specific user data directory
     return _get_user_data_dir()
 
 
@@ -221,11 +255,119 @@ def _get_user_data_dir() -> Path:
         return home / ".local" / "share" / "linkora"
 
 
-def _config_paths(root: Path) -> Iterator[Path]:
+def _load_env(config_path: Path) -> dict[str, str]:
+    """Load .env file from config directory.
+
+    Args:
+        config_path: Path to config.yaml
+
+    Returns:
+        Dict of environment variables
+    """
+    env_path = config_path.parent / ".env"
+
+    if not env_path.exists():
+        return {}
+
+    values: dict[str, str] = {}
+
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip()
+
+    return values
+
+
+def _resolve_string(value: str, env: dict[str, str]) -> str:
+    """Resolve environment variables in a string."""
+    pattern = re.compile(r"\$\{([^}:]+)(?::-([^}]*))?\}")
+
+    def replacer(match):
+        var_name = match.group(1)
+        fallback = match.group(2)
+        return env.get(var_name) or os.environ.get(var_name, "") or fallback or ""
+
+    return pattern.sub(replacer, value)
+
+
+def _resolve_dict(data: dict, env: dict[str, str]) -> dict:
+    """Resolve environment variables in a dict."""
+    return {k: _resolve_value(v, env) for k, v in data.items()}
+
+
+def _resolve_list(items: list, env: dict[str, str]) -> list:
+    """Resolve environment variables in a list."""
+    return [_resolve_value(item, env) for item in items]
+
+
+def _resolve_value(obj: str | dict | list, env: dict[str, str]) -> str | dict | list:
+    """Resolve environment variables in any value."""
+    if isinstance(obj, str):
+        return _resolve_string(obj, env)
+    if isinstance(obj, dict):
+        return _resolve_dict(obj, env)
+    if isinstance(obj, list):
+        return _resolve_list(obj, env)
+    return obj
+
+
+def _resolve_env_vars(data: dict, env: dict[str, str]) -> dict:
+    """Resolve ${VAR} and ${VAR:-fallback} in data.
+
+    Pure function - no side effects.
+    """
+    return _resolve_dict(data, env)
+
+
+def _config_paths(root: Path) -> Iterator[tuple[Path, str]]:
+    """Yield config paths with scope info.
+
+    Only global configs: XDG and user home.
+    Project config removed - use env var or default data dir.
+
+    Yields:
+        (path, scope) tuples: "xdg", "user"
+
+    Note: Warns if multiple global configs exist.
+    """
+    import logging
+
+    _log = logging.getLogger(__name__)
     home = Path.home()
-    yield home / ".linkora" / "config.yml"
-    yield home / ".config" / "linkora" / "config.yml"
-    yield root / "config.yaml"
+
+    # Check for both .yaml and .yml extensions
+    def find_config(base_path: Path) -> Path | None:
+        yaml_path = Path(str(base_path) + ".yaml")
+        yml_path = Path(str(base_path) + ".yml")
+        if yaml_path.exists():
+            return yaml_path
+        if yml_path.exists():
+            return yml_path
+        return None
+
+    found_xdg = False
+
+    # XDG config (~/.config/linkora/config)
+    xdg_path = find_config(home / ".config" / "linkora" / "config")
+    if xdg_path:
+        found_xdg = True
+        yield xdg_path, "xdg"
+
+    # User config (~/.linkora/config)
+    user_path = find_config(home / ".linkora" / "config")
+    if user_path:
+        if found_xdg:
+            # Warn about duplicate
+            _log.warning(
+                "Multiple global configs: using %s (also found %s)", user_path, xdg_path
+            )
+        yield user_path, "user"
+
+    # No project config - removed per design decision
 
 
 def _resolve_workspace(data: dict, cli_ws: str | None, env_ws: str | None) -> str:
@@ -252,16 +394,51 @@ def _load(workspace: str | None = None, root: Path | None = None) -> "Config":
     root = root or _find_root()
     env_ws = os.environ.get(f"{ENV_PREFIX}WORKSPACE")
 
-    # Collect layers
-    layers = [_load_yaml(p) for p in _config_paths(root)]
-    data = _merge_dicts(*layers) if layers else {}
+    # Collect and merge configs
+    merged: dict = {}
+    config_root = root  # Will be updated based on loaded configs
 
-    # Workspace-local override
-    ws_name = _resolve_workspace(data, workspace, env_ws)
-    ws_data = _load_yaml(root / "workspace" / ws_name / "linkora.yml")
-    merged = _merge_dicts(data, ws_data) if ws_data else data
+    for path, scope in _config_paths(root):
+        config_root = path.parent  # Use highest priority config's directory
+        env = _load_env(path)
+        data = _load_yaml(path)
+        data = _resolve_env_vars(data, env)
+        merged = _merge_dicts(merged, data)
 
-    # Build workspace store
+    # Extract workspace config (GLOBAL ONLY - no workspace-local override)
+    workspace_data = {k: v for k, v in merged.items() if k in WORKSPACE_FIELDS}
+    other_data = {k: v for k, v in merged.items() if k not in WORKSPACE_FIELDS}
+
+    # Determine workspace name
+    ws_name = workspace or env_ws or workspace_data.get("default_workspace", "default")
+
+    # Load workspace-local config (ONLY sources can override)
+    sources_data = other_data.get("sources", {})
+    ws_local_path = root / "workspace" / ws_name / "linkora.yml"
+
+    if ws_local_path.exists():
+        env = _load_env(ws_local_path)
+        ws_local_data = _load_yaml(ws_local_path)
+        ws_local_data = _resolve_env_vars(ws_local_data, env)
+
+        # Check for disallowed fields
+        import logging
+
+        _log = logging.getLogger(__name__)
+        disallowed = set(ws_local_data.keys()) - ALLOWED_WORKSPACE_LOCAL
+        if disallowed:
+            _log.warning(
+                "Workspace-local '%s' contains non-source fields: %s. "
+                "Only 'sources' can be overridden per-workspace.",
+                ws_local_path,
+                list(disallowed),
+            )
+
+        # Only allow sources override
+        local_sources = ws_local_data.get("sources", {})
+        sources_data = _merge_dicts(sources_data, local_sources)
+
+    # Build workspace store (from global only)
     ws_store = {
         name: WorkspaceConfig(
             name=name,
@@ -271,7 +448,7 @@ def _load(workspace: str | None = None, root: Path | None = None) -> "Config":
             if entry
             else "",
         )
-        for name, entry in merged.get("workspace", {}).items()
+        for name, entry in workspace_data.get("workspace", {}).items()
     }
 
     # Resolve current workspace
@@ -280,14 +457,15 @@ def _load(workspace: str | None = None, root: Path | None = None) -> "Config":
     return Config(
         workspace=WorkspaceConfig(name=ws_name, description=ws_entry.description),
         workspace_store=ws_store,
-        default_workspace=merged.get("default_workspace", "default"),
-        sources=_build_sources(merged.get("sources", {})),
-        index=IndexConfig(**merged.get("index", {})),
-        llm=LLMConfig(**merged.get("llm", {})),
-        ingest=IngestConfig(**merged.get("ingest", {})),
-        topics=TopicsConfig(**merged.get("topics", {})),
-        log=LogConfig(**merged.get("logging", {})),
+        default_workspace=workspace_data.get("default_workspace", "default"),
+        sources=_build_sources(sources_data),
+        index=IndexConfig(**other_data.get("index", {})),
+        llm=LLMConfig(**other_data.get("llm", {})),
+        ingest=IngestConfig(**other_data.get("ingest", {})),
+        topics=TopicsConfig(**other_data.get("topics", {})),
+        log=LogConfig(**other_data.get("logging", {})),
         _root=root,
+        _config_root=config_root,
     )
 
 
@@ -296,7 +474,10 @@ def _load(workspace: str | None = None, root: Path | None = None) -> "Config":
 
 @dataclass
 class Config:
-    """linkora configuration."""
+    """linkora configuration.
+
+    Invariant: Directories are created on init.
+    """
 
     workspace: WorkspaceConfig
     workspace_store: dict[str, WorkspaceConfig]
@@ -308,6 +489,13 @@ class Config:
     topics: TopicsConfig
     log: LogConfig
     _root: Path = field(default_factory=Path.cwd)
+    _config_root: Path = field(
+        default_factory=Path.cwd
+    )  # Config file location for path resolution
+
+    def __post_init__(self) -> None:
+        """Ensure required directories exist (invariant)."""
+        self.ensure_dirs()
 
     # Path Properties
     @property
@@ -372,24 +560,37 @@ class Config:
         ):
             d.mkdir(parents=True, exist_ok=True)
 
-    def resolve_local_source_dir(self) -> Path | None:
-        """Resolve the local source PDF directory from config.
+    def resolve_local_source_paths(self) -> list[Path]:
+        """Resolve all local source paths from config.
 
         Returns:
-            Path to local source directory, or None if not configured
+            List of paths: papers_dir + additional paths.
+            Resolved relative to config file root, NOT workspace root.
         """
         if not self.sources.local.enabled:
-            return None
+            return []
 
-        local_path = self.sources.local.papers_dir
-        if not local_path:
-            return None
+        paths: list[Path] = []
 
-        # Resolve relative to workspace root
-        path = Path(local_path)
-        if path.is_absolute():
-            return path.resolve()
-        return (self.root / path).resolve()
+        # Primary papers_dir
+        primary = self.sources.local.papers_dir
+        if primary:
+            p = Path(primary)
+            if p.is_absolute():
+                paths.append(p.resolve())
+            else:
+                paths.append((self._config_root / p).resolve())
+
+        # Additional paths
+        for path_str in self.sources.local.paths:
+            if path_str:
+                p = Path(path_str)
+                if p.is_absolute():
+                    paths.append(p.resolve())
+                else:
+                    paths.append((self._config_root / p).resolve())
+
+        return paths
 
 
 # ============== Singleton ==============
@@ -399,20 +600,8 @@ _config_singleton: Config | None = None
 
 
 def get_config() -> Config:
-    """Get config singleton."""
+    """Get config singleton (creates directories on first call)."""
     global _config_singleton
     if _config_singleton is None:
         _config_singleton = _load()
     return _config_singleton
-
-
-def reload_config(workspace: str | None = None) -> Config:
-    """Force reload config."""
-    global _config_singleton
-    _config_singleton = _load(workspace=workspace)
-    return _config_singleton
-
-
-def load_config(workspace: str | None = None, root: Path | None = None) -> Config:
-    """Load configuration."""
-    return _load(workspace=workspace, root=root)

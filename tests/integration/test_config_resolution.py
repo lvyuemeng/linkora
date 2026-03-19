@@ -88,7 +88,7 @@ class TestConfigResolution:
 
         expected = root / "workspace" / "default"
         assert cfg.workspace_dir == expected
-        assert cfg.papers_dir == expected / "papers"
+        assert cfg.papers_store_dir == expected / "papers"
         assert cfg.index_db == expected / "index.db"
 
     def test_custom_workspace(self):

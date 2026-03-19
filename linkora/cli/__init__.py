@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 
-from linkora.config import load_config
+from linkora.config import get_config
 from linkora import log as linkora_log
 from linkora import metrics as linkora_metrics
 from linkora.cli.context import AppContext
@@ -36,7 +36,7 @@ def main() -> None:
     args = parser.parse_args()
 
     # Load config and initialize
-    cfg = load_config()
+    cfg = get_config()
     cfg.ensure_dirs()
 
     session_id = linkora_log.setup(cfg)

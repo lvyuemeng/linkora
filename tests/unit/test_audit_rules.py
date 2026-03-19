@@ -2,7 +2,7 @@
 
 from pathlib import Path
 import tempfile
-from linkora.audit import (
+from linkora.papers import (
     rule_missing_fields,
     rule_file_pairing,
     rule_title_match,

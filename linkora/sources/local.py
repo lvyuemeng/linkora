@@ -149,9 +149,12 @@ class LocalSource:
 
     This is for user PDFs outside the workspace, not the workspace paper store.
     Uses PaperSource Protocol - redesigned from scratch.
+    Supports multiple paths with unified indexing for efficiency.
 
     Features:
     - Read-only: does NOT modify or move user PDF files
+    - Multiple paths: supports scanning multiple directories
+    - Unified index: single cache for all paths (memory efficient)
     - Recursive scanning: supports nested directories
     - Efficient: caches directory index for fast repeated queries
     - Change detection: file hashing to avoid unnecessary re-scans
@@ -170,12 +173,34 @@ class LocalSource:
             └── old_paper.pdf
     """
 
-    pdf_dir: Path  # Root directory containing user PDFs
+    pdf_dir: Path | None = None  # Deprecated: use pdf_dirs
+    pdf_dirs: list[Path] = field(default_factory=list)  # Multiple paths support
     recursive: bool = True  # Enable recursive scanning
 
     # Cached state - initialized lazily via _get_index()
     _index: dict[str, Path] = field(default_factory=dict, init=False, repr=False)
     _file_hashes: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _path_sources: dict[Path, str] = field(
+        default_factory=dict, init=False, repr=False
+    )  # Track source path
+
+    def __post_init__(self) -> None:
+        """Normalize paths - handle both single pdf_dir and pdf_dirs list."""
+        # Handle legacy single pdf_dir parameter
+        if self.pdf_dir is not None:
+            if not self.pdf_dirs:
+                self.pdf_dirs = [self.pdf_dir]
+            else:
+                # Both provided - include pdf_dir at start
+                if self.pdf_dir not in self.pdf_dirs:
+                    self.pdf_dirs = [self.pdf_dir] + self.pdf_dirs
+
+        # Filter out invalid paths
+        self.pdf_dirs = [p for p in self.pdf_dirs if p is not None and p.exists()]
+
+        # Ensure we have at least one valid path
+        if not self.pdf_dirs and self.pdf_dir is not None and self.pdf_dir.exists():
+            self.pdf_dirs = [self.pdf_dir]
 
     @property
     def _index_dict(self) -> dict[str, Path]:
@@ -196,29 +221,40 @@ class LocalSource:
         self._file_hashes = value
 
     def _build_index(self) -> dict[str, Path]:
-        """Build index: DOI/filename → file path."""
+        """Build unified index across all paths: DOI/filename → file path."""
         index: dict[str, Path] = {}
         hashes: dict[str, str] = {}
 
-        if not self.pdf_dir.exists():
-            _log.warning("PDF directory does not exist: %s", self.pdf_dir)
+        if not self.pdf_dirs:
+            _log.warning("No PDF directories configured")
             return index
 
-        pattern = "**/*.pdf" if self.recursive else "*.pdf"
+        # Collect all PDF files from all paths
+        all_pdf_files: list[tuple[Path, Path]] = []  # (pdf_path, source_dir)
 
-        # Get all PDF files
-        pdf_files = list(self.pdf_dir.glob(pattern))
-        pdf_files = [p for p in pdf_files if p.is_file()]
+        for pdf_dir in self.pdf_dirs:
+            if not pdf_dir.exists():
+                _log.warning("PDF directory does not exist: %s", pdf_dir)
+                continue
+
+            pattern = "**/*.pdf" if self.recursive else "*.pdf"
+            pdf_files = list(pdf_dir.glob(pattern))
+            pdf_files = [p for p in pdf_files if p.is_file()]
+
+            for pdf_path in pdf_files:
+                all_pdf_files.append((pdf_path, pdf_dir))
+
+        if not all_pdf_files:
+            _log.debug("No PDF files found in any directory")
+            return index
 
         # Show progress with tqdm if available
-        if _has_tqdm and len(pdf_files) > 10:
-            pdf_iter: Iterator = tqdm(
-                pdf_files, desc=f"Indexing {self.pdf_dir.name}", unit="pdf"
-            )  # type: ignore[valid-type]
+        if _has_tqdm and len(all_pdf_files) > 10:
+            pdf_iter: Iterator = tqdm(all_pdf_files, desc="Indexing PDFs", unit="pdf")  # type: ignore[valid-type]
         else:
-            pdf_iter = iter(pdf_files)
+            pdf_iter = iter(all_pdf_files)
 
-        for pdf_path in pdf_iter:
+        for pdf_path, source_dir in pdf_iter:
             filename = pdf_path.stem
 
             # Compute hash for change detection
@@ -227,6 +263,9 @@ class LocalSource:
             except Exception as e:
                 _log.debug("Failed to hash %s: %s", pdf_path, e)
                 file_hash = ""
+
+            # Track source path for identification
+            self._path_sources[pdf_path] = str(source_dir)
 
             # Index by DOI if present
             doi = _extract_doi_from_filename(filename)
@@ -238,7 +277,11 @@ class LocalSource:
             index[filename] = pdf_path
             hashes[filename] = file_hash
 
-        _log.debug("Built index with %d PDFs in %s", len(index), self.pdf_dir)
+        _log.debug(
+            "Built index with %d PDFs from %d directories",
+            len(index) // 2,
+            len(self.pdf_dirs),
+        )
 
         # Update hashes
         self._set_hashes(hashes)
@@ -314,11 +357,13 @@ class LocalSource:
 
     def _create_progress_iter(self, futures: dict[Future, Path]) -> Iterator[Future]:
         """Create progress iterator for futures."""
+        # Get a display name for progress (first path name or 'pdfs')
+        display_name = self.pdf_dirs[0].name if self.pdf_dirs else "pdfs"
         if _has_tqdm and tqdm is not None:
             return tqdm(
                 as_completed(futures),
                 total=len(futures),
-                desc=f"Searching {self.pdf_dir.name}",
+                desc=f"Searching {display_name}",
                 unit="paper",
             )  # type: ignore[return-value]
         return as_completed(futures)

@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from linkora.loader import PaperEnricher
     from linkora.papers import PaperStore
     from linkora.index import SearchIndex, VectorIndex
+    from linkora.ingest.matching import DefaultDispatcher
 
 _log = get_logger(__name__)
 
@@ -46,6 +47,7 @@ class AppContext:
     _http_client: "HTTPClient | None" = field(default=None, repr=False)
     _llm_runner: "LLMRunner | None" = field(default=None, repr=False)
     _paper_store: "PaperStore | None" = field(default=None, repr=False)
+    _dispatcher: "DefaultDispatcher | None" = field(default=None, repr=False)
 
     def http_client(self) -> "HTTPClient":
         """Get or create HTTP client (lazy init)."""
@@ -103,11 +105,26 @@ class AppContext:
             runner=self.llm_runner(),
         )
 
+    def source_dispatcher(self) -> "DefaultDispatcher":
+        """Get or create source dispatcher with multi-path support.
+
+        Uses lazy initialization for efficiency.
+        """
+        if self._dispatcher is None:
+            from linkora.ingest.matching import DefaultDispatcher
+
+            paths = self.config.resolve_local_source_paths()
+            self._dispatcher = DefaultDispatcher(
+                local_pdf_dirs=paths, http_client=self.http_client()
+            )
+        return self._dispatcher
+
     def close(self) -> None:
         """Close all resources."""
         self._http_client = None
         self._llm_runner = None
         self._paper_store = None
+        self._dispatcher = None
 
 
 __all__ = ["AppContext"]

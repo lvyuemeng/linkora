@@ -505,7 +505,7 @@ class TopicTrainer:
             dir_name = id_to_dir.get(paper_id)
             if dir_name is None:
                 dir_name = paper_id
-            paper_d = store.papers_dir / dir_name
+            paper_d = store.get_paper_dir(dir_name)
 
             try:
                 meta = store.read_meta(paper_d)
