@@ -19,12 +19,12 @@ Research is fragmented. Papers live in multiple folders, search is scattered acr
 
 ## Features
 
-| | | |
-|---|---|---|
+| | | | |
+|---|---|---|---|
 | **Layered Reading** | L1 metadata → L2 abstract → L3 sections → L4 full text — read at the depth you need |
 | **Hybrid Search** | FTS5 keyword + Qwen3 semantic → RRF fusion ranking |
 | **Multi-Source Import** | Local PDFs, OpenAlex API, Zotero, EndNote XML/RIS |
-| **Workspaces** | Multiple research projects with isolated search and BibTeX export |
+| **Workspaces** | Multiple research projects with isolated search and data |
 | **MCP Server** | Full toolset for Claude Desktop, Cursor, and any MCP client |
 
 ## Installation
@@ -73,18 +73,23 @@ linkora-mcp
 
 ## Configuration
 
-linkora **is NOT a zero-config tool** — it requires explicit configuration. See [config.md](./docs/config.md) for full details.
+linkora **requires explicit configuration** — it is NOT a zero-config tool. See [config.md](./docs/config.md) for full details.
+
+### Config File Locations
+
+linkora looks for config in (highest priority first):
+
+| Location | Platform |
+|----------|----------|
+| `~/.linkora/config.yml` | All |
+| `~/.config/linkora/config.yml` | All |
+
+If no config file is found, built-in defaults are used.
 
 ### Quick Setup
 
 ```yaml
 # ~/.linkora/config.yml
-default_workspace: research
-
-workspace:
-  research:
-    description: "Main research workspace"
-
 sources:
   local:
     enabled: true
@@ -97,73 +102,89 @@ llm:
 ```
 
 See [`examples/config/full.yml`](examples/config/full.yml) for complete configuration.
-
-### Workspace Concept
-
-Workspaces provide isolated research environments:
-
-```
-~/.linkora/config.yml           # Global config
-~/.config/linkora/config.yml   # XDG config location
-<workspace>/linkora.yml        # Workspace-local override
-```
 
 ### Environment Variables
 
 | Variable | Description |
 |----------|-------------|
-| `linkora_ROOT` | Root directory for all workspaces |
-| `linkora_WORKSPACE` | Active workspace name |
-| `linkora_LLM_API_KEY` | LLM API key (fallback: `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`) |
+| `LINKORA_ROOT` | Root directory for all workspaces |
+| `LINKORA_WORKSPACE` | Active workspace name |
+| `LINKORA_LLM_API_KEY` | LLM API key (fallback: `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`) |
 | `MINERU_API_KEY` | PDF parsing API key (MinerU) |
 | `ZOTERO_API_KEY` | Zotero API key |
 | `ZOTERO_LIBRARY_ID` | Zotero library ID |
 | `OPENALEX_API_KEY` | OpenAlex API key |
 
-### Example Config
+---
 
-```yaml
-# ~/.linkora/config.yml
-default_workspace: research
+## Workspace Concept
 
-workspace:
-  research:
-    description: "Main research workspace"
+A **workspace** is a self-contained research environment with its own:
+- Papers directory
+- Full-text search index (FTS5)
+- Vector search index (FAISS)
+- Metadata
 
-sources:
-  local:
-    enabled: true
-    papers_dir: papers
+Workspaces are managed via CLI commands:
 
-llm:
-  backend: openai-compat
-  model: deepseek-chat
-  base_url: https://api.deepseek.com
+```bash
+# Show current workspace info
+linkora config show
+
+# List all workspaces
+linkora config show --all
+
+# Set default workspace
+linkora config set-default ml
+
+# Set workspace description
+linkora config set-meta description "Machine learning papers"
+
+# Migrate/rename workspace
+linkora config mv old-name new-name
 ```
 
-See [`examples/config/full.yml`](examples/config/full.yml) for complete configuration.
+---
 
 ## CLI Commands
 
 | Command | Description |
 |---------|-------------|
-| `linkora search <query>` | Search papers (default: FTS5) |
-| `linkora search <query> --mode vector` | Semantic vector search |
-| `linkora index` | Build FTS5 index |
-| `linkora index --type vector` | Build vector index |
+| **Search** | |
+| `linkora search <query>` | Search papers (default: FTS5 fulltext) |
+| `linkora search <query> --mode fulltext` | Full-text search using FTS5 |
+| `linkora search <query> --mode author` | Search by author name |
+| `linkora search <query> --mode vector` | Semantic vector search (FAISS) |
+| `linkora search <query> --mode hybrid` | Combined FTS + vector search |
+| `linkora top-cited` | Get top-cited papers |
+| **Index** | |
+| `linkora index` | Build/update FTS5 index |
+| `linkora index --type fts` | Build FTS5 full-text index |
+| `linkora index --type vector` | Build vector index (FAISS) |
+| `linkora index --rebuild` | Rebuild index from scratch |
+| **Paper Management** | |
+| `linkora add --doi <doi>` | Add paper by DOI |
+| `linkora add --title <title>` | Add paper by title search |
+| `linkora add "<query>"` | Add papers by free-form query |
+| `linkora enrich` | Enrich papers with TOC and conclusions |
+| **Workspace** | |
+| `linkora config show` | Show workspace configuration |
+| `linkora config show --all` | List all workspaces |
+| `linkora config set <field> <value>` | Set config value |
+| `linkora config set-meta <field> <value>` | Set workspace metadata |
+| `linkora config set-default <workspace>` | Set default workspace |
+| `linkora config mv <source> <target>` | Migrate workspace |
+| **System** | |
 | `linkora init` | Interactive setup wizard |
 | `linkora audit` | Data quality audit |
-| `linkora doctor` | Full health check |
+| `linkora doctor` | Full health check (with network) |
+| `linkora doctor --light` | Quick health check (no network) |
+| `linkora metrics` | Show LLM metrics |
 | `linkora --context` | Show design context for AI agents |
 
+---
+
 ## Architecture
-
-linkora follows a layered architecture:
-
-- **Layer 3**: CLI, MCP server, exports
-- **Layer 2**: Features (topics, sources)
-- **Layer 1**: Core (loader, index, extract)
-- **Layer 0**: Foundation (config, log, papers)
 
 See [`docs/design.md`](docs/design.md) for detailed architecture.
 
@@ -183,8 +204,8 @@ just
 just setup        # Create venv and sync dependencies
 just test         # Run tests
 just lint         # Check linting
-just typecheck    # Type checking
-just check        # All quality checks
+just ty           # Type checking
+just quality      # All quality checks
 just ci           # Full CI pipeline
 ```
 

@@ -87,7 +87,6 @@ class TestAppConfigDefaults:
     def test_sources_defaults(self):
         cfg = AppConfig()
         assert cfg.sources.local.enabled is True
-        assert cfg.sources.local.papers_dir == "papers"
         assert cfg.sources.local.paths == []
         assert cfg.sources.arxiv.enabled is False
         assert cfg.sources.zotero.enabled is False

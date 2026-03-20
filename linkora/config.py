@@ -50,7 +50,6 @@ class LocalSourceConfig(BaseModel):
     model_config = {"frozen": True, "extra": "forbid"}
 
     enabled: bool = True
-    papers_dir: str = "papers"
     paths: list[str] = Field(default_factory=list)
 
 
@@ -159,7 +158,7 @@ class AppConfig(BaseModel):
     environment variables are read at call time, not at load time.
     """
 
-    model_config = {"frozen": True}
+    model_config = {"frozen": True, "extra": "forbid"}
 
     sources: SourcesConfig = Field(default_factory=SourcesConfig)
     index: IndexConfig = Field(default_factory=IndexConfig)

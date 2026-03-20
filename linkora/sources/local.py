@@ -173,7 +173,6 @@ class LocalSource:
             └── old_paper.pdf
     """
 
-    pdf_dir: Path | None = None  # Deprecated: use pdf_dirs
     pdf_dirs: list[Path] = field(default_factory=list)  # Multiple paths support
     recursive: bool = True  # Enable recursive scanning
 
@@ -183,24 +182,6 @@ class LocalSource:
     _path_sources: dict[Path, str] = field(
         default_factory=dict, init=False, repr=False
     )  # Track source path
-
-    def __post_init__(self) -> None:
-        """Normalize paths - handle both single pdf_dir and pdf_dirs list."""
-        # Handle legacy single pdf_dir parameter
-        if self.pdf_dir is not None:
-            if not self.pdf_dirs:
-                self.pdf_dirs = [self.pdf_dir]
-            else:
-                # Both provided - include pdf_dir at start
-                if self.pdf_dir not in self.pdf_dirs:
-                    self.pdf_dirs = [self.pdf_dir] + self.pdf_dirs
-
-        # Filter out invalid paths
-        self.pdf_dirs = [p for p in self.pdf_dirs if p is not None and p.exists()]
-
-        # Ensure we have at least one valid path
-        if not self.pdf_dirs and self.pdf_dir is not None and self.pdf_dir.exists():
-            self.pdf_dirs = [self.pdf_dir]
 
     @property
     def _index_dict(self) -> dict[str, Path]:
