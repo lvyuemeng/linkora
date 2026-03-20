@@ -19,8 +19,8 @@ Research is fragmented. Papers live in multiple folders, search is scattered acr
 
 ## Features
 
-| | |
-|---|---|
+| | | |
+|---|---|---|
 | **Layered Reading** | L1 metadata → L2 abstract → L3 sections → L4 full text — read at the depth you need |
 | **Hybrid Search** | FTS5 keyword + Qwen3 semantic → RRF fusion ranking |
 | **Multi-Source Import** | Local PDFs, OpenAlex API, Zotero, EndNote XML/RIS |
@@ -169,7 +169,7 @@ See [`docs/design.md`](docs/design.md) for detailed architecture.
 
 ## Development
 
-Please refer [design](docs/design.md) for architecture.
+Please refer to [`docs/AGENT.md`](docs/AGENT.md) for development guidelines.
 
 linkora uses [just](https://github.com/casey/just) for development workflows. However, it's **optional** for convenience.
 

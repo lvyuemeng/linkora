@@ -1,359 +1,503 @@
-# linkora Design - Updated
+# linkora Architecture Design
 
-> Ideal architecture for a general-purpose local knowledge network.
-> Updated: Multiple local paths support with efficiency focus
-
----
-
-## 1. Project Goal
-
-**linkora** is a local knowledge network that enables AI-powered research and knowledge management. It provides:
-
-- **Unified knowledge base** with multiple workspaces
-- **Layered content loading** (L1-L4) for progressive access
-- **Semantic retrieval** via embeddings and vector search
-- **Source-agnostic** paper ingestion from multiple formats
-- **Multiple local sources** with efficient unified indexing
-
-### Core Principles
-
-| Principle | Description |
-|-----------|-------------|
-| Local-First | All data stored locally (privacy, offline capability) |
-| AI-Native | Designed for AI coding agents with JSON output |
-| Zero Config | Environment variables auto-detected, smart defaults |
-| Functional Design | Pure functions, pipeline composition, dataclass-based state |
-| Efficiency-First | Minimize memory usage, reuse caches, lazy initialization |
+> Developer documentation for linkora architecture. Understand how components interact and how to extend the system.
 
 ---
 
-## 2. Architecture
+## 1. Architecture Overview
 
-### Layer Overview
+### 1.1 Layer Structure
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│ Layer 3: Entry Points                                           │
-│   ├── cli/          CLI commands                                │
-│   ├── mcp.py        MCP server for AI agents                    │
-│   └── export.py     BibTeX export                               │
+│ Layer 3: Entry Points                                          │
+│   ├── cli/           CLI commands                               │
+│   ├── cli/__init__.py Entry point & AppContext                 │
+│   └── cli/commands.py CLI command handlers                     │
 ├─────────────────────────────────────────────────────────────────┤
 │ Layer 2: Features                                               │
-│   ├── topics.py     BERTopic clustering                          │
-│   └── sources/     PaperSource Protocol + implementations       │
-│       ├── local.py  Multi-path LocalSource (UPDATED)            │
-│       └── ...       Other sources                               │
+│   ├── topics.py       BERTopic clustering                       │
+│   ├── loader.py       PaperEnricher (TOC/conclusion)           │
+│   └── sources/        PaperSource Protocol + implementations    │
+│       ├── protocol.py PaperSource Protocol                     │
+│       ├── local.py    Multi-path LocalSource                   │
+│       ├── openalex.py OpenAlex API                             │
+│       ├── zotero.py   Zotero sync                             │
+│       └── endnote.py  Endnote XML/RIS                          │
 ├─────────────────────────────────────────────────────────────────┤
-│ Layer 1: Core Data                                              │
-│   ├── loader.py     L1-L4 layered loading                      │
-│   ├── index/       FTS5 + FAISS search                         │
-│   │   ├── text.py  Full-text search                             │
-│   │   └── vector.py Semantic search                             │
-│   └── extract.py    Metadata extraction (regex/LLM)             │
+│ Layer 1: Core Data                                             │
+│   ├── ingest/         Paper ingestion                          │
+│   │   ├── matching.py DefaultDispatcher                        │
+│   │   ├── download.py PDF download                              │
+│   │   └── pipeline.py Ingest pipeline                          │
+│   ├── index/          FTS5 + FAISS search                     │
+│   │   ├── text.py    Full-text search (FTS5)                 │
+│   │   └── vector.py  Semantic search (FAISS)                   │
+│   └── extract.py      Metadata extraction (regex/LLM)          │
 ├─────────────────────────────────────────────────────────────────┤
-│ Layer 0: Foundation                                              │
-│   ├── config.py    Configuration loading & resolution           │
-│   ├── log.py       Logging singleton                            │
-│   ├── papers.py    PaperStore, metadata handling                │
-│   ├── audit.py     Data quality auditing                        │
-│   ├── filters.py   Protocol-based filtering                     │
-│   ├── llm.py       LLM client abstraction                      │
-│   ├── http.py      HTTP client Protocol                         │
-│   ├── mineru.py    PDF parsing (MinerU)                         │
-│   └── metrics.py   Metrics collection                          │
+│ Layer 0: Foundation                                             │
+│   ├── config.py      Configuration loading & resolution          │
+│   ├── log.py        Logging singleton                         │
+│   ├── papers.py     PaperStore, metadata, audit               │
+│   ├── filters.py    QueryFilter for search                   │
+│   ├── llm.py       LLM client abstraction                    │
+│   ├── http.py       HTTP client Protocol                      │
+│   ├── mineru.py     PDF parsing (MinerU)                      │
+│   ├── metrics.py    Metrics collection                         │
+│   ├── hash.py       Content hashing                           │
+│   └── setup.py      Environment check & init                    │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Module Reference
+### 1.2 Data Flow
 
-| Module | Responsibility | Key Types |
-|--------|---------------|-----------|
-| `config.py` | Config loading, workspace resolution, multi-path resolution | `Config`, `LocalSourceConfig`, `resolve_local_source_paths()` |
-| `sources/local.py` | Multi-path local PDF scanning with unified cache | `LocalSource`, `MultiPathLocalSource` |
-| `ingest/matching.py` | Source dispatcher for paper matching | `DefaultDispatcher` |
-| `cli/context.py` | Lazy context injection for commands | `AppContext` |
-| `cli/commands.py` | CLI command handlers | `cmd_add`, `cmd_search`, etc. |
+```
+User CLI Input
+      ↓
+Config (workspace + sources + paths)
+      ↓
+┌─────────────────────────────────────────────────────────────┐
+│ Sources Layer                                               │
+│   DefaultDispatcher → LocalSource/OpenAlex/Zotero/Endnote    │
+│   Output: PaperCandidate                                   │
+└─────────────────────────────────────────────────────────────┘
+      ↓
+┌─────────────────────────────────────────────────────────────┐
+│ Ingest Pipeline                                            │
+│   Download → Parse (MinerU) → Extract metadata              │
+│   Output: IngestResult                                     │
+└─────────────────────────────────────────────────────────────┘
+      ↓
+┌─────────────────────────────────────────────────────────────┐
+│ PaperStore (Storage Layer)                                  │
+│   Stores: meta.json + paper.md                             │
+│   L1: title, authors, year, journal, doi                   │
+│   L2: abstract                                             │
+│   L3: l3_conclusion (optional, from enrichment)           │
+│   L4: paper.md (full markdown)                            │
+└─────────────────────────────────────────────────────────────┘
+      ↓ Optional
+┌─────────────────────────────────────────────────────────────┐
+│ Enrichment (Loader)                                        │
+│   PaperEnricher: TOC + Conclusion extraction               │
+│   Adds: l3_conclusion to meta.json                        │
+└─────────────────────────────────────────────────────────────┘
+      ↓
+┌─────────────────────────────────────────────────────────────┐
+│ Index Layer                                                │
+│   SearchIndex (FTS5): title + abstract + l3_conclusion    │
+│   VectorIndex (FAISS): title + abstract embeddings         │
+└─────────────────────────────────────────────────────────────┘
+      ↓
+Search Results (JSON)
+```
+
+### 1.3 Search Index Types
+
+**Both indexes work independently and are NOT dependent on enrichment.**
+
+| Index | Source | Depends on Enrichment? |
+|-------|---------|------------------------|
+| **SearchIndex (FTS5)** | title + abstract + l3_conclusion | No (l3_conclusion is optional) |
+| **VectorIndex (FAISS)** | title + abstract | No |
+
+- **FTS5 (Full-Text Search)**: Searches text content. If enriched, includes `l3_conclusion` for better coverage.
+- **FAISS (Semantic Search)**: Searches by semantic similarity using embeddings of title + abstract.
 
 ---
 
-## 3. Configuration
+## 2. Key Components
 
-### LocalSourceConfig (Updated for Multiple Paths)
+### 2.1 Config Module (`config.py`)
 
+**Responsibility**: Configuration loading, workspace resolution, path resolution.
+
+**Key Types**:
+- `Config` - Main configuration object
+- `WorkspaceConfig` - Workspace identity
+- `SourcesConfig` - Data source settings
+- `IndexConfig` - Search index settings
+- `LLMConfig` - LLM client settings
+
+**Key Methods**:
 ```python
-@dataclass(frozen=True)
-class LocalSourceConfig:
-    enabled: bool = True
-    papers_dir: str = "papers"           # Primary path (workspace relative)
-    paths: list[str] = field(default_factory=list)  # Additional absolute/relative paths
+# Path resolution
+cfg.resolve_local_source_paths()  # list[Path] - all local paths
+
+# API key resolution
+cfg.resolve_llm_api_key()         # str
+cfg.resolve_mineru_api_key()      # str
+
+# Derived paths
+cfg.workspace_dir    # Path
+cfg.papers_dir       # Path
+cfg.index_db         # Path
+cfg.vectors_file     # Path
 ```
 
-### Path Resolution
+### 2.2 Sources Module (`sources/`)
 
+**PaperSource Protocol** (`sources/protocol.py`):
 ```python
-def resolve_local_source_paths(self) -> list[Path]:
-    """Resolve all local source paths from config.
-    
-    Returns:
-        List of paths: papers_dir + additional paths.
-        Resolved relative to config file root, NOT workspace root.
-    """
+class PaperSource(Protocol):
+    @property
+    def name(self) -> str: ...
+
+    def fetch(self, **kwargs) -> Iterator[PaperCandidate]: ...
+    def count(self, **kwargs) -> int: ...
 ```
 
-**Resolution Priority:**
-1. Primary `papers_dir` (workspace-relative or absolute)
-2. Additional paths from `paths` list (absolute or config-root-relative)
-
----
-
-## 4. Multi-Path Local Source (Efficiency-Focused Design)
-
-### Design Decision: Unified Index with Shared Cache
-
-For **efficiency in speed and memory**, multiple local paths are managed as a **single unified source** with:
-- One shared index covering all paths
-- Single file hash cache across all paths
-- Deduplication at candidate level
-- Single-threaded sequential scan (avoids thread overhead)
-
-### Architecture
-
-```mermaid
-graph TB
-    subgraph "LocalSource (Multi-Path)"
-        A[pdf_dirs: list[Path]] --> B[Unified Index Builder]
-        B --> C[Shared Cache: dict[Path, str]]
-        C --> D[Query Processor]
-        D --> E[Deduplicator]
-    end
-    
-    F[PaperQuery] --> D
-    E --> G[Iterator[PaperCandidate]]
-```
-
-### Key Design Points
-
-| Aspect | Approach | Benefit |
-|--------|----------|---------|
-| Index Storage | Single dict keyed by DOI/filename | O(1) lookup, unified cache |
-| File Hashing | One MD5 per file, stored in shared dict | Avoids re-hashing on re-scan |
-| Change Detection | Compare hash dict against filesystem | Minimal I/O on unchanged dirs |
-| Search | Sequential scan with early exit | Memory efficient |
-| Deduplication | By DOI first, then by filename | Consistent ordering |
-
-### LocalSource API (Updated)
-
+**LocalSource** (`sources/local.py`) - supports multi-path:
 ```python
 @dataclass
 class LocalSource:
-    """Scan user's downloaded PDFs on filesystem (read-only).
-    
-    Now supports multiple paths with unified indexing.
-    
-    Attributes:
-        pdf_dirs: List of root directories to scan
-        recursive: Enable recursive scanning
-    """
-    
-    pdf_dirs: list[Path]  # Changed from single pdf_dir
+    pdf_dirs: list[Path]        # Multiple paths
     recursive: bool = True
-    
-    # Cached state - unified across all paths
-    _index: dict[str, Path] = field(default_factory=dict, init=False, repr=False)
-    _file_hashes: dict[str, str] = field(default_factory=dict, init=False, repr=False)
-    _path_sources: dict[Path, str] = field(default_factory=dict, init=False, repr=False)  # Track which path each file came from
+
+    # Unified index (built once)
+    _index: dict[str, Path]
+    _file_hashes: dict[str, str]
+    _path_sources: dict[Path, str]
 ```
 
-### Breaking Change: Constructor Signature
+### 2.3 Ingest Module (`ingest/`)
 
-**Old:**
+**DefaultDispatcher** (`ingest/matching.py`):
 ```python
-LocalSource(pdf_dir: Path)
+class DefaultDispatcher:
+    def __init__(
+        self,
+        local_pdf_dirs: list[Path] | None = None,
+        http_client=None,
+    ): ...
+
+    def match_papers(self, query: PaperQuery) -> list[PaperCandidate]: ...
+    def score_candidate(self, candidate: PaperCandidate, query: PaperQuery) -> float: ...
 ```
 
-**New:**
+**Pipeline** (`ingest/pipeline.py`):
 ```python
-LocalSource(pdf_dirs: list[Path])  # Accepts list, maintains backward compat via overload
+def ingest(
+    candidate: PaperCandidate,
+    client: PDFClient,
+    papers_dir: Path,
+    http_client: HTTPClient | None = None,
+) -> IngestResult: ...
+```
+
+### 2.4 Index Module (`index/`)
+
+**SearchIndex** (`index/text.py`) - FTS5 full-text search:
+```python
+class SearchIndex:
+    """Full-text search using SQLite FTS5."""
+
+    def search(self, query: str, top_k: int = 20, **filters) -> list[dict]: ...
+    def search_author(self, author: str, top_k: int = 20) -> list[dict]: ...
+    def top_cited(self, top_k: int = 20, **filters) -> list[dict]: ...
+```
+
+**VectorIndex** (`index/vector.py`) - FAISS semantic search:
+```python
+class VectorIndex:
+    """Semantic search using FAISS."""
+
+    def search(self, query: str, top_k: int = 10, **filters) -> list[dict]: ...
+```
+
+### 2.5 Loader Module (`loader.py`)
+
+**PaperEnricher** - Optional enrichment:
+```python
+class PaperEnricher:
+    """Extract TOC and conclusion from papers (OPTIONAL)."""
+
+    def enrich_toc(self, paper_id: str, *, force: bool = False) -> bool: ...
+    def enrich_conclusion(self, paper_id: str, *, force: bool = False) -> bool: ...
+    # Adds l3_conclusion to meta.json for enhanced search
+```
+
+### 2.6 CLI Context (`cli/context.py`)
+
+**AppContext** - Lazy resource injection:
+```python
+@dataclass
+class AppContext:
+    config: Config
+
+    # Lazy resources (created on first access)
+    def http_client(self) -> HTTPClient: ...
+    def llm_runner(self) -> LLMRunner: ...
+    def paper_store(self) -> PaperStore: ...
+    def search_index(self) -> SearchIndex: ...
+    def vector_index(self) -> VectorIndex: ...
+    def paper_enricher(self) -> PaperEnricher: ...
+    def source_dispatcher(self) -> DefaultDispatcher: ...
 ```
 
 ---
 
-## 5. Source Dispatcher (Updated)
+## 3. Multi-Path Support
 
-### DefaultDispatcher (Updated for Multi-Path)
+### 3.1 Design Decision
 
+Multiple local paths are managed as a **single unified source** for efficiency:
+- One shared index covering all paths
+- Single file hash cache across all paths
+- Deduplication at candidate level
+- Single-threaded sequential scan
+
+### 3.2 Implementation
+
+**Config** (`config.py`):
+```python
+def resolve_local_source_paths(self) -> list[Path]:
+    """Resolve all local source paths from config."""
+    local = self.sources.local
+    paths = []
+
+    # Primary papers_dir
+    if local.papers_dir:
+        paths.append(self._resolve_path(local.papers_dir))
+
+    # Additional paths
+    for path_str in local.paths or []:
+        if path_str:
+            paths.append(self._resolve_path(path_str))
+
+    return paths
+```
+
+**LocalSource** (`sources/local.py`):
+```python
+@dataclass
+class LocalSource:
+    pdf_dirs: list[Path]  # Multiple paths
+    recursive: bool = True
+
+    _index: dict[str, Path] = field(default_factory=dict)
+    _file_hashes: dict[str, str] = field(default_factory=dict)
+    _path_sources: dict[Path, str] = field(default_factory=dict)
+```
+
+**Dispatcher** (`ingest/matching.py`):
 ```python
 class DefaultDispatcher:
-    """Source dispatcher - updated for multi-path local sources."""
-    
     def __init__(
         self,
-        local_pdf_dirs: list[Path] | None = None,  # Changed from single path
+        local_pdf_dirs: list[Path] | None = None,
         http_client=None,
     ):
         self._local_pdf_dirs = local_pdf_dirs or []
         self._http_client = http_client
         self._local_source: PaperSource | None = None
-        # ... other sources
-```
 
-**Key Change:** Single `LocalSource` instance handles all paths, not multiple instances.
+    def _ensure_sources(self) -> None:
+        """Create single LocalSource with all paths."""
+        if self._local_pdf_dirs:
+            self._local_source = LocalSource(pdf_dirs=self._local_pdf_dirs)
+```
 
 ---
 
-## 6. Context Injection (Improved)
+## 4. Filter System
 
-### Current Pattern (to be improved)
+### 4.1 QueryFilter (`filters.py`)
 
+Unified filter for all operations:
 ```python
-# In commands.py - BROKEN (method doesn't exist!)
-def cmd_add(args, ctx: AppContext):
-    local_pdf_dir = ctx.config.resolve_local_source_dir()  # ERROR!
+@dataclass(frozen=True)
+class QueryFilter:
+    year: str | None = None      # "2024", ">2020", "2020-2024"
+    journal: str | None = None    # Partial match
+    paper_type: str | None = None # Exact match
+    author: str | None = None     # Partial match
+
+    def matches(self, meta: dict) -> bool: ...
 ```
 
-### Improved Pattern
+### 4.2 FilterParams (`index/text.py`)
 
+FTS5 filter with SQL generation:
 ```python
-# Option 1: Direct config access (recommended for clarity)
-def cmd_add(args, ctx: AppContext):
-    paths = ctx.config.resolve_local_source_paths()  # Returns list[Path]
-    dispatcher = DefaultDispatcher(local_pdf_dirs=paths, http_client=ctx.http_client())
-
-# Option 2: Context method (for repeated use)
-@dataclass
-class AppContext:
-    # ... existing fields
-    
-    def source_dispatcher(self) -> DefaultDispatcher:
-        """Get or create source dispatcher with multi-path support."""
-        if self._dispatcher is None:
-            paths = self.config.resolve_local_source_paths()
-            self._dispatcher = DefaultDispatcher(
-                local_pdf_dirs=paths,
-                http_client=self.http_client()
-            )
-        return self._dispatcher
-```
-
-### Context Methods Summary
-
-| Method | Purpose | Lazy? |
-|--------|---------|-------|
-| `http_client()` | HTTP requests | Yes |
-| `llm_runner()` | LLM inference | Yes |
-| `paper_store()` | Paper CRUD | Yes |
-| `search_index()` | FTS search | No (context manager) |
-| `vector_index()` | Vector search | No (context manager) |
-| `paper_enricher()` | TOC/conclusion extraction | Yes |
-| `source_dispatcher()` | Paper sources (NEW) | Yes |
-
----
-
-## 7. Workflows
-
-### Add Command Flow (Updated)
-
-```mermaid
-graph LR
-    A[cmd_add] --> B[ctx.source_dispatcher]
-    B --> C[LocalSource<br/>pdf_dirs=list[Path]]
-    C --> D[Unified Index Builder]
-    D --> E[Search All Paths]
-    E --> F[Deduplicate Results]
-    F --> G[Score & Rank]
-    G --> H[Return Candidates]
-```
-
-### Multi-Path Index Building
-
-```mermaid
-graph TB
-    A[pdf_dirs: list[Path]] --> B{For each path}
-    B --> C[Glob *.pdf recursive]
-    C --> D[Compute MD5 hash]
-    D --> E[Update unified index]
-    E --> F[Store path source]
-    B --> G[Dedupe by DOI]
-    G --> H[Final index]
+@dataclass(frozen=True)
+class FilterParams(QueryFilter):
+    def to_sql(self) -> tuple[str, list[str]]: ...
 ```
 
 ---
 
-## 8. CLI Commands
+## 5. Module Dependencies
 
-### Add Command (Updated)
+```
+linkora/
+├── config.py        Config loading & resolution
+├── papers.py       PaperStore, PaperMetadata, audit
+├── filters.py      QueryFilter
+├── hash.py         Content hashing
+├── llm.py          LLM client
+├── http.py         HTTP client Protocol
+├── mineru.py       PDF parsing (MinerU)
+├── loader.py       PaperEnricher (enrichment)
+├── extract.py      Metadata extraction
+├── metrics.py      Metrics
+├── log.py          Logging
+├── setup.py        Environment check & init
+├── topics.py       Topic modeling (BERTopic)
 
-```bash
-# Search local PDFs from multiple paths
-linkora add --doi 10.1234/example
-linkora add --title "machine learning"
-linkora add "quantum physics"  # Freeform
+linkora/sources/         Paper sources
+├── protocol.py         PaperSource Protocol
+├── local.py            LocalSource (multi-path)
+├── openalex.py         OpenAlex API
+├── zotero.py           Zotero
+└── endnote.py         Endnote
 
-# Shows which sources are used
-# Using 2 source(s)  # Now shows multi-path local source as 1
+linkora/ingest/         Paper ingestion
+├── matching.py         DefaultDispatcher
+├── download.py         PDF download
+└── pipeline.py         Ingest pipeline
+
+linkora/index/          Search indexes
+├── text.py            SearchIndex (FTS5)
+└── vector.py          VectorIndex (FAISS)
+
+linkora/cli/           CLI
+├── __init__.py        AppContext, CLI entry
+├── commands.py        Command handlers
+├── context.py         Lazy resource injection
+├── output.py          UI formatting
+└── errors.py          Error handling
 ```
 
-### Configuration Example
+---
 
-```yaml
-# ~/.linkora/config.yaml
-sources:
-  local:
-    enabled: true
-    papers_dir: papers           # Workspace-relative
-    paths:                      # Additional paths
-      - /data/research/pdfs
-      - ~/Dropbox/papers
-      - ${LINKORA_EXTRA_PAPERS}  # Env var support
+## 6. Extension Points
+
+### 6.1 Adding a New Source
+
+1. Create `sources/mysource.py`:
+```python
+@dataclass(frozen=True)
+class MySource:
+    @property
+    def name(self) -> str:
+        return "mysource"
+
+    def fetch(self, **kwargs) -> Iterator[PaperCandidate]: ...
+    def count(self, **kwargs) -> int: ...
+```
+
+2. Register in `DefaultDispatcher`:
+```python
+# In _ensure_sources()
+if self._my_config:
+    self._my_source = MySource(...)
+```
+
+### 6.2 Adding a New CLI Command
+
+1. Add handler in `cli/commands.py`:
+```python
+def cmd_mycommand(args: argparse.Namespace, ctx: AppContext) -> None:
+    # Use ctx for resources
+    store = ctx.paper_store()
+    # ...
+```
+
+2. Register in `cli/__init__.py`:
+```python
+parser = subparsers.add_parser("mycommand")
+parser.set_defaults(func=cmd_mycommand)
 ```
 
 ---
 
-## 9. Breaking Changes Summary
+## 7. Design Patterns
 
-| Change | Old | New | Impact |
-|--------|-----|-----|--------|
-| Config method | `resolve_local_source_dir()` (doesn't exist) | `resolve_local_source_paths()` | Fix broken code |
-| LocalSource ctor | `LocalSource(pdf_dir: Path)` | `LocalSource(pdf_dirs: list[Path])` | API change |
-| DefaultDispatcher | `local_pdf_dir: Path` | `local_pdf_dirs: list[Path]` | API change |
-| Source count | Multiple local = N sources | Multiple local = 1 source | UI change |
+### 7.1 Context Injection
+
+Resources are lazy-loaded via AppContext:
+```python
+# Don't do this:
+def cmd_search(args, ctx):
+    store = PaperStore(ctx.config.papers_dir)  # Creates every time
+
+# Do this:
+def cmd_search(args, ctx):
+    store = ctx.paper_store()  # Reuses cached instance
+```
+
+### 7.2 Protocol-Based Design
+
+Use Protocol for interfaces:
+```python
+class PDFClient(Protocol):
+    @property
+    def name(self) -> str: ...
+    def call(self, pdf_path: Path, opts: ParseOptions) -> dict: ...
+
+# Implementations:
+@dataclass(frozen=True)
+class LocalClient:
+    base_url: str = "http://localhost:8000"
+    def call(self, pdf_path: Path, opts: ParseOptions) -> dict: ...
+
+@dataclass(frozen=True)
+class CloudClient:
+    api_key: str
+    def call(self, pdf_path: Path, opts: ParseOptions) -> dict: ...
+```
+
+### 7.3 Immutable Data
+
+Use frozen dataclasses for config and results:
+```python
+@dataclass(frozen=True)
+class ExtractionResult:
+    success: bool
+    paper_id: str
+    method: str
+    error: str = ""
+```
 
 ---
 
-## 10. Implementation Plan
+## 8. Testing Strategy
 
-### Phase 1: Fix Broken Code
-- [ ] Add `resolve_local_source_dir()` as alias or fix commands.py to use `resolve_local_source_paths()`
+### 8.1 Unit Tests
 
-### Phase 2: Update LocalSource
-- [ ] Modify `LocalSource.__init__` to accept `pdf_dirs: list[Path]`
-- [ ] Update `_build_index()` to scan all paths
-- [ ] Add `_path_sources` tracking for source identification
-- [ ] Update `_search_sequential()` and `_search_parallel()` for multi-path
+Test pure functions and data transformations:
+- `filters.py` - QueryFilter matching
+- `hash.py` - Content hashing
+- `audit rules` - Data quality checks
+- `config.py` - Path resolution
 
-### Phase 3: Update Dispatcher
-- [ ] Modify `DefaultDispatcher.__init__` to accept `local_pdf_dirs: list[Path]`
-- [ ] Create single `LocalSource` with all paths
+### 8.2 Integration Tests
 
-### Phase 4: Update Context
-- [ ] Add `source_dispatcher()` method to `AppContext`
-- [ ] Update `cmd_add()` to use context method
+Test data flow end-to-end:
+- Config resolution with mocked paths
+- LocalSource multi-path scanning
+- SearchIndex FTS queries
+- PaperStore CRUD operations
 
-### Phase 5: Documentation
-- [ ] Update docs/design.md (this file)
-- [ ] Add examples/config for multi-path
+### 8.3 What NOT to Test
+
+External dependencies (mock-based tests don't add value):
+- LLM API calls
+- MinerU API calls
+- Network I/O
+- External ML libraries (FAISS, BERTopic)
 
 ---
 
-## 11. Environment Variables
+## 9. Implementation Status
 
-| Variable | Description |
-|----------|-------------|
-| `linkora_WORKSPACE` | Active workspace name |
-| `linkora_LLM_API_KEY` | LLM API key |
-| `linkora_EXTRA_PAPERS` | Additional local PDF paths (NEW) |
-| `DEEPSEEK_API_KEY` | DeepSeek API key (fallback) |
-| `OPENAI_API_KEY` | OpenAI API key (fallback) |
-| `MINERU_API_KEY` | MinerU cloud API key |
-| `ZOTERO_API_KEY` | Zotero API key |
-| `ZOTERO_LIBRARY_ID` | Zotero library ID |
+| Feature | Status | Location |
+|---------|--------|----------|
+| Multi-path local sources | ✅ Implemented | config.py, sources/local.py |
+| QueryFilter | ✅ Implemented | filters.py |
+| AppContext | ✅ Implemented | cli/context.py |
+| Layered config | ✅ Implemented | config.py |
+| Protocol-based sources | ✅ Implemented | sources/protocol.py |
+| Protocol-based HTTP | ✅ Implemented | http.py |
+| PaperEnricher | ✅ Implemented | loader.py |

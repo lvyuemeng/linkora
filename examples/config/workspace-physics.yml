@@ -1,13 +1,14 @@
-# Physics Research Workspace Configuration
-# Example workspace-local config for physics research
+# =============================================================================
+# linkora Workspace-Local Configuration
+# =============================================================================
+# This is a workspace-local config file for physics workspace
+# Location: <root>/workspace/physics/linkora.yml
+#
+# IMPORTANT: Workspace-local config can ONLY override the `sources` field.
+# Other fields will be ignored with a warning.
+# =============================================================================
 
-name: physics
-description: "Physics research workspace - condensed matter physics"
-
-# Custom root for this workspace (optional)
-root: /data/physics
-
-# Data sources for this workspace
+# Override sources for physics workspace
 sources:
   local:
     enabled: true
@@ -18,23 +19,4 @@ sources:
 
   openalex:
     enabled: true
-    api_key: ""  # Set via OPENALEX_API_KEY env var
-
-# Index configuration
-index:
-  top_k: 20
-  embed_model: Qwen/Qwen3-Embedding-0.6B
-  chunk_size: 1000  # Larger chunks for physics papers
-  chunk_overlap: 200
-
-# LLM configuration
-llm:
-  backend: openai-compat
-  model: deepseek-chat
-  base_url: https://api.deepseek.com
-  api_key: ""  # Set via DEEPSEEK_API_KEY env var
-
-# Ingest configuration
-ingest:
-  extractor: robust
-  abstract_llm_mode: verify
+    # api_key: ""  # Set via OPENALEX_API_KEY env var

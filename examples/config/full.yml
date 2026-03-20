@@ -1,86 +1,77 @@
-# Full Configuration Example
-# Complete configuration with all options documented
-
 # =============================================================================
-# Workspace Configuration
+# linkora Global Configuration
 # =============================================================================
-
-# Workspace name (required for identification)
-name: my-workspace
-description: "Full-featured research workspace"
-
-# Optional: Override root path for this workspace
-# root: /custom/path/to/workspace
-
-# =============================================================================
-# Default Workspace (used when linkora_WORKSPACE is not set)
+# This is the global config file (~/.linkora/config.yml)
+# Workspaces are defined here, with optional workspace-local overrides
 # =============================================================================
 
-default_workspace: my-workspace
+# Default workspace to use when linkora_WORKSPACE is not set
+default_workspace: default
 
 # =============================================================================
-# All Workspaces
+# Workspace Definitions
 # =============================================================================
+# Each workspace has its own papers, index, and settings
+# Workspace name as key, with description and optional root override
 
 workspace:
-  my-workspace:
-    description: "Full-featured research workspace"
-    # root: /custom/path  # Optional override
+  default:
+    description: "Default research workspace"
+
+  research:
+    description: "Main research workspace"
+    # root: /custom/path  # Optional: override default root location
 
   physics:
     description: "Physics research workspace"
     root: /data/physics
 
-  default:
-    description: "Default workspace"
-
 # =============================================================================
-# Data Sources Configuration
+# Data Sources
 # =============================================================================
+# Configure where to find papers
 
 sources:
-  # Local papers directory
+  # Local PDF files
   local:
     enabled: true
-    papers_dir: papers
-    # Additional paths to scan for papers
+    papers_dir: papers  # Primary papers directory (workspace-relative)
+    # Additional paths to scan for papers (absolute or home-relative)
     paths:
       - /mnt/library/papers
       - ~/Documents/research
 
-  # ArXiv integration (future)
-  arxiv:
-    enabled: false
-
-  # OpenAlex API integration
+  # OpenAlex API for paper metadata
   openalex:
     enabled: false
     # api_key: ""  # Set via OPENALEX_API_KEY env var
 
-  # Zotero integration
+  # Zotero library sync
   zotero:
     enabled: false
-    library_id: ""  # Set via ZOTERO_LIBRARY_ID env var
-    api_key: ""     # Set via ZOTERO_API_KEY env var
+    # library_id: ""   # Set via ZOTERO_LIBRARY_ID env var
+    # api_key: ""     # Set via ZOTERO_API_KEY env var
+    library_type: user
 
   # EndNote XML/RIS import
   endnote:
     enabled: true
 
 # =============================================================================
-# Index and Search Configuration
+# Index and Search Settings
 # =============================================================================
 
 index:
-  # Number of results to return by default
+  # Default number of results
   top_k: 20
 
-  # Embedding model configuration
+  # Embedding model for semantic search
   embed_model: Qwen/Qwen3-Embedding-0.6B
   embed_device: auto  # auto, cpu, cuda
   embed_cache: ~/.cache/modelscope/hub/models
+  embed_source: modelscope
 
-  # Vector search top_k (can differ from index top_k)
+  # Vector search settings
   embed_top_k: 10
 
   # Text chunking for embeddings
@@ -90,6 +81,7 @@ index:
 # =============================================================================
 # LLM Configuration
 # =============================================================================
+# For metadata extraction and enrichment
 
 llm:
   # Backend: openai-compat, openai, anthropic
@@ -101,30 +93,35 @@ llm:
   # API endpoint (for openai-compat)
   base_url: https://api.deepseek.com
 
-  # API key (set via linkora_LLM_API_KEY or DEEPSEEK_API_KEY)
-  api_key: ""
+  # API key - use environment variable
+  # api_key: ${DEEPSEEK_API_KEY}
 
-  # Request timeout in seconds
+  # Request timeout (seconds)
   timeout: 30
+  timeout_toc: 120
+  timeout_clean: 90
 
 # =============================================================================
-# PDF Ingest Configuration
+# PDF Ingest Settings
 # =============================================================================
 
 ingest:
   # Extractor: regex, llm, auto, robust
   extractor: robust
 
-  # MinerU configuration
+  # MinerU configuration (local or cloud)
   mineru_endpoint: http://localhost:8000
   mineru_cloud_url: https://mineru.net/api/v4
-  mineru_api_key: ""  # Set via MINERU_API_KEY env var
+  # mineru_api_key: ""  # Set via MINERU_API_KEY env var
 
   # Abstract extraction mode: verify, extract, skip
   abstract_llm_mode: verify
 
+  # Contact email for API services
+  # contact_email: ""
+
 # =============================================================================
-# Topic Modeling Configuration
+# Topic Modeling (Optional)
 # =============================================================================
 
 topics:
@@ -147,6 +144,10 @@ logging:
 
   # Log file (relative to workspace)
   file: linkora.log
+
+  # Log rotation
+  max_bytes: 10_000_000
+  backup_count: 3
 
   # Metrics database
   metrics_db: metrics.db

@@ -1,31 +1,16 @@
-# Default Workspace Configuration
-# Example workspace-local config with basic settings
+# =============================================================================
+# linkora Workspace-Local Configuration
+# =============================================================================
+# This is a workspace-local config file
+# Location: <root>/workspace/<workspace_name>/linkora.yml
+#
+# IMPORTANT: Workspace-local config can ONLY override the `sources` field.
+# Other fields will be ignored with a warning.
+# =============================================================================
 
-name: default
-description: "Default research workspace"
-
-# Use default root (auto-detected or from linkora_ROOT env)
-
+# Override sources for this workspace
 sources:
   local:
     enabled: true
     papers_dir: papers
-    paths: []  # No additional paths
-
-# Index configuration - defaults
-index:
-  top_k: 20
-  embed_model: Qwen/Qwen3-Embedding-0.6B
-  embed_device: auto
-  chunk_size: 800
-  chunk_overlap: 150
-
-# LLM configuration
-llm:
-  backend: openai-compat
-  model: deepseek-chat
-  base_url: https://api.deepseek.com
-
-# Logging
-logging:
-  level: INFO
+    paths: []  # No additional paths for default workspace

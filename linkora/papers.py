@@ -285,8 +285,8 @@ class PaperStore:
     """
 
     _papers_dir: Path  # Private - use get_paper_dir() method
-    _meta_cache: dict[Path, dict] = field(default_factory=dict, repr=False)
-    _md_cache: dict[Path, str] = field(default_factory=dict, repr=False)
+    _meta_cache: dict[Path, dict] = {}  # Cache for meta.json
+    _md_cache: dict[Path, str] = {}  # Cache for paper.md
 
     def __init__(self, papers_dir: Path) -> None:
         self._papers_dir = papers_dir.resolve()
@@ -610,4 +610,9 @@ __all__ = [
     "generate_uuid",
     "best_citation",
     "parse_year_range",
+    # Audit rules
+    "_rule_missing_fields",
+    "_rule_file_pairing",
+    "_rule_title_match",
+    "_rule_filename_format",
 ]

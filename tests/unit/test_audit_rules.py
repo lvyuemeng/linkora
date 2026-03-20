@@ -3,14 +3,14 @@
 from pathlib import Path
 import tempfile
 from linkora.papers import (
-    rule_missing_fields,
-    rule_file_pairing,
-    rule_title_match,
+    _rule_missing_fields,
+    _rule_file_pairing,
+    _rule_title_match,
 )
 
 
 class TestRuleMissingFields:
-    """Tests for rule_missing_fields()."""
+    """Tests for _rule_missing_fields()."""
 
     def test_all_fields_present(self):
         """No missing fields."""
@@ -23,14 +23,14 @@ class TestRuleMissingFields:
             "abstract": "Abstract",
             "doi": "10.1234/test",
         }
-        issues = rule_missing_fields(paper_d, data)
+        issues = _rule_missing_fields(paper_d, data)
         assert issues == []
 
     def test_missing_title(self):
         """Missing title = error."""
         paper_d = Path("TestPaper")
         data = {"authors": ["Smith"]}
-        issues = rule_missing_fields(paper_d, data)
+        issues = _rule_missing_fields(paper_d, data)
         assert len(issues) >= 1
         # Title is required - check it generates an issue (severity may vary)
         assert any(i.rule == "missing_title" for i in issues)
@@ -39,7 +39,7 @@ class TestRuleMissingFields:
         """Missing optional fields = warnings."""
         paper_d = Path("TestPaper")
         data = {"title": "Test", "year": 2024}
-        issues = rule_missing_fields(paper_d, data)
+        issues = _rule_missing_fields(paper_d, data)
         # Should have warnings for missing optional fields
         assert all(i.severity == "warning" for i in issues)
 
@@ -47,7 +47,7 @@ class TestRuleMissingFields:
         """Multiple missing fields."""
         paper_d = Path("TestPaper")
         data = {}
-        issues = rule_missing_fields(paper_d, data)
+        issues = _rule_missing_fields(paper_d, data)
         assert len(issues) >= 1
         # Title is required (error), others are warnings
         title_issues = [i for i in issues if i.rule == "missing_title"]
@@ -56,7 +56,7 @@ class TestRuleMissingFields:
 
 
 class TestRuleFilePairing:
-    """Tests for rule_file_pairing()."""
+    """Tests for _rule_file_pairing()."""
 
     def test_paper_md_exists(self):
         """Paired file exists - may have warnings for short content."""
@@ -68,7 +68,7 @@ class TestRuleFilePairing:
                 "# Title\n\n" + "Content here." * 50, encoding="utf-8"
             )
 
-            issues = rule_file_pairing(paper_d, {})
+            issues = _rule_file_pairing(paper_d, {})
             # May have short_md warning, but no missing_md error
             assert not any(i.rule == "missing_md" for i in issues)
 
@@ -78,7 +78,7 @@ class TestRuleFilePairing:
             paper_d = Path(tmp) / "MissingMd"
             paper_d.mkdir(parents=True, exist_ok=True)
 
-            issues = rule_file_pairing(paper_d, {})
+            issues = _rule_file_pairing(paper_d, {})
             assert len(issues) >= 1
             assert issues[0].severity == "error"
             assert issues[0].rule == "missing_md"
@@ -90,14 +90,14 @@ class TestRuleFilePairing:
             paper_d.mkdir(parents=True, exist_ok=True)
             (paper_d / "paper.md").write_text("", encoding="utf-8")
 
-            issues = rule_file_pairing(paper_d, {})
+            issues = _rule_file_pairing(paper_d, {})
             # Implementation may or may not flag empty file
             # Just check it doesn't crash
             assert isinstance(issues, list)
 
 
 class TestRuleTitleMatch:
-    """Tests for rule_title_match()."""
+    """Tests for _rule_title_match()."""
 
     def test_title_matches(self):
         """Title in meta matches H1 in markdown."""
@@ -116,7 +116,7 @@ class TestRuleTitleMatch:
                 "# Test Title\n\nContent", encoding="utf-8"
             )
 
-            issues = rule_title_match(paper_d, meta)
+            issues = _rule_title_match(paper_d, meta)
             assert issues == []
 
     def test_title_mismatch(self):
@@ -136,7 +136,7 @@ class TestRuleTitleMatch:
                 "# Different Title\n\nContent", encoding="utf-8"
             )
 
-            issues = rule_title_match(paper_d, meta)
+            issues = _rule_title_match(paper_d, meta)
             # Implementation may or may not detect mismatch
             # Just check it doesn't crash
             assert isinstance(issues, list)

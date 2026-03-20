@@ -9,14 +9,10 @@ default:
 # ============================================================================
 # Development Setup
 # ============================================================================
-
+#
+#
 # Create virtual environment and sync dependencies
 setup:
-    uv venv
-    uv sync
-
-# Sync with all extras
-setup-full:
     uv venv
     uv sync --extra full
 
@@ -56,31 +52,23 @@ test-unit:
 # Linting & Formatting
 # ============================================================================
 
-# Check linting
-lint:
-    uv run ruff check .
-
 # Auto-fix linting issues
-lint-fix:
+lint:
     uv run ruff check --fix .
-
-# Check code formatting
-format-check:
-    uv run ruff format --check
 
 # Format code
 format:
     uv run ruff format .
 
 # Run full linting (check + format)
-lint-full: lint format-check
+lint-full: lint format
 
 # ============================================================================
 # Type Checking
 # ============================================================================
 
 # Run type checker
-typecheck:
+type:
     uv run ty check
 
 # ============================================================================
@@ -88,42 +76,15 @@ typecheck:
 # ============================================================================
 
 # Run all quality checks (lint, format, typecheck)
-check: lint format typecheck
+quality: lint-full type
 
 # ============================================================================
 # CI Pipeline
 # ============================================================================
 
 # Run CI pipeline locally (lint + typecheck + test)
-ci: lint-full typecheck test
+ci: quality test
 
-# ============================================================================
-# CLI Commands
-# ============================================================================
-
-# Show help
-help:
-    uv run linkora --help
-
-# Show design context
-context:
-    uv run linkora --context
-
-# Initialize workspace
-init:
-    uv run linkora init
-
-# Build search index
-index:
-    uv run linkora index
-
-# Search papers
-search query:
-    uv run linkora search "{{query}}"
-
-# Run MCP server
-mcp:
-    uv run linkora-mcp
 
 # ============================================================================
 # Development
@@ -132,11 +93,3 @@ mcp:
 # Install as editable tool
 install:
     uv tool install -e .
-
-# Run audit
-audit:
-    uv run linkora audit
-
-# Run doctor (health check)
-doctor:
-    uv run linkora doctor
