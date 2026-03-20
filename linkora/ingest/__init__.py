@@ -63,7 +63,9 @@ def _build_query(
     """Build PaperQuery from parsed arguments."""
     from linkora.sources.protocol import PaperQuery
 
-    has_structured = any([doi_val, issn_val, author_val, title_val, year_start])
+    has_structured = any(
+        x for x in (doi_val, issn_val, author_val, title_val, year_start)
+    )
 
     if has_structured:
         return PaperQuery(

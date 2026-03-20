@@ -1,27 +1,23 @@
 """
-extract.py — Metadata Extraction from Paper Markdown
+extract.py — Metadata extraction from paper markdown.
 
-Provides extraction pipeline with multiple implementations:
+Provides a functional pipeline with multiple extraction strategies:
 
-  RegexExtractor    — Regex-based extraction (default)
-  LLMExtractor      — LLM API extraction (OpenAI-compatible)
-  AutoExtractor     — Regex first, fallback to LLM
-  RobustExtractor   — Regex + LLM dual-run, LLM corrects OCR errors
+  regex only    — Fast, no external calls, handles well-formatted PDFs
+  llm           — LLM-only extraction (best for poorly OCR'd documents)
+  auto          — Regex first; falls back to LLM when key fields are missing
+  robust        — Regex + LLM dual-run; LLM corrects OCR errors using regex output
 
-Usage:
-    from linkora.extract import extract, create_extractor
+Usage
+─────
+    from linkora.extract import extract, ExtractionInput
 
-    # Option 1: Via config
-    output = extract(input, config)
+    # Via AppConfig (uses config.ingest.extractor to select strategy)
+    output = extract(ExtractionInput.from_file(path), config)
 
-    # Option 2: Direct
-    extractor = create_extractor(
-        config=ExtractorConfig(robust=True),
-        llm_config=config.llm,
-        http_client=RequestsClient(),
-        api_key="sk-..."
-    )
-    output = extractor.extract(input)
+    # Direct pipeline construction
+    pipeline = create_pipeline(mode="robust", llm_config=..., http_client=..., api_key=...)
+    output = pipeline(ExtractionInput.from_file(path))
 """
 
 from __future__ import annotations
@@ -31,14 +27,14 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, Optional
+from typing import Optional, Protocol
 
-from linkora.config import Config
+from linkora.config import AppConfig
 from linkora.http import HTTPClient, RequestsClient
 from linkora.llm import (
-    LLMRunner,
-    LLMRequest,
     LLMConfig as LLMConfigType,
+    LLMRequest,
+    LLMRunner,
     PromptTemplate,
 )
 from linkora.log import get_logger
@@ -46,84 +42,58 @@ from linkora.papers import PaperMetadata
 
 _log = get_logger(__name__)
 
-# ============================================================================
-#  Utilities
-# ============================================================================
 
+# ---------------------------------------------------------------------------
+# Author name helpers
+# ---------------------------------------------------------------------------
 
-# Last name extraction patterns
 _LASTNAME_PREFIX_RE = re.compile(
     r"^(?:Prof|Prof\.|Dr|Dr\.|Mr|Mr\.|Mrs|Mrs\.|Ms|Ms\.)\s+",
     re.IGNORECASE,
 )
-_LASTNAME_JP_RE = re.compile(r"^[\u3040-\u309f\u30a0-\u30ff]+")  # Hiragana/Katakana
-_LASTNAME_CN_RE = re.compile(r"^[\u4e00-\u9fff]+")  # CJK
+_LASTNAME_JP_RE = re.compile(r"^[\u3040-\u309f\u30a0-\u30ff]+")
+_LASTNAME_CN_RE = re.compile(r"^[\u4e00-\u9fff]+")
 
 
 def _extract_lastname(full_name: str) -> str:
-    """Extract last name (surname) from full author name.
+    """
+    Extract the surname from a full author name.
 
-    Handles:
-    - Western: "John Smith" -> "Smith"
-    - Western with prefix: "Prof. John Smith" -> "Smith"
-    - Chinese: "Smith John" (given, family) -> "Smith" (assumes Western order)
-    - Japanese: "山田" (family only) -> "山田"
-    - Chinese: "张 三" -> "张"
-
-    Args:
-        full_name: Full author name.
-
-    Returns:
-        Last name (surname).
+    Handles Western names, names with honorific prefixes, CJK names
+    (Japanese hiragana/katakana, Chinese CJK block).
     """
     if not full_name:
         return ""
 
-    # Remove common prefixes
     name = _LASTNAME_PREFIX_RE.sub("", full_name).strip()
     if not name:
         return ""
 
-    # Check for CJK names
-    # Japanese: hiragana/katakana only = family name (usually)
+    # Japanese: hiragana/katakana-only block → treat whole token as family name.
     if _LASTNAME_JP_RE.match(name):
         return name
 
-    # Chinese: first CJK block is family name
+    # Chinese: leading CJK characters are the family name.
     m = _LASTNAME_CN_RE.match(name)
     if m:
         return m.group(0)
 
-    # Western: last word is last name
+    # Western: last word is the surname.
     parts = name.split()
     if len(parts) == 1:
         return parts[0]
-
-    # Common "Family Given" order (most Western): last part
-    # But some Chinese Western-order names: "John Smith" -> "Smith"
-    # Heuristic: if last name looks like Western surname (capitalized, no CJK)
     last = parts[-1]
-    if last and last[0].isupper():
-        return last
-
-    return parts[0] if parts else ""
+    return last if (last and last[0].isupper()) else parts[0]
 
 
-# ============================================================================
-#  Data Types
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Data types
+# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class ExtractionInput:
-    """Immutable input for metadata extraction.
-
-    Attributes:
-        source_name: Original filename
-        raw_text: Full markdown content
-        header: First N chars for LLM
-        file_hash: MD5 hash for caching
-    """
+    """Immutable input bundle for the extraction pipeline."""
 
     source_name: str
     raw_text: str
@@ -131,7 +101,7 @@ class ExtractionInput:
     file_hash: str = ""
 
     @classmethod
-    def from_file(cls, filepath: Path, header_size: int = 50000) -> ExtractionInput:
+    def from_file(cls, filepath: Path, header_size: int = 50_000) -> "ExtractionInput":
         text = filepath.read_text(encoding="utf-8", errors="replace")
         return cls(
             source_name=filepath.name,
@@ -142,8 +112,8 @@ class ExtractionInput:
 
     @classmethod
     def from_text(
-        cls, name: str, text: str, header_size: int = 50000
-    ) -> ExtractionInput:
+        cls, name: str, text: str, header_size: int = 50_000
+    ) -> "ExtractionInput":
         return cls(
             source_name=name,
             raw_text=text,
@@ -154,28 +124,17 @@ class ExtractionInput:
 
 @dataclass(frozen=True)
 class ExtractionContext:
-    """Immutable context passed through extraction pipeline.
-
-    Attributes:
-        input: ExtractionInput
-        regex_meta: Metadata from regex (if run)
-        llm_meta: Metadata from LLM (if run)
-        errors: List of errors encountered
-    """
+    """Immutable accumulator passed through the pipeline stages."""
 
     input: ExtractionInput
     regex_meta: Optional[PaperMetadata] = None
     llm_meta: Optional[PaperMetadata] = None
     errors: list[str] = field(default_factory=list)
 
-    def __post_init__(self):
-        if self.errors is None:
-            object.__setattr__(self, "errors", [])
-
 
 @dataclass(frozen=True)
 class ExtractionOutput:
-    """Immutable output with confidence metadata."""
+    """Final pipeline output with provenance metadata."""
 
     metadata: PaperMetadata
     method: str
@@ -185,55 +144,48 @@ class ExtractionOutput:
 
 @dataclass(frozen=True)
 class ExtractorConfig:
-    """Data object for extractor selection - no string dispatch."""
+    """Strategy selection flags — plain data, no string dispatch."""
 
     use_llm: bool = False
     fallback: bool = False
     robust: bool = False
 
 
-# ============================================================================
-#  Protocol
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Protocol
+# ---------------------------------------------------------------------------
 
 
 class Extractor(Protocol):
-    """Protocol for metadata extractors."""
-
     @property
     def name(self) -> str: ...
-
     def extract(self, input: ExtractionInput) -> ExtractionOutput: ...
 
 
-# ============================================================================
-#  Pure Functions
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def extractor_config_from_string(mode: str) -> ExtractorConfig:
-    """Create config from mode string."""
     return ExtractorConfig(
-        use_llm=mode == "llm", fallback=mode == "auto", robust=mode == "robust"
+        use_llm=mode == "llm",
+        fallback=mode == "auto",
+        robust=mode == "robust",
     )
 
 
 def _clean_llm_str(val: str | None) -> str:
-    """Clean LLM output."""
     if val is None:
         return ""
     s = str(val).strip()
-    if s.lower() in ("null", "none", "n/a", ""):
-        return ""
-    return s
+    return "" if s.lower() in ("null", "none", "n/a", "") else s
 
 
-# ============================================================================
-#  Pipeline Stages (Pure Functions)
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Regex stage
+# ---------------------------------------------------------------------------
 
-
-# Regex patterns
 _TITLE_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 _AUTHORS_RE = re.compile(r"(?:Authors?|作者)[:：]\s*(.+?)(?:\n|$)", re.IGNORECASE)
 _YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
@@ -242,59 +194,51 @@ _JOURNAL_RE = re.compile(r"(?:Journal|期刊|会议)[:：]\s*(.+?)(?:\n|$)", re.
 
 
 def extract_regex(ctx: ExtractionContext) -> ExtractionContext:
-    """Stage 1: Regex extraction - pure function.
-
-    Args:
-        ctx: ExtractionContext with input
-
-    Returns:
-        Updated context with regex_meta
-    """
+    """Stage 1 — regex extraction (pure function)."""
     text = ctx.input.raw_text
     meta = PaperMetadata(source_file=ctx.input.source_name)
 
-    # Title from first H1
-    title_match = _TITLE_RE.search(text)
-    if title_match:
-        meta.title = title_match.group(1).strip()
+    m = _TITLE_RE.search(text)
+    if m:
+        meta.title = m.group(1).strip()
 
-    # Authors
-    authors_match = _AUTHORS_RE.search(text)
-    if authors_match:
-        authors_str = authors_match.group(1)
-        authors = re.split(r"[;,，；]", authors_str)
-        meta.authors = [a.strip() for a in authors if a.strip()]
+    m = _AUTHORS_RE.search(text)
+    if m:
+        meta.authors = [
+            a.strip() for a in re.split(r"[;,，；]", m.group(1)) if a.strip()
+        ]
 
-    # Year
-    year_match = _YEAR_RE.search(text)
-    if year_match:
-        meta.year = int(year_match.group())
+    m = _YEAR_RE.search(text)
+    if m:
+        meta.year = int(m.group())
 
-    # DOI
-    doi_match = _DOI_RE.search(text)
-    if doi_match:
-        meta.doi = doi_match.group(0)
+    m = _DOI_RE.search(text)
+    if m:
+        meta.doi = m.group(0)
 
-    # Journal
-    journal_match = _JOURNAL_RE.search(text)
-    if journal_match:
-        meta.journal = journal_match.group(1).strip()
+    m = _JOURNAL_RE.search(text)
+    if m:
+        meta.journal = m.group(1).strip()
 
-    # Set first author
     if meta.authors:
         meta.first_author = meta.authors[0]
         meta.first_author_lastname = _extract_lastname(meta.first_author)
 
-    # Return updated context
     return ExtractionContext(
-        input=ctx.input, regex_meta=meta, llm_meta=ctx.llm_meta, errors=ctx.errors
+        input=ctx.input,
+        regex_meta=meta,
+        llm_meta=ctx.llm_meta,
+        errors=ctx.errors,
     )
 
 
-# LLM prompts (English)
+# ---------------------------------------------------------------------------
+# LLM prompts
+# ---------------------------------------------------------------------------
+
 _EXTRACT_PROMPT = PromptTemplate(
     system="You are a scientific paper metadata extractor.",
-    user_template="""Extract metadata from the following academic paper page. Return as JSON with fields:
+    user_template="""Extract metadata from the following academic paper page. Return as JSON:
 {{
   "title": "Full paper title, or null if not found",
   "authors": ["Author1", "Author2", ...],
@@ -304,46 +248,46 @@ _EXTRACT_PROMPT = PromptTemplate(
 }}
 
 Notes:
-- Journal scans (Nature, Science) may contain multiple article fragments. Identify the main article with complete structure (title + authors + body)
-- If multiple DOIs appear from different articles, DOI is not trustworthy - set to null
-- If authors not found, return empty list []
-- year must be integer or null
-- Return only JSON, no explanations
+- If multiple DOIs appear from different articles, set doi to null.
+- If authors not found, return [].
+- year must be integer or null.
+- Return only JSON, no explanation.
 
 --- Paper Content ---
 {header}""",
 )
 
-
 _ROBUST_PROMPT = PromptTemplate(
     system="You are a scientific paper metadata corrector.",
-    user_template="""The following metadata was extracted using regex from an OCR-converted academic paper. There may be OCR errors or missing fields. Please correct and complete using the original text.
-
-Regex extracted:
+    user_template="""Regex-extracted metadata (may have OCR errors):
   title:   {regex_title}
   authors: {regex_authors}
   year:    {regex_year}
   doi:     {regex_doi}
   journal: {regex_journal}
 
-Return as JSON:
+Correct using the original text. Return as JSON:
 {{
-  "title": "Corrected complete title",
-  "authors": ["Author1", "Author2", ...],
+  "title": "Corrected title",
+  "authors": ["Author1", ...],
   "year": 2024,
   "doi": "10.xxx/xxx",
   "journal": "Journal name"
 }}
 
 Notes:
-- Trust the original paper text over regex results
-- Fix OCR errors (ln→In, rn→m, l→I, 0→O, etc.)
-- Title truncation is common on cover pages. Cross-validate with full text (abstract, introduction, header) for complete title
-- Return only JSON
+- Fix common OCR errors (ln→In, rn→m, l→I, 0→O).
+- Title truncation is common; cross-validate with abstract/introduction.
+- Return only JSON.
 
 --- Paper Content ---
 {header}""",
 )
+
+
+# ---------------------------------------------------------------------------
+# LLM stages
+# ---------------------------------------------------------------------------
 
 
 def extract_llm(
@@ -352,33 +296,18 @@ def extract_llm(
     http_client: HTTPClient,
     api_key: str,
 ) -> ExtractionContext:
-    """Stage 2: LLM extraction - pure function with DI.
-
-    Args:
-        ctx: ExtractionContext with input
-        llm_config: LLM configuration
-        http_client: HTTP client (Protocol)
-        api_key: API key
-
-    Returns:
-        Updated context with llm_meta
-    """
-    # Build prompt
-    prompt = _EXTRACT_PROMPT.render(header=ctx.input.header)
-
-    # Call LLM
+    """Stage 2 — LLM extraction (pure function with explicit dependencies)."""
     runner = LLMRunner(config=llm_config, http_client=http_client, api_key=api_key)
-
     request = LLMRequest(
-        prompt=prompt, config=llm_config, purpose="extract.llm", json_mode=True
+        prompt=_EXTRACT_PROMPT.render(header=ctx.input.header),
+        config=llm_config,
+        purpose="extract.llm",
+        json_mode=True,
     )
-
     result = runner.execute(request)
-
-    # Parse response
     data = json.loads(result.content)
-    meta = PaperMetadata(source_file=ctx.input.source_name)
 
+    meta = PaperMetadata(source_file=ctx.input.source_name)
     meta.title = _clean_llm_str(data.get("title"))
     meta.authors = [a for a in (data.get("authors") or []) if a]
     meta.year = data.get("year") if isinstance(data.get("year"), int) else None
@@ -390,7 +319,10 @@ def extract_llm(
         meta.first_author_lastname = _extract_lastname(meta.first_author)
 
     return ExtractionContext(
-        input=ctx.input, regex_meta=ctx.regex_meta, llm_meta=meta, errors=ctx.errors
+        input=ctx.input,
+        regex_meta=ctx.regex_meta,
+        llm_meta=meta,
+        errors=ctx.errors,
     )
 
 
@@ -400,29 +332,25 @@ def extract_llm_robust(
     http_client: HTTPClient,
     api_key: str,
 ) -> ExtractionContext:
-    """Stage 2 (robust): LLM with regex results - pure function with DI."""
-    # Build prompt with regex results
-    regex = ctx.regex_meta
-
-    # Handle case where regex hasn't run
-    if regex is None:
-        regex = PaperMetadata(source_file=ctx.input.source_name)
-
-    prompt = _ROBUST_PROMPT.render(
-        regex_title=regex.title or "(not extracted)",
-        regex_authors=", ".join(regex.authors) if regex.authors else "(not extracted)",
-        regex_year=str(regex.year) if regex.year else "(not extracted)",
-        regex_doi=regex.doi or "(not extracted)",
-        regex_journal=regex.journal or "(not extracted)",
-        header=ctx.input.header,
-    )
+    """Stage 2 (robust) — LLM with regex context (pure function)."""
+    regex = ctx.regex_meta or PaperMetadata(source_file=ctx.input.source_name)
 
     runner = LLMRunner(config=llm_config, http_client=http_client, api_key=api_key)
-
     request = LLMRequest(
-        prompt=prompt, config=llm_config, purpose="extract.robust", json_mode=True
+        prompt=_ROBUST_PROMPT.render(
+            regex_title=regex.title or "(not extracted)",
+            regex_authors=", ".join(regex.authors)
+            if regex.authors
+            else "(not extracted)",
+            regex_year=str(regex.year) if regex.year else "(not extracted)",
+            regex_doi=regex.doi or "(not extracted)",
+            regex_journal=regex.journal or "(not extracted)",
+            header=ctx.input.header,
+        ),
+        config=llm_config,
+        purpose="extract.robust",
+        json_mode=True,
     )
-
     result = runner.execute(request)
     data = json.loads(result.content)
 
@@ -430,86 +358,81 @@ def extract_llm_robust(
     meta.title = _clean_llm_str(data.get("title"))
     meta.authors = [a for a in (data.get("authors") or []) if a]
     meta.year = data.get("year") if isinstance(data.get("year"), int) else None
+    meta.journal = _clean_llm_str(data.get("journal"))
 
-    # DOI validation
-    text = ctx.input.raw_text
-    all_dois = set(_DOI_RE.findall(text))
-    multi_doi = len(all_dois) > 1
-
+    # DOI validation: distrust LLM when multiple DOIs exist in the document.
+    all_dois = set(_DOI_RE.findall(ctx.input.raw_text))
     llm_doi = _clean_llm_str(data.get("doi"))
-    if multi_doi:
+    if len(all_dois) > 1:
         meta.doi = ""
-    elif llm_doi and regex and not regex.doi and llm_doi not in text:
+    elif llm_doi and not regex.doi and llm_doi not in ctx.input.raw_text:
         meta.doi = ""
     else:
-        meta.doi = llm_doi or (regex.doi if regex else "")
-
-    meta.journal = _clean_llm_str(data.get("journal"))
+        meta.doi = llm_doi or regex.doi or ""
 
     if meta.authors:
         meta.first_author = meta.authors[0]
         meta.first_author_lastname = _extract_lastname(meta.first_author)
 
     return ExtractionContext(
-        input=ctx.input, regex_meta=ctx.regex_meta, llm_meta=meta, errors=ctx.errors
+        input=ctx.input,
+        regex_meta=ctx.regex_meta,
+        llm_meta=meta,
+        errors=ctx.errors,
     )
 
 
-def merge_to_output(ctx: ExtractionContext) -> ExtractionOutput:
-    """Final stage: Merge context to output - pure function.
+# ---------------------------------------------------------------------------
+# Merge stage
+# ---------------------------------------------------------------------------
 
-    Encapsulates filename fallback in pipeline.
-    """
-    # Determine final metadata based on mode
+
+def merge_to_output(ctx: ExtractionContext) -> ExtractionOutput:
+    """Final stage — merge context to output, applying filename fallbacks."""
     if ctx.llm_meta:
-        meta = ctx.llm_meta
-        method = "llm"
-        confidence = 0.9
+        meta, method, confidence = ctx.llm_meta, "llm", 0.9
     elif ctx.regex_meta:
-        meta = ctx.regex_meta
-        method = "regex"
-        confidence = 0.8
+        meta, method, confidence = ctx.regex_meta, "regex", 0.8
     else:
         meta = PaperMetadata(source_file=ctx.input.source_name)
-        method = "empty"
-        confidence = 0.0
+        method, confidence = "empty", 0.0
 
-    # Filename fallback - encapsulated in pipeline
     fallback_used = False
-    name = ctx.input.source_name
+    stem = ctx.input.source_name
+    stem = stem.rsplit(".", 1)[0] if "." in stem else stem
 
-    # Extract from filename for fallback only
-    name_stem = name.split(".")[0] if "." in name else name
-    year_match = re.search(r"(19|20)\d{2}", name_stem)
-    author_match = re.search(r"^([A-Z][a-z]+)", name_stem)
+    year_m = re.search(r"(19|20)\d{2}", stem)
+    author_m = re.search(r"^([A-Z][a-z]+)", stem)
 
-    if not meta.title and name_stem:
-        # Use filename stem as title fallback
-        cleaned = re.sub(r"(19|20)\d{2}", "", name_stem).strip("_- ")
-        if author_match:
-            cleaned = cleaned.replace(author_match.group(1), "").strip("_- ")
+    if not meta.title and stem:
+        cleaned = re.sub(r"(19|20)\d{2}", "", stem).strip("_- ")
+        if author_m:
+            cleaned = cleaned.replace(author_m.group(1), "").strip("_- ")
         if cleaned:
             meta.title = cleaned
             fallback_used = True
 
-    if not meta.year and year_match:
-        meta.year = int(year_match.group())
+    if not meta.year and year_m:
+        meta.year = int(year_m.group())
         fallback_used = True
 
-    if not meta.first_author and author_match:
-        author = author_match.group(1)
+    if not meta.first_author and author_m:
+        author = author_m.group(1)
         meta.first_author = author
         meta.first_author_lastname = _extract_lastname(author)
         fallback_used = True
 
     return ExtractionOutput(
-        metadata=meta, method=method, confidence=confidence, fallback_used=fallback_used
+        metadata=meta,
+        method=method,
+        confidence=confidence,
+        fallback_used=fallback_used,
     )
 
 
-# ============================================================================
-#  Pipeline Factory
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Pipeline factory
+# ---------------------------------------------------------------------------
 
 
 def create_pipeline(
@@ -518,107 +441,93 @@ def create_pipeline(
     http_client: HTTPClient | None = None,
     api_key: str = "",
 ):
-    """Create extraction pipeline - function composition.
-
-    Returns a function: ExtractionInput -> ExtractionOutput
     """
-    config = extractor_config_from_string(mode)
+    Return an ``ExtractionInput → ExtractionOutput`` callable.
 
-    if config.robust:
+    Mode is one of: ``"regex"`` (default), ``"llm"``, ``"auto"``, ``"robust"``.
+    """
+    cfg = extractor_config_from_string(mode)
+    has_llm = bool(api_key and llm_config and http_client)
 
-        def pipeline(input: ExtractionInput) -> ExtractionOutput:
-            ctx = ExtractionContext(input=input)
+    if cfg.robust:
+
+        def _robust(inp: ExtractionInput) -> ExtractionOutput:
+            ctx = ExtractionContext(input=inp)
             ctx = extract_regex(ctx)
-            if api_key and llm_config and http_client:
+            if has_llm:
                 try:
-                    ctx = extract_llm_robust(ctx, llm_config, http_client, api_key)
-                except Exception as e:
-                    ctx.errors.append(str(e))
+                    ctx = extract_llm_robust(ctx, llm_config, http_client, api_key)  # type: ignore[arg-type]
+                except Exception as exc:
+                    _log.warning("Robust LLM stage failed: %s", exc)
             return merge_to_output(ctx)
 
-        return pipeline
+        return _robust
 
-    if config.fallback:
+    if cfg.fallback:
 
-        def pipeline_fallback(input: ExtractionInput) -> ExtractionOutput:
-            ctx = ExtractionContext(input=input)
+        def _auto(inp: ExtractionInput) -> ExtractionOutput:
+            ctx = ExtractionContext(input=inp)
             ctx = extract_regex(ctx)
-
-            # Check if we need LLM fallback
-            regex_meta = ctx.regex_meta
-            needs_llm = (
-                regex_meta is None
-                or not regex_meta.title
-                or (not regex_meta.first_author and not regex_meta.year)
-            )
-
-            if needs_llm and api_key and llm_config and http_client:
+            rm = ctx.regex_meta
+            needs_llm = not rm or not rm.title or (not rm.first_author and not rm.year)
+            if needs_llm and has_llm:
                 try:
-                    ctx = extract_llm(ctx, llm_config, http_client, api_key)
-                except Exception as e:
-                    ctx.errors.append(str(e))
-
+                    ctx = extract_llm(ctx, llm_config, http_client, api_key)  # type: ignore[arg-type]
+                except Exception as exc:
+                    _log.warning("Auto LLM fallback failed: %s", exc)
             return merge_to_output(ctx)
 
-        return pipeline_fallback
+        return _auto
 
-    if config.use_llm:
+    if cfg.use_llm:
 
-        def pipeline_llm(input: ExtractionInput) -> ExtractionOutput:
-            ctx = ExtractionContext(input=input)
-            if api_key and llm_config and http_client:
+        def _llm_only(inp: ExtractionInput) -> ExtractionOutput:
+            ctx = ExtractionContext(input=inp)
+            if has_llm:
                 try:
-                    ctx = extract_llm(ctx, llm_config, http_client, api_key)
-                except Exception as e:
-                    ctx.errors.append(str(e))
+                    ctx = extract_llm(ctx, llm_config, http_client, api_key)  # type: ignore[arg-type]
+                except Exception as exc:
+                    _log.warning("LLM extraction failed: %s", exc)
             return merge_to_output(ctx)
 
-        return pipeline_llm
+        return _llm_only
 
-    # Default: regex only
-    def pipeline_regex(input: ExtractionInput) -> ExtractionOutput:
-        ctx = ExtractionContext(input=input)
-        ctx = extract_regex(ctx)
-        return merge_to_output(ctx)
+    def _regex_only(inp: ExtractionInput) -> ExtractionOutput:
+        return merge_to_output(extract_regex(ExtractionContext(input=inp)))
 
-    return pipeline_regex
+    return _regex_only
 
 
-# ============================================================================
-#  Main Entry Points
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Public entry points
+# ---------------------------------------------------------------------------
 
 
-def extract(input: ExtractionInput, config: Config) -> ExtractionOutput:
-    """Extract metadata - main entry point."""
-    _log.debug("Starting extraction for: %s", input.source_name)
+def extract(input: ExtractionInput, config: AppConfig) -> ExtractionOutput:
+    """
+    Extract metadata from a paper — main entry point.
+
+    Uses ``config.ingest.extractor`` to select the strategy.
+    Creates a short-lived HTTP client; callers that already have one
+    should use ``create_pipeline`` directly.
+    """
+    _log.debug("Extracting: %s", input.source_name)
 
     http_client = RequestsClient()
-
     pipeline = create_pipeline(
         mode=config.ingest.extractor,
         llm_config=config.llm,
         http_client=http_client,
         api_key=config.resolve_llm_api_key(),
     )
-
     output = pipeline(input)
 
     _log.debug(
-        "Extraction complete: method=%s, confidence=%.2f",
-        output.method,
-        output.confidence,
+        "Extraction: method=%s confidence=%.2f", output.method, output.confidence
     )
-
     return output
 
 
-def extract_file(filepath: str | Path, config: Config) -> ExtractionOutput:
-    """Convenience: extract from file path."""
-    input = ExtractionInput.from_file(Path(filepath))
-    return extract(input, config)
-
-
-# ============================================================================
-#  Backward Compatibility
-# ============================================================================
+def extract_file(filepath: str | Path, config: AppConfig) -> ExtractionOutput:
+    """Convenience wrapper: extract from a file path."""
+    return extract(ExtractionInput.from_file(Path(filepath)), config)

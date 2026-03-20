@@ -31,12 +31,20 @@ class PaperQuery:
     @property
     def is_empty(self) -> bool:
         """Check if query has no criteria."""
-        return not any([self.doi, self.issn, self.author, self.title, self.year_start])
+        return not any(
+            x
+            for x in (self.doi, self.issn, self.author, self.title, self.year_start)
+            if x
+        )
 
     @property
     def has_structured(self) -> bool:
         """Check if using structured query."""
-        return any([self.doi, self.issn, self.author, self.title, self.year_start])
+        return any(
+            x
+            for x in (self.doi, self.issn, self.author, self.title, self.year_start)
+            if x
+        )
 
 
 # ============================================================================

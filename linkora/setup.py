@@ -1,10 +1,20 @@
 """
-setup.py — linkora Environment Setup
+setup.py — linkora environment diagnostics and interactive setup.
 
-Commands:
-  linkora check    Quick diagnostics (no network)
-  linkora doctor   Full health check (with network)
-  linkora init     Interactive setup wizard
+Commands
+────────
+  linkora check          Quick diagnostics (no network calls)
+  linkora doctor         Full health check (includes network calls)
+  linkora init           Interactive setup wizard
+
+Design notes
+────────────
+- All checks receive AppContext so they can inspect workspace paths,
+  config resolution, and the store without accessing private internals.
+- Multiple global config files are a first-class warning surfaced by doctor.
+- The init wizard writes only to ConfigLoader.default_write_path()
+  (~/.linkora/config.yml) and never touches workspace files directly.
+- get_data_root() is imported from workspace — no inline platform detection.
 """
 
 from __future__ import annotations
@@ -13,24 +23,25 @@ import importlib
 import sys
 from dataclasses import dataclass
 from enum import Enum, auto
+from pathlib import Path
 from typing import Iterator
 
-import yaml
+from linkora.config import ConfigLoader
+from linkora.workspace import get_data_root
 
-from linkora.config import Config, get_config
 
-
-# ============================================================================
-#  Types
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
 
 
 class CheckCategory(Enum):
-    ENV = auto()
-    CONFIG = auto()
-    PATHS = auto()
-    SECRETS = auto()
-    SERVICES = auto()
+    CONFIG = auto()  # Config file resolution + conflicts
+    ENV = auto()  # Python version, installed packages
+    WORKSPACE = auto()  # Workspace registry health
+    PATHS = auto()  # Required directories / files
+    SECRETS = auto()  # API keys (present / absent)
+    SERVICES = auto()  # Network reachability (doctor only)
 
 
 @dataclass(frozen=True)
@@ -60,184 +71,246 @@ class CheckResult:
 
 @dataclass(frozen=True)
 class InitResult:
-    config_created: bool
-    local_created: bool
+    config_written: bool
+    config_path: Path
     dirs_created: bool
 
 
-# ============================================================================
-#  Constants
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Dependency groups
+# ---------------------------------------------------------------------------
 
-DEP_GROUPS = {
-    "core": [("requests", "requests"), ("yaml", "pyyaml")],
+_DEP_GROUPS: dict[str, list[tuple[str, str]]] = {
+    "core": [
+        ("requests", "requests"),
+        ("yaml", "pyyaml"),
+    ],
     "embed": [
         ("sentence_transformers", "sentence-transformers"),
         ("faiss", "faiss-cpu"),
         ("numpy", "numpy"),
     ],
-    "topics": [("bertopic", "bertopic"), ("pandas", "pandas")],
-    "import": [("endnote_utils", "endnote-utils"), ("pyzotero", "pyzotero")],
+    "topics": [
+        ("bertopic", "bertopic"),
+        ("pandas", "pandas"),
+    ],
+    "import": [
+        ("endnote_utils", "endnote-utils"),
+        ("pyzotero", "pyzotero"),
+    ],
 }
 
 
-# ============================================================================
-#  Stage 1: Collect
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Individual checks
+# ---------------------------------------------------------------------------
+
+
+def _check_config_resolution() -> Iterator[CheckItem]:
+    """
+    Inspect global config file resolution.
+
+    Reports which file is active and warns when multiple candidates exist
+    (the non-active ones are silently ignored, which can confuse users).
+    """
+    existing = ConfigLoader.find_all()
+    active = ConfigLoader.active_path()
+
+    if not existing:
+        yield CheckItem(
+            CheckCategory.CONFIG,
+            "config.file",
+            ok=False,
+            detail=(
+                f"No config file found. "
+                f"Run 'linkora init' or create {ConfigLoader.default_write_path()}"
+            ),
+        )
+        return
+
+    yield CheckItem(
+        CheckCategory.CONFIG,
+        "config.active",
+        ok=True,
+        detail=str(active),
+    )
+
+    if len(existing) > 1:
+        ignored = [p for p in existing if p != active]
+        yield CheckItem(
+            CheckCategory.CONFIG,
+            "config.conflict",
+            ok=False,
+            detail=(
+                f"Multiple config files found — only '{active.name}' is active. "  # type: ignore[union-attr]
+                f"Ignored: {', '.join(str(p) for p in ignored)}. "
+                "Remove the ignored file(s) to eliminate this ambiguity."
+            ),
+        )
 
 
 def _check_python() -> CheckItem:
     vi = sys.version_info
-    ok = vi >= (3, 10)
+    ok = vi >= (3, 12)
+    suffix = "" if ok else " (3.12+ required)"
     return CheckItem(
-        CheckCategory.ENV, "python", ok, f"{vi.major}.{vi.minor}.{vi.micro}"
+        CheckCategory.ENV,
+        "python",
+        ok=ok,
+        detail=f"{vi.major}.{vi.minor}.{vi.micro}{suffix}",
     )
 
 
 def _check_deps() -> Iterator[CheckItem]:
-    for group, pkgs in DEP_GROUPS.items():
-        missing = []
-        for import_name, _ in pkgs:
-            try:
-                importlib.import_module(import_name)
-            except ImportError:
-                missing.append(import_name)
-        ok = not missing
-        detail = (
-            ", ".join(p for _, p in pkgs) if ok else f"missing: {', '.join(missing)}"
+    for group, pkgs in _DEP_GROUPS.items():
+        missing = [
+            pip_name for import_name, pip_name in pkgs if not _can_import(import_name)
+        ]
+        yield CheckItem(
+            CheckCategory.ENV,
+            f"deps.{group}",
+            ok=not missing,
+            detail=(
+                "all present"
+                if not missing
+                else f"missing: pip install {' '.join(missing)}"
+            ),
         )
-        yield CheckItem(CheckCategory.ENV, f"deps.{group}", ok, detail)
 
 
-def _check_config(cfg: Config) -> CheckItem:
-    path = cfg._root / "config.yaml"
-    ok = path.exists()
-    return CheckItem(
-        CheckCategory.CONFIG, "config.yaml", ok, "found" if ok else "not found"
+def _can_import(name: str) -> bool:
+    try:
+        importlib.import_module(name)
+        return True
+    except ImportError:
+        return False
+
+
+def _check_workspace(ctx) -> Iterator[CheckItem]:
+    """Check that the active workspace is registered and has a papers directory."""
+    name = ctx.workspace_name
+    paths = ctx.workspace
+
+    yield CheckItem(
+        CheckCategory.WORKSPACE,
+        "workspace.registry",
+        ok=ctx.store.exists(name),
+        detail=(
+            f"'{name}' registered"
+            if ctx.store.exists(name)
+            else f"'{name}' not found in registry — run 'linkora init'"
+        ),
+    )
+
+    yield CheckItem(
+        CheckCategory.PATHS,
+        "workspace.papers_dir",
+        ok=paths.papers_dir.exists(),
+        detail=str(paths.papers_dir),
+    )
+
+    count = ctx.store.get_paper_count(name)
+    yield CheckItem(
+        CheckCategory.WORKSPACE,
+        "workspace.papers",
+        ok=True,  # informational — never a failure
+        detail=f"{count} paper(s) in '{name}'",
     )
 
 
-def _check_local_config(cfg: Config) -> CheckItem:
-    path = cfg._root / "config.local.yaml"
-    ok = path.exists()
-    return CheckItem(
-        CheckCategory.CONFIG,
-        "config.local.yaml",
-        ok,
-        "found" if ok else "not found (use env vars)",
+def _check_secrets(ctx) -> Iterator[CheckItem]:
+    llm_key = ctx.config.resolve_llm_api_key()
+    yield CheckItem(
+        CheckCategory.SECRETS,
+        "llm.api_key",
+        ok=bool(llm_key),
+        detail="configured"
+        if llm_key
+        else "not set (DEEPSEEK_API_KEY / OPENAI_API_KEY / llm.api_key)",
+    )
+
+    mineru_key = ctx.config.resolve_mineru_api_key()
+    yield CheckItem(
+        CheckCategory.SECRETS,
+        "mineru.api_key",
+        ok=bool(mineru_key),
+        detail=(
+            "configured"
+            if mineru_key
+            else "not set (MINERU_API_KEY / ingest.mineru_api_key) — optional"
+        ),
     )
 
 
-def _check_workspace_dir(cfg: Config) -> CheckItem:
-    ok = cfg.workspace_dir.exists()
-    detail = str(cfg.workspace_dir) if ok else "not found"
-    return CheckItem(CheckCategory.PATHS, "workspace_dir", ok, detail)
-
-
-def _check_papers_dir(cfg: Config) -> CheckItem:
-    ok = cfg.papers_store_dir.exists()
-    count = 0
-    if ok:
-        count = sum(
-            1
-            for d in cfg.papers_store_dir.iterdir()
-            if d.is_dir() and (d / "meta.json").exists()
-        )
-    detail = f"{cfg.papers_store_dir} ({count} papers)"
-    return CheckItem(CheckCategory.PATHS, "papers_dir", ok, detail)
-
-
-def _check_llm_key(cfg: Config) -> CheckItem:
-    key = cfg.resolve_llm_api_key()
-    ok = bool(key)
-    detail = "configured" if ok else "not set"
-    return CheckItem(CheckCategory.SECRETS, "llm.api_key", ok, detail)
-
-
-def _check_mineru_key(cfg: Config) -> CheckItem:
-    key = cfg.resolve_mineru_api_key()
-    ok = bool(key)
-    detail = "configured" if ok else "not set (use MINERU_API_KEY env)"
-    return CheckItem(CheckCategory.SECRETS, "mineru.api_key", ok, detail)
-
-
-def _check_llm_service(cfg: Config) -> CheckItem:
-    """Check if LLM service is reachable."""
+def _check_llm_service(ctx) -> CheckItem:
     try:
         import requests
 
-        r = requests.get(cfg.llm.base_url.rstrip("/") + "/v1/models", timeout=5)
-        ok = r.status_code < 500
-        detail = f"reachable ({cfg.llm.model})" if ok else f"error: {r.status_code}"
-    except Exception as e:
-        ok = False
-        detail = f"unreachable: {e}"
-    return CheckItem(CheckCategory.SERVICES, f"llm.{cfg.llm.model}", ok, detail)
-
-
-def _check_mineru_service(cfg: Config) -> CheckItem:
-    """Check if MinerU service is reachable."""
-    try:
-        import requests
-
-        r = requests.get(cfg.ingest.mineru_endpoint, timeout=5)
+        url = ctx.config.llm.base_url.rstrip("/") + "/v1/models"
+        r = requests.get(url, timeout=5)
         ok = r.status_code < 500
         detail = (
-            f"reachable @ {cfg.ingest.mineru_endpoint}"
-            if ok
-            else f"error: {r.status_code}"
+            f"reachable ({ctx.config.llm.model})" if ok else f"HTTP {r.status_code}"
         )
-    except Exception as e:
+    except Exception as exc:
         ok = False
-        detail = f"unreachable: {e}"
+        detail = f"unreachable — {exc}"
+    return CheckItem(CheckCategory.SERVICES, f"llm.{ctx.config.llm.model}", ok, detail)
+
+
+def _check_mineru_service(ctx) -> CheckItem:
+    try:
+        import requests
+
+        r = requests.get(ctx.config.ingest.mineru_endpoint, timeout=5)
+        ok = r.status_code < 500
+        detail = "reachable" if ok else f"HTTP {r.status_code}"
+    except Exception as exc:
+        ok = False
+        detail = f"unreachable — {exc}"
     return CheckItem(CheckCategory.SERVICES, "mineru", ok, detail)
 
 
-# ============================================================================
-#  Stage 2: Pipe
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Collection pipelines
+# ---------------------------------------------------------------------------
 
 
-def _collect(cfg: Config) -> Iterator[CheckItem]:
-    """Collect all check items."""
+def _collect_quick(ctx) -> Iterator[CheckItem]:
+    yield from _check_config_resolution()
     yield _check_python()
     yield from _check_deps()
-    yield _check_config(cfg)
-    yield _check_local_config(cfg)
-    yield _check_workspace_dir(cfg)
-    yield _check_papers_dir(cfg)
-    yield _check_llm_key(cfg)
-    yield _check_mineru_key(cfg)
+    yield from _check_workspace(ctx)
+    yield from _check_secrets(ctx)
 
 
-def _collect_services(cfg: Config) -> Iterator[CheckItem]:
-    """Collect service health items."""
-    yield _check_llm_service(cfg)
-    yield _check_mineru_service(cfg)
+def _collect_services(ctx) -> Iterator[CheckItem]:
+    yield _check_llm_service(ctx)
+    yield _check_mineru_service(ctx)
 
 
-# ============================================================================
-#  Commands
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 
-def run_check(cfg: Config) -> CheckResult:
-    """Quick check (no network)."""
-    items = tuple(_collect(cfg))
-    return CheckResult(items=items)
+def run_check(ctx) -> CheckResult:
+    """Quick check — no network calls."""
+    return CheckResult(items=tuple(_collect_quick(ctx)))
 
 
-def run_doctor(cfg: Config) -> CheckResult:
-    """Full health check (with network)."""
-    items = tuple(list(_collect(cfg)) + list(_collect_services(cfg)))
-    return CheckResult(items=items)
+def run_doctor(ctx) -> CheckResult:
+    """Full health check, including network reachability."""
+    return CheckResult(
+        items=tuple(list(_collect_quick(ctx)) + list(_collect_services(ctx)))
+    )
 
 
 def format_result(result: CheckResult, title: str = "Check") -> str:
-    """Format check result."""
-    lines = [f"=== {title} ==="]
+    """Format a CheckResult for terminal output."""
+    bar = "=" * (len(title) + 8)
+    lines = [bar, f"    {title}", bar]
 
-    # Group by category
     by_cat: dict[CheckCategory, list[CheckItem]] = {}
     for item in result.items:
         by_cat.setdefault(item.category, []).append(item)
@@ -248,24 +321,26 @@ def format_result(result: CheckResult, title: str = "Check") -> str:
             continue
         lines.append(f"\n{cat.name}:")
         for item in items:
-            mark = "[OK]" if item.ok else "[--]"
-            lines.append(f"  {mark} {item.name}: {item.detail}")
+            mark = "✓" if item.ok else "✗"
+            lines.append(f"  [{mark}] {item.name:<34} {item.detail}")
 
-    lines.append(f"\nHealth: {result.total - result.failed}/{result.total}")
+    status = "PASS" if result.passed else "FAIL"
+    lines.append(
+        f"\n{status}  {result.total - result.failed}/{result.total} checks passed"
+    )
     return "\n".join(lines)
 
 
-# ============================================================================
-#  Init Wizard
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Init wizard
+# ---------------------------------------------------------------------------
 
-
-CONFIG_TEMPLATE = """\
-# linkora Configuration
-
-workspace:
-  name: default
-  description: "Default workspace"
+_CONFIG_TEMPLATE = """\
+# linkora configuration
+# Run 'linkora init' to regenerate, or edit freely.
+#
+# Workspace management (create / rename / set-default) is done via:
+#   linkora config <subcommand>
 
 index:
   top_k: 20
@@ -276,16 +351,20 @@ sources:
   local:
     enabled: true
     papers_dir: papers
+    # paths:          # additional directories to scan for PDFs
+    #   - /data/shared-papers
 
 llm:
   backend: openai-compat
   model: deepseek-chat
   base_url: https://api.deepseek.com
+  # api_key: ${DEEPSEEK_API_KEY}   # or export DEEPSEEK_API_KEY
   timeout: 30
 
 ingest:
   extractor: robust
   mineru_endpoint: http://localhost:8000
+  # mineru_api_key: ${MINERU_API_KEY}
 
 logging:
   level: INFO
@@ -294,94 +373,65 @@ logging:
 """
 
 
-LOCAL_TEMPLATE = """\
-# Local overrides (not tracked by git)
-
-# llm:
-#   api_key: sk-xxx
-
-# ingest:
-#   mineru_api_key: xxx
-#   contact_email: your@email.com
-"""
-
-
 def run_init(force: bool = False) -> InitResult:
-    """Interactive init wizard."""
-    cfg = get_config()
-    root = cfg._root
+    """
+    Write an initial global config file and bootstrap the default workspace.
 
-    # Create config.yaml
-    config_path = root / "config.yaml"
-    config_created = False
+    Always writes to ``ConfigLoader.default_write_path()``
+    (~/.linkora/config.yml).  Prompts for an LLM API key which is written
+    directly into the config file (the user can later replace the literal
+    value with an environment-variable reference).
+    """
+    config_path = ConfigLoader.default_write_path()
+    config_written = False
+
     if force or not config_path.exists():
-        config_path.write_text(CONFIG_TEMPLATE, encoding="utf-8")
-        config_created = True
-
-    # Create config.local.yaml
-    local_path = root / "config.local.yaml"
-    local_created = False
-    if force or not local_path.exists():
-        key = input("LLM API key (skip to use env): ").strip()
-        local_data: dict = {}
+        key = input("LLM API key (leave blank to configure later): ").strip()
+        template = _CONFIG_TEMPLATE
         if key:
-            local_data.setdefault("llm", {})["api_key"] = key
-        if local_data:
-            local_path.write_text(
-                yaml.dump(local_data, allow_unicode=True), encoding="utf-8"
+            template = template.replace(
+                "  # api_key: ${DEEPSEEK_API_KEY}",
+                f"  api_key: {key}  # move to DEEPSEEK_API_KEY env var for security",
             )
-            local_created = True
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(template, encoding="utf-8")
+        config_written = True
+        print(f"Created {config_path}")
+    else:
+        print(f"Config already exists at {config_path}  (use --force to overwrite)")
 
-    # Create directories
+    # Bootstrap the default workspace.
+    from linkora.workspace import WorkspaceStore
+
+    store = WorkspaceStore(get_data_root())
     dirs_created = False
-    if config_created or local_created:
-        cfg = get_config()
-        cfg.ensure_dirs()
+
+    if not store.exists("default"):
+        store.create("default", description="Default workspace")
         dirs_created = True
+        print(f"Created default workspace at {store.paths('default').workspace_dir}")
 
-    return InitResult(config_created, local_created, dirs_created)
-
-
-# ============================================================================
-#  CLI
-# ============================================================================
-
-
-def cmd_check(args) -> None:
-    cfg = get_config()
-    result = run_check(cfg)
-    print(format_result(result, "Check"))
+    return InitResult(
+        config_written=config_written,
+        config_path=config_path,
+        dirs_created=dirs_created,
+    )
 
 
-def cmd_doctor(args) -> None:
-    cfg = get_config()
-    result = run_doctor(cfg)
+# ---------------------------------------------------------------------------
+# CLI entry points  (called from commands.py cmd_doctor / cmd_init)
+# ---------------------------------------------------------------------------
+
+
+def cmd_check(args, ctx) -> None:
+    result = run_check(ctx)
+    print(format_result(result, "Quick Check"))
+
+
+def cmd_doctor(args, ctx) -> None:
+    result = run_doctor(ctx)
     print(format_result(result, "Doctor"))
 
 
 def cmd_init(args) -> None:
-    force = getattr(args, "force", False)
-    result = run_init(force=force)
-    if result.config_created:
-        print("Created config.yaml")
-    if result.local_created:
-        print("Created config.local.yaml")
-    if result.dirs_created:
-        print("Created directories")
-
-
-# ============================================================================
-#  Legacy API (for backward compatibility)
-# ============================================================================
-
-
-def check_environment(lang: str = "zh") -> None:
-    """Legacy function for backward compatibility."""
-    cfg = get_config()
-    result = run_check(cfg)
-    print(format_result(result, "Environment Check"))
-
-
-def main() -> None:
-    """Legacy main function for backward compatibility."""
-    run_init()
+    run_init(force=getattr(args, "force", False))

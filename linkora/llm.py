@@ -157,9 +157,8 @@ class LLMRunner:
         api_key: str = "",
     ):
         self._llm_cfg = config
-        self._api_key = api_key or config.resolve_api_key()
 
-        if not self._api_key:
+        if not self._llm_cfg.api_key:
             raise RuntimeError("No LLM API key configured.")
 
         self._http_client = http_client
@@ -167,6 +166,10 @@ class LLMRunner:
     @property
     def name(self) -> str:
         return "llm-runner"
+
+    @property
+    def api_key(self) -> str:
+        return self._llm_cfg.api_key
 
     def execute(self, request: LLMRequest) -> LLMResult:
         """Execute LLM request with retry logic.
@@ -196,7 +199,7 @@ class LLMRunner:
         )
 
         headers = HTTPHeaders(
-            authorization=f"Bearer {self._api_key}",
+            authorization=f"Bearer {self.api_key}",
         )
 
         timeout = request.timeout or self._llm_cfg.timeout
