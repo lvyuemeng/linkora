@@ -19,13 +19,12 @@ Research is fragmented. Papers live in multiple folders, search is scattered acr
 
 ## Features
 
-| | | | |
-|---|---|---|---|
+| | |
+|---|---|
 | **Layered Reading** | L1 metadata → L2 abstract → L3 sections → L4 full text — read at the depth you need |
 | **Hybrid Search** | FTS5 keyword + Qwen3 semantic → RRF fusion ranking |
 | **Multi-Source Import** | Local PDFs, OpenAlex API, Zotero, EndNote XML/RIS |
 | **Workspaces** | Multiple research projects with isolated search and data |
-| **MCP Server** | Full toolset for Claude Desktop, Cursor, and any MCP client |
 
 ## Installation
 
@@ -66,9 +65,6 @@ linkora index
 # Search papers
 linkora search "machine learning"
 linkora search "turbulence" --mode vector
-
-# MCP server
-linkora-mcp
 ```
 
 ## Configuration
@@ -225,6 +221,10 @@ uv run ruff format .
 # Type check
 uv run ty check
 ```
+
+## Thanks
+
+- [Scholaraio ZimoLiao](https://github.com/ZimoLiao/scholaraio): The original repo, with a mediocre quality.
 
 ## License
 

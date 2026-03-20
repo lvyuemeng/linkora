@@ -19,13 +19,12 @@
 
 ## 核心功能
 
-| | | | |
-|---|---|---|---|
+| | |
+|---|---|
 | **分层阅读** | L1 元数据 → L2 摘要 → L3 章节 → L4 全文——按需加载 |
 | **融合检索** | FTS5 关键词 + Qwen3 语义 → RRF 排序融合 |
 | **多源导入** | 本地 PDF、OpenAlex API、Zotero、EndNote XML/RIS |
 | **工作区** | 多个研究项目，隔离搜索和数据 |
-| **MCP 服务器** | 完整工具集，支持 Claude Desktop、Cursor 等 |
 
 ## 安装
 
@@ -66,9 +65,6 @@ linkora index
 # 搜索论文
 linkora search "machine learning"
 linkora search "turbulence" --mode vector
-
-# MCP 服务器
-linkora-mcp
 ```
 
 ## 配置
@@ -221,6 +217,10 @@ uv run ruff format .
 # 类型检查
 uv run ty check
 ```
+
+## 感谢
+
+- [Scholaraio ZimoLiao](https://github.com/ZimoLiao/scholaraio): 原代码库，质量不均。
 
 ## 许可证
 
