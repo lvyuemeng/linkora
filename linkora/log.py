@@ -111,7 +111,7 @@ class LoggerManager:
         Returns
         -------
         str
-            A 12-character hex session ID for correlating metrics events.
+            A 12-character hex session ID for correlating logs.
         """
         if self._initialized:
             return self._session_id
@@ -200,7 +200,7 @@ def init(log_config: "LogConfig", log_file: Path) -> str:
     Returns
     -------
     str
-        Session ID for correlating metrics events.
+        Session ID for correlating logs.
     """
     return _manager.setup(log_config, log_file)
 

@@ -1,715 +1,283 @@
-"""
-topics.py — BERTopic Topic Modeling
-===================================
-
-Uses Qwen3 embeddings from paper_vectors table for BERTopic clustering.
-Supports topic overview, paper lists, hierarchy visualization.
-
-Pipe Flow:
-    Config + Context -> TopicTrainer -> TopicModelOutput
-
-Usage:
-    from linkora.topics import TopicConfig, TopicTrainer, TrainerContext, TopicModelOutput
-    from linkora.papers import PaperStore
-
-    # Create config with embedder
-    config = TopicConfig(embedder=embedder)
-
-    # Create context with PaperStore
-    store = PaperStore(papers_dir)
-    context = TrainerContext(store=store)
-
-    # Train model (loads data, fits BERTopic, returns output)
-    trainer = TopicTrainer(config, context=context)
-    output = trainer.fit()
-
-    # Query methods on output
-    overview = output.get_topic_overview()
-    papers = output.get_topic_papers(topic_id=0)
-
-    # Visualizations on output
-    html = output.visualize_topic_hierarchy()
-"""
+"""topics.py - Topic modeling workflows."""
 
 from __future__ import annotations
 
-import pickle
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import Any, Protocol, Sequence
 
-import numpy as np
-from bertopic import BERTopic
+from linkora.config import TopicsConfig
+from linkora.paths import resolve_data_path
+from linkora.store import Document, DocumentTopic, Topic
 
-from linkora.log import get_logger
 
-if TYPE_CHECKING:
-    from linkora.index import Embedder
-
-_log = get_logger(__name__)
-
-# ============================================================================
-# Data Structures (Pure Data, No Side Effects)
-# ============================================================================
+class TopicsUnavailable(RuntimeError):
+    """Raised when topic modeling is requested but not available."""
 
 
 @dataclass(frozen=True)
-class TopicMeta:
-    """Single paper metadata for topic modeling."""
-
-    paper_id: str
-    title: str
-    authors: str
-    year: str
-    journal: str
-    citation_count: dict
-
-
-@dataclass(frozen=True)
-class TopicInfo:
-    """Topic information."""
-
+class TopicSummary:
     topic_id: int
-    count: int
-    name: str
-    keywords: list[str]
-    representative_papers: list[TopicMeta]
+    label: str
+    top_terms: list[str]
+    size: int
 
 
 @dataclass(frozen=True)
-class RelatedTopic:
-    """Related topic information."""
-
+class TopicAssignment:
+    doc_id: str
     topic_id: int
-    similarity: float
-    keywords: list[str]
-
-
-# ============================================================================
-# Config and Data Containers
-# ============================================================================
+    score: float
 
 
 @dataclass(frozen=True)
-class TopicConfig:
-    """Configuration for topic model - immutable, no path exposure.
+class TopicsResult:
+    workspace_id: str
+    topics: list[TopicSummary]
+    assignments: list[TopicAssignment]
 
-    Args:
-        embedder: Embedder instance for BERTopic (injected dependency).
-        min_topic_size: Minimum topic size for HDBSCAN clustering.
-        nr_topics: Target number of topics ("auto", None, or int).
-    """
 
-    embedder: "Embedder"
-    min_topic_size: int = 5
-    nr_topics: int | str | None = "auto"
+class TopicStoreLike(Protocol):
+    def replace_workspace(
+        self,
+        workspace_id: str,
+        topics: list[Topic],
+        assignments: list[DocumentTopic],
+    ) -> None: ...
+
+    def list_topics(self, workspace_id: str) -> list[Topic]: ...
+
+    def delete_assignments(self, workspace_id: str, topic_ids: list[int]) -> int: ...
+
+    def delete_topics(self, workspace_id: str, topic_ids: list[int]) -> int: ...
+
+
+class TopicsStoreLike(Protocol):
+    def list_by_workspace(
+        self, workspace_id: str, limit: int = 100
+    ) -> list[Document]: ...
+
+    def topic_store(self) -> TopicStoreLike: ...
+
+
+class VectorIndexLike(Protocol):
+    def _compute_embedding(self, text: str) -> list[float]: ...
 
 
 @dataclass(frozen=True)
-class TopicInputData:
-    """Input data for topic modeling - immutable container.
+class TopicModelStore:
+    """Encapsulates topic model file IO."""
 
-    This is the data that gets fed into the trainer. No DB/path dependencies.
-    """
-
-    paper_ids: list[str]
-    docs: list[str]
-    metas: list[TopicMeta]
-    embeddings: "np.ndarray"
-
-
-@dataclass(frozen=True)
-class TopicModelOutput:
-    """Immutable container for built topic model data - output from Trainer.
-
-    This is the final output after training. All fields are immutable.
-    Includes query and visualization methods.
-    """
-
-    bertopic_model: "BERTopic"
-    paper_ids: list[str]
-    metas: list[TopicMeta]
-    topics: list[int]
-    embeddings: "np.ndarray | None" = None
-    docs: list[str | None] | None = None
-
-    def get_papers(self, topic_id: int) -> list[TopicMeta]:
-        """Get papers for a specific topic."""
-        return [m for m, t in zip(self.metas, self.topics) if t == topic_id]
-
-    @property
-    def topic_ids(self) -> set[int]:
-        """All topic IDs (excluding outliers)."""
-        return set(self.topics) - {-1}
-
-    @property
-    def outliers(self) -> list[TopicMeta]:
-        """Papers not assigned to any topic."""
-        return self.get_papers(-1)
-
-    # -------------------------------------------------------------------------
-    # Query Methods
-    # -------------------------------------------------------------------------
-
-    def get_topic_overview(self) -> list[TopicInfo]:
-        """Get overview of all topics."""
-        bertopic = self.bertopic_model
-        info = bertopic.get_topic_info()
-
-        overview = []
-        for _, row in info.iterrows():
-            tid = row["Topic"]
-            if tid == -1:
-                continue
-
-            # Use Representation column from get_topic_info() - native BERTopic method
-            rep = row.get("Representation", [])
-            # Explicitly cast to list[str] since BERTopic returns list of strings
-            if isinstance(rep, list):
-                keywords = cast(
-                    "list[str]", [w for w in rep[:10] if isinstance(w, str)]
-                )
-            else:
-                keywords = []
-
-            papers = self.get_papers(tid)
-            papers.sort(key=lambda m: _best_cite_key(m), reverse=True)
-            rep_papers = papers[:5]
-
-            overview.append(
-                TopicInfo(
-                    topic_id=tid,
-                    count=int(row["Count"]),
-                    name=row.get("Name", ""),
-                    keywords=keywords,
-                    representative_papers=rep_papers,
-                )
-            )
-
-        overview.sort(key=lambda x: x.count, reverse=True)
-        return overview
-
-    def get_topic_papers(self, topic_id: int) -> list[TopicMeta]:
-        """Get all papers in a topic."""
-        papers = self.get_papers(topic_id)
-        papers.sort(key=lambda m: _best_cite_key(m), reverse=True)
-        return papers
-
-    def find_related_topics(self, paper_id: str) -> list[RelatedTopic]:
-        """Find topics related to a paper."""
-        bertopic = self.bertopic_model
-        paper_ids = self.paper_ids
-        topics_list = self.topics
-
-        if paper_id not in paper_ids:
-            return []
-
-        idx = paper_ids.index(paper_id)
-        current_topic = topics_list[idx]
-
-        if current_topic == -1:
-            return []
-
-        # Pre-fetch topic info once to avoid N API calls
-        info = bertopic.get_topic_info()
-        tid_to_rep: dict[int, list[str]] = {}
-        for _, row in info.iterrows():
-            tid = row["Topic"]
-            rep = row.get("Representation", [])
-            if isinstance(rep, list):
-                tid_to_rep[tid] = cast("list[str]", rep)
-
-        topic_ids = sorted(set(topics_list) - {-1})
-        if current_topic not in topic_ids:
-            return []
-
-        # Get similarity from visualize_heatmap data
-        try:
-            bertopic.visualize_heatmap(top_n_topics=min(len(topic_ids), 64))
-            # Extract similarity data from figure if available, otherwise use equal weights
-            related = []
-            for tid in topic_ids:
-                if tid == current_topic:
-                    continue
-                # Use topic embeddings similarity as fallback
-                sim = 0.5  # Default similarity when cannot compute
-                # Use pre-fetched Representation from get_topic_info()
-                rep = tid_to_rep.get(tid, [])
-                keywords = [w for w in rep[:5] if isinstance(w, str)]
-                related.append(
-                    RelatedTopic(topic_id=tid, similarity=sim, keywords=keywords)
-                )
-        except Exception as e:
-            _log.debug("failed to compute topic similarities: %s", e)
-            return []
-
-        related.sort(key=lambda x: x.similarity, reverse=True)
-        return related
-
-    # -------------------------------------------------------------------------
-    # Visualization Methods
-    # -------------------------------------------------------------------------
-
-    def visualize_topic_hierarchy(self) -> str:
-        """Generate topic hierarchy HTML visualization."""
-        bertopic = self.bertopic_model
-        fig = bertopic.visualize_hierarchy()
-        return fig.to_html(include_plotlyjs="cdn")
-
-    def visualize_topics_2d(self) -> str:
-        """Generate 2D topic scatter plot using BERTopic native method."""
-        bertopic = self.bertopic_model
-        fig = bertopic.visualize_topics(
-            top_n_topics=50,
-            custom_labels=True,
-            width=650,
-            height=650,
-        )
-        return fig.to_html(include_plotlyjs="cdn")
-
-    def visualize_barchart(self, top_n_topics: int = 10) -> str:
-        """Generate topic keyword bar chart."""
-        bertopic = self.bertopic_model
-        fig = bertopic.visualize_barchart(
-            top_n_topics=top_n_topics, n_words=8, width=280, height=280
-        )
-        return fig.to_html(include_plotlyjs="cdn")
-
-    def visualize_heatmap(self) -> str:
-        """Generate topic similarity heatmap."""
-        bertopic = self.bertopic_model
-        # Use get_topic_info() which always returns DataFrame (safer than get_topic_freq)
-        info = bertopic.get_topic_info()
-        n_topics = len(info[info["Topic"] != -1])
-        fig = bertopic.visualize_heatmap(top_n_topics=min(n_topics, 64))
-        return fig.to_html(include_plotlyjs="cdn")
-
-    def visualize_term_rank(self) -> str:
-        """Generate term rank curve."""
-        bertopic = self.bertopic_model
-        fig = bertopic.visualize_term_rank()
-        return fig.to_html(include_plotlyjs="cdn")
-
-    # -------------------------------------------------------------------------
-    # Persistence
-    # -------------------------------------------------------------------------
-
-    def save(self, path: Path) -> None:
-        """Save model to path."""
-
-        path.mkdir(parents=True, exist_ok=True)
-
-        bertopic = self.bertopic_model
-        bertopic.save(
-            str(path / "bertopic_model.pkl"),
-            serialization="pickle",
-            save_embedding_model=False,
-        )
-
-        custom_path = path / "linkora_meta.pkl"
-        with open(custom_path, "wb") as f:
-            pickle.dump(
-                {
-                    "paper_ids": self.paper_ids,
-                    "metas": self.metas,
-                    "topics": self.topics,
-                    "embeddings": self.embeddings,
-                    "docs": self.docs,
-                },
-                f,
-            )
-        _log.info("Model saved: %s", path)
+    model_dir: Path
 
     @classmethod
-    def load(cls, path: Path) -> "TopicModelOutput":
-        """Load model from path."""
-        from bertopic import BERTopic
+    def from_config(cls, cfg: TopicsConfig) -> "TopicModelStore":
+        return cls(model_dir=resolve_data_path(cfg.model_dir))
 
-        model_file = path / "bertopic_model.pkl"
-        if not model_file.exists():
-            legacy = path / "model.pkl"
-            if legacy.exists():
-                model_file = legacy
-            else:
-                raise FileNotFoundError(
-                    f"Topic model not found: {path}\nRun `linkora topics --build` first."
-                )
+    def path_for(self, workspace_id: str) -> Path:
+        return self.model_dir / f"topics_{workspace_id}.bertopic"
 
-        bertopic = BERTopic.load(str(model_file))
+    def save(self, model: Any, workspace_id: str) -> Path:
+        self.model_dir.mkdir(parents=True, exist_ok=True)
+        path = self.path_for(workspace_id)
+        model.save(str(path))
+        return path
 
-        custom_path = path / "linkora_meta.pkl"
-        if custom_path.exists():
-            with open(custom_path, "rb") as f:
-                custom = pickle.load(f)
-        else:
-            custom = {}
-
-        return cls(
-            bertopic_model=bertopic,
-            paper_ids=custom.get("paper_ids", []),
-            metas=custom.get("metas", []),
-            topics=custom.get("topics", []),
-            embeddings=custom.get("embeddings", None),
-            docs=custom.get("docs", []),
-        )
-
-
-# ============================================================================
-# Data Layer Functions (Pure Data)
-# ============================================================================
-
-
-def _best_cite_key(meta: TopicMeta) -> int:
-    """Get best citation count for sorting."""
-    cc = meta.citation_count
-    if not cc or not isinstance(cc, dict):
-        return 0
-    return int(max((v for v in cc.values() if isinstance(v, (int, float))), default=0))
-
-
-# ============================================================================
-# Topic Trainer (Builder Pattern)
-# ============================================================================
-
-
-class TopicTrainer:
-    """Trainer for topic model - loads input data and fits BERTopic.
-
-    Pipe flow: Input + Config -> Trainer -> Output
-    - __init__: loads input data from VectorIndex
-    - fit(): produces TopicModelOutput with query/visualization methods
-    """
-
-    def __init__(
-        self,
-        config: TopicConfig,
-        vector_index,
-        store=None,
-        papers_map: dict[str, dict] | None = None,
-    ) -> None:
-        """Initialize trainer - accepts VectorIndex directly.
-
-        Args:
-            config: TopicConfig with embedder and parameters.
-            vector_index: VectorIndex instance for getting embeddings.
-            store: Optional PaperStore instance (needed for papers_dir mode).
-            papers_map: paper_id -> metadata dict (explore mode, overrides store).
-        """
-        self._config = config
-        self._vector_index = vector_index
-        self._store = store
-        self._papers_map = papers_map
-        self._input_data = self._load_input_data(papers_map)
-
-    def _load_input_data(
-        self,
-        papers_map: dict[str, dict] | None = None,
-    ) -> TopicInputData:
-        """Load input data using VectorIndex."""
-        paper_ids, embeddings = self._vector_index.get_vectors()
-
-        if papers_map is not None:
-            return self._load_from_papers_map(paper_ids, embeddings, papers_map)
-        return self._load_from_papers_dir(paper_ids, embeddings)
-
-    def _load_from_papers_map(
-        self,
-        paper_ids: list[str],
-        embeddings: np.ndarray,
-        papers_map: dict[str, dict],
-    ) -> TopicInputData:
-        """Load data from papers_map dict (explore mode)."""
-        docs = []
-        metas = []
-
-        for i, paper_id in enumerate(paper_ids):
-            p = papers_map.get(paper_id)
-            if p is None:
-                continue
-
-            title = (p.get("title") or "").strip()
-            abstract = (p.get("abstract") or "").strip()
-            text = f"{title}. {abstract}" if abstract else title
-            if not text.strip():
-                continue
-
-            cite = p.get("citation_count")
-            if cite is None:
-                cbc = p.get("cited_by_count", 0)
-                cite = {"openalex": cbc} if cbc else {}
-
-            authors = p.get("authors", [])
-            if isinstance(authors, list):
-                authors = ", ".join(authors)
-
-            docs.append(text)
-            metas.append(
-                TopicMeta(
-                    paper_id=paper_id,
-                    title=title,
-                    authors=authors,
-                    year=str(p.get("year", "")),
-                    journal=p.get("journal", ""),
-                    citation_count=cite,
-                )
-            )
-
-        _log.info("Loaded vectors and text for %d papers", len(docs))
-
-        # Filter embeddings to match filtered papers
-        valid_indices = [
-            i for i, p in enumerate(paper_ids) if papers_map.get(p) is not None
-        ]
-        filtered_embeddings = (
-            embeddings[valid_indices] if len(valid_indices) > 0 else np.array([])
-        )
-
-        return TopicInputData(
-            paper_ids=paper_ids,
-            docs=docs,
-            metas=metas,
-            embeddings=filtered_embeddings,
-        )
-
-    def _load_from_papers_dir(
-        self,
-        paper_ids: list[str],
-        embeddings: np.ndarray,
-    ) -> TopicInputData:
-        """Load data from papers directory using store."""
-        store = self._store
-        db_path = self._vector_index.db_path
-
-        if store is None:
-            raise ValueError("store is required for papers_dir mode")
-
-        id_to_dir: dict[str, str] = {}
-
+    def load(self, workspace_id: str) -> Any:
         try:
-            import sqlite3
+            from bertopic import BERTopic
+        except Exception as exc:
+            raise TopicsUnavailable("BERTopic dependencies are not installed.") from exc
 
-            reg_conn = sqlite3.connect(db_path)
-            for row in reg_conn.execute(
-                "SELECT id, dir_name FROM papers_registry"
-            ).fetchall():
-                id_to_dir[row[0]] = row[1]
-            reg_conn.close()
-        except Exception as e:
-            _log.debug("failed to load papers_registry: %s", e)
+        path = self.path_for(workspace_id)
+        if not path.exists():
+            raise TopicsUnavailable("Topic model not found; run topics build first.")
+        return BERTopic.load(str(path))
 
-        docs = []
-        metas = []
-        valid_indices = []
 
-        for i, paper_id in enumerate(paper_ids):
-            dir_name = id_to_dir.get(paper_id)
-            if dir_name is None:
-                dir_name = paper_id
-            paper_d = store.get_paper_dir(dir_name)
-
-            try:
-                meta = store.read_meta(paper_d)
-            except (ValueError, FileNotFoundError) as e:
-                _log.debug("failed to read meta.json in %s: %s", paper_d.name, e)
-                continue
-
-            title = (meta.get("title") or "").strip()
-            abstract = (meta.get("abstract") or "").strip()
-            text = f"{title}. {abstract}" if abstract else title
-            if not text.strip():
-                continue
-
-            docs.append(text)
-            metas.append(
-                TopicMeta(
-                    paper_id=paper_id,
-                    title=title,
-                    authors=", ".join(meta.get("authors") or []),
-                    year=str(meta.get("year", "")),
-                    journal=meta.get("journal", ""),
-                    citation_count=meta.get("citation_count", {}),
-                )
-            )
-            valid_indices.append(i)
-
-        filtered_embeddings = (
-            embeddings[valid_indices] if valid_indices else np.array([])
-        )
-        _log.info("Loaded vectors and text for %d papers", len(docs))
-
-        return TopicInputData(
-            paper_ids=paper_ids,
-            docs=docs,
-            metas=metas,
-            embeddings=filtered_embeddings,
-        )
-
-    def fit(
-        self,
-        *,
-        n_neighbors: int | None = None,
-        n_components: int = 5,
-        min_samples: int = 2,
-        ngram_range: tuple[int, int] = (1, 3),
-        min_df: int = 2,
-        top_n_words: int = 10,
-    ) -> TopicModelOutput:
-        """Fit BERTopic model on loaded input data.
-
-        Args:
-            n_neighbors: UMAP neighbors (auto-calculated if None).
-            n_components: UMAP components.
-            min_samples: HDBSCAN min_samples.
-            ngram_range: N-gram range for vectorizer.
-            min_df: Minimum document frequency.
-            top_n_words: Top words per topic.
-
-        Returns:
-            TopicModelOutput with fitted model and query/visualization methods.
-        """
-        return self._fit(
-            n_neighbors=n_neighbors,
-            n_components=n_components,
-            min_samples=min_samples,
-            ngram_range=ngram_range,
-            min_df=min_df,
-            top_n_words=top_n_words,
-        )
-
-    def fit_and_save(
-        self,
-        save_path: Path,
-        *,
-        n_neighbors: int | None = None,
-        n_components: int = 5,
-        min_samples: int = 2,
-        ngram_range: tuple[int, int] = (1, 3),
-        min_df: int = 2,
-        top_n_words: int = 10,
-    ) -> TopicModelOutput:
-        """Fit model and save to disk.
-
-        Args:
-            save_path: Directory to save model.
-            **fit_kwargs: Additional fit parameters.
-
-        Returns:
-            TopicModelOutput with fitted model.
-        """
-        output = self.fit(
-            n_neighbors=n_neighbors,
-            n_components=n_components,
-            min_samples=min_samples,
-            ngram_range=ngram_range,
-            min_df=min_df,
-            top_n_words=top_n_words,
-        )
-
-        # Save model
-        output.save(save_path)
-        _log.info("Model saved: %s", save_path)
-        return output
-
-    def _fit(
-        self,
-        *,
-        n_neighbors: int | None = None,
-        n_components: int = 5,
-        min_samples: int = 2,
-        ngram_range: tuple[int, int] = (1, 3),
-        min_df: int = 2,
-        top_n_words: int = 10,
-    ) -> TopicModelOutput:
-        """Internal fit implementation."""
-        import numpy as np
-
+def build_topics(
+    store: TopicsStoreLike,
+    vector_index: VectorIndexLike,
+    workspace_id: str,
+    cfg: TopicsConfig,
+    limit: int | None = None,
+    model_store: TopicModelStore | None = None,
+) -> TopicsResult:
+    try:
         from bertopic import BERTopic
-        from bertopic.representation import KeyBERTInspired, MaximalMarginalRelevance
-        from hdbscan import HDBSCAN
-        from sklearn.feature_extraction.text import CountVectorizer
-        from umap import UMAP
+        import numpy as np
+    except Exception as exc:
+        raise TopicsUnavailable("BERTopic dependencies are not installed.") from exc
 
-        input_data = self._input_data
-        docs = input_data.docs
-        embeddings = input_data.embeddings
-        n = len(docs)
+    docs = store.list_by_workspace(workspace_id, limit=limit or 10000)
+    texts, doc_ids = _build_corpus(docs)
+    if not texts:
+        return TopicsResult(workspace_id=workspace_id, topics=[], assignments=[])
 
-        # Auto-calculate neighbors if not provided
-        if n_neighbors is None:
-            n_neighbors = min(15, max(5, n // 10))
+    embeddings = [vector_index._compute_embedding(text) for text in texts]
+    embedding_matrix = np.asarray(embeddings, dtype=float)
+    nr_topics = cfg.nr_topics if cfg.nr_topics > 0 else None
+    model = BERTopic(min_topic_size=cfg.min_topic_size, nr_topics=nr_topics)
+    topic_ids, probs = model.fit_transform(texts, embedding_matrix)
 
-        # Build UMAP model
-        umap_model = UMAP(
-            n_neighbors=n_neighbors,
-            n_components=n_components,
-            min_dist=0.0,
-            metric="cosine",
-            random_state=42,
+    model_repo = model_store or TopicModelStore.from_config(cfg)
+    model_repo.save(model, workspace_id)
+
+    topic_summaries, topic_records = _collect_topics(model, topic_ids, workspace_id)
+    assignments, assignment_records = _build_assignments(
+        doc_ids=doc_ids,
+        topic_ids=topic_ids,
+        probs=probs,
+        workspace_id=workspace_id,
+    )
+    store.topic_store().replace_workspace(
+        workspace_id, topic_records, assignment_records
+    )
+    return TopicsResult(
+        workspace_id=workspace_id, topics=topic_summaries, assignments=assignments
+    )
+
+
+def assign_topics(
+    store: TopicsStoreLike,
+    vector_index: VectorIndexLike,
+    workspace_id: str,
+    cfg: TopicsConfig,
+    limit: int | None = None,
+    model_store: TopicModelStore | None = None,
+) -> TopicsResult:
+    model_repo = model_store or TopicModelStore.from_config(cfg)
+    model = model_repo.load(workspace_id)
+
+    docs = store.list_by_workspace(workspace_id, limit=limit or 10000)
+    texts, doc_ids = _build_corpus(docs)
+    if not texts:
+        return TopicsResult(workspace_id=workspace_id, topics=[], assignments=[])
+
+    embeddings = [vector_index._compute_embedding(text) for text in texts]
+    topic_ids, probs = model.transform(texts, embeddings)
+
+    topic_summaries, topic_records = _collect_topics(model, topic_ids, workspace_id)
+    assignments, assignment_records = _build_assignments(
+        doc_ids=doc_ids,
+        topic_ids=topic_ids,
+        probs=probs,
+        workspace_id=workspace_id,
+    )
+    store.topic_store().replace_workspace(
+        workspace_id, topic_records, assignment_records
+    )
+    return TopicsResult(
+        workspace_id=workspace_id, topics=topic_summaries, assignments=assignments
+    )
+
+
+def prune_topics(
+    store: TopicsStoreLike, workspace_id: str, min_size: int
+) -> tuple[int, int]:
+    topic_store = store.topic_store()
+    topic_ids = [
+        topic.topic_id
+        for topic in topic_store.list_topics(workspace_id)
+        if topic.size < min_size
+    ]
+    if not topic_ids:
+        return (0, 0)
+    removed_assignments = topic_store.delete_assignments(workspace_id, topic_ids)
+    removed_topics = topic_store.delete_topics(workspace_id, topic_ids)
+    return (removed_topics, removed_assignments)
+
+
+def _build_corpus(docs: Sequence[Document]) -> tuple[list[str], list[str]]:
+    texts: list[str] = []
+    doc_ids: list[str] = []
+    for doc in docs:
+        text = " ".join([doc.title or "", doc.l2_summary or ""]).strip()
+        if not text:
+            continue
+        texts.append(text)
+        doc_ids.append(doc.id)
+    return texts, doc_ids
+
+
+def _collect_topics(
+    model: Any,
+    topic_ids: Sequence[int],
+    workspace_id: str,
+) -> tuple[list[TopicSummary], list[Topic]]:
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    sizes: dict[int, int] = {}
+    for tid in topic_ids:
+        key = int(tid)
+        sizes[key] = sizes.get(key, 0) + 1
+
+    summaries: list[TopicSummary] = []
+    records: list[Topic] = []
+    for topic_id in sorted({int(t) for t in topic_ids if int(t) != -1}):
+        topic_terms = model.get_topic(topic_id) or []
+        terms = [str(term) for term, _ in topic_terms]
+        label = terms[0] if terms else f"topic-{topic_id}"
+        size = sizes.get(topic_id, 0)
+        summaries.append(
+            TopicSummary(topic_id=topic_id, label=label, top_terms=terms, size=size)
         )
-
-        # Build HDBSCAN model
-        hdbscan_model = HDBSCAN(
-            min_cluster_size=self._config.min_topic_size,
-            min_samples=min_samples,
-            metric="euclidean",
-            prediction_data=True,
-        )
-
-        # Build vectorizer
-        effective_min_df = min(min_df, max(1, n // 4))
-        vectorizer_model = CountVectorizer(
-            stop_words="english",
-            ngram_range=ngram_range,
-            min_df=effective_min_df,
-        )
-
-        # Representation models
-        representation_model = [
-            KeyBERTInspired(),
-            MaximalMarginalRelevance(diversity=0.3),
-        ]
-
-        # Create and fit BERTopic
-        topic_model = BERTopic(
-            embedding_model=self._config.embedder,
-            umap_model=umap_model,
-            hdbscan_model=hdbscan_model,
-            vectorizer_model=vectorizer_model,
-            representation_model=representation_model,  # type: ignore[invalid-argument-type]
-            top_n_words=top_n_words,
-            verbose=True,
-        )
-
-        topics, _ = topic_model.fit_transform(docs, embeddings=embeddings)
-
-        # Reduce outliers
-        n_outliers_before = sum(1 for t in topics if t == -1)
-        n_real_topics = len(set(topics) - {-1})
-        if n_outliers_before > 0 and n_real_topics > 0:
-            topics = topic_model.reduce_outliers(
-                docs, topics, strategy="embeddings", embeddings=embeddings
+        records.append(
+            Topic(
+                topic_id=topic_id,
+                workspace_id=workspace_id,
+                label=label,
+                top_terms=terms,
+                size=size,
+                created_at=now,
             )
-            topic_model.update_topics(
-                docs,
-                topics=topics,
-                vectorizer_model=vectorizer_model,
-                representation_model=representation_model,  # type: ignore[invalid-argument-type]
-            )
-            n_outliers_after = sum(1 for t in topics if t == -1)
-            _log.info(
-                "Outlier reduction: %d -> %d", n_outliers_before, n_outliers_after
-            )
-
-        n_topics = len(set(topics)) - (1 if -1 in topics else 0)
-        n_outliers = sum(1 for t in topics if t == -1)
-        _log.info("Found %d topics, %d outliers", n_topics, n_outliers)
-
-        # Return immutable output
-        return TopicModelOutput(
-            bertopic_model=topic_model,
-            paper_ids=input_data.paper_ids,
-            metas=input_data.metas,
-            topics=list(topics),
-            embeddings=np.array(embeddings, dtype="float32"),
-            docs=cast(list[str | None] | None, docs),
         )
+    return summaries, records
+
+
+def _build_assignments(
+    doc_ids: list[str],
+    topic_ids: Sequence[int],
+    probs: Any,
+    workspace_id: str,
+) -> tuple[list[TopicAssignment], list[DocumentTopic]]:
+    assignments: list[TopicAssignment] = []
+    records: list[DocumentTopic] = []
+    for idx, doc_id in enumerate(doc_ids):
+        topic_id = int(topic_ids[idx])
+        if topic_id == -1:
+            continue
+        score = _topic_score(probs, idx, topic_id)
+        assignments.append(
+            TopicAssignment(doc_id=doc_id, topic_id=topic_id, score=score)
+        )
+        records.append(
+            DocumentTopic(
+                doc_id=doc_id,
+                workspace_id=workspace_id,
+                topic_id=topic_id,
+                score=score,
+            )
+        )
+    return assignments, records
+
+
+def _topic_score(probs: Any, doc_idx: int, topic_id: int) -> float:
+    if probs is None:
+        return 0.0
+    try:
+        return float(probs[doc_idx][topic_id])
+    except Exception:
+        return 0.0
+
+
+__all__ = [
+    "TopicsUnavailable",
+    "TopicModelStore",
+    "TopicSummary",
+    "TopicAssignment",
+    "TopicsResult",
+    "build_topics",
+    "assign_topics",
+    "prune_topics",
+]

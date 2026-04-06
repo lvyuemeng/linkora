@@ -9,8 +9,8 @@ Commands
 
 Design notes
 ────────────
-- All checks receive AppContext so they can inspect workspace paths,
-  config resolution, and the store without accessing private internals.
+- All checks receive AppContext so they can inspect config resolution
+  and the workspace registry without accessing private internals.
 - Multiple global config files are a first-class warning surfaced by doctor.
 - The init wizard writes only to ConfigLoader.default_write_path()
   (~/.linkora/config.yml) and never touches workspace files directly.
@@ -27,7 +27,6 @@ from pathlib import Path
 from typing import Iterator
 
 from linkora.config import ConfigLoader
-from linkora.workspace import get_data_root
 
 
 # ---------------------------------------------------------------------------
@@ -82,21 +81,19 @@ class InitResult:
 
 _DEP_GROUPS: dict[str, list[tuple[str, str]]] = {
     "core": [
-        ("requests", "requests"),
+        ("httpx", "httpx"),
         ("yaml", "pyyaml"),
+        ("pydantic", "pydantic"),
+        ("litellm", "litellm"),
     ],
     "embed": [
+        ("lancedb", "lancedb"),
         ("sentence_transformers", "sentence-transformers"),
-        ("faiss", "faiss-cpu"),
-        ("numpy", "numpy"),
+        ("modelscope", "modelscope"),
     ],
     "topics": [
         ("bertopic", "bertopic"),
         ("pandas", "pandas"),
-    ],
-    "import": [
-        ("endnote_utils", "endnote-utils"),
-        ("pyzotero", "pyzotero"),
     ],
 }
 
@@ -187,9 +184,8 @@ def _can_import(name: str) -> bool:
 
 
 def _check_workspace(ctx) -> Iterator[CheckItem]:
-    """Check that the active workspace is registered and has a papers directory."""
+    """Check that the active workspace is registered."""
     name = ctx.workspace_name
-    paths = ctx.workspace
 
     yield CheckItem(
         CheckCategory.WORKSPACE,
@@ -200,13 +196,6 @@ def _check_workspace(ctx) -> Iterator[CheckItem]:
             if ctx.store.exists(name)
             else f"'{name}' not found in registry — run 'linkora init'"
         ),
-    )
-
-    yield CheckItem(
-        CheckCategory.PATHS,
-        "workspace.papers_dir",
-        ok=paths.papers_dir.exists(),
-        detail=str(paths.papers_dir),
     )
 
     count = ctx.store.get_paper_count(name)
@@ -229,25 +218,13 @@ def _check_secrets(ctx) -> Iterator[CheckItem]:
         else "not set (DEEPSEEK_API_KEY / OPENAI_API_KEY / llm.api_key)",
     )
 
-    mineru_key = ctx.config.resolve_mineru_api_key()
-    yield CheckItem(
-        CheckCategory.SECRETS,
-        "mineru.api_key",
-        ok=bool(mineru_key),
-        detail=(
-            "configured"
-            if mineru_key
-            else "not set (MINERU_API_KEY / ingest.mineru_api_key) — optional"
-        ),
-    )
-
 
 def _check_llm_service(ctx) -> CheckItem:
     try:
-        import requests
+        import httpx
 
         url = ctx.config.llm.base_url.rstrip("/") + "/v1/models"
-        r = requests.get(url, timeout=5)
+        r = httpx.get(url, timeout=5, follow_redirects=True)
         ok = r.status_code < 500
         detail = (
             f"reachable ({ctx.config.llm.model})" if ok else f"HTTP {r.status_code}"
@@ -256,19 +233,6 @@ def _check_llm_service(ctx) -> CheckItem:
         ok = False
         detail = f"unreachable — {exc}"
     return CheckItem(CheckCategory.SERVICES, f"llm.{ctx.config.llm.model}", ok, detail)
-
-
-def _check_mineru_service(ctx) -> CheckItem:
-    try:
-        import requests
-
-        r = requests.get(ctx.config.ingest.mineru_endpoint, timeout=5)
-        ok = r.status_code < 500
-        detail = "reachable" if ok else f"HTTP {r.status_code}"
-    except Exception as exc:
-        ok = False
-        detail = f"unreachable — {exc}"
-    return CheckItem(CheckCategory.SERVICES, "mineru", ok, detail)
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +250,6 @@ def _collect_quick(ctx) -> Iterator[CheckItem]:
 
 def _collect_services(ctx) -> Iterator[CheckItem]:
     yield _check_llm_service(ctx)
-    yield _check_mineru_service(ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -344,15 +307,8 @@ _CONFIG_TEMPLATE = """\
 
 index:
   top_k: 20
-  embed_model: Qwen/Qwen3-Embedding-0.6B
-  embed_device: auto
-
-sources:
-  local:
-    enabled: true
-    papers_dir: papers
-    # paths:          # additional directories to scan for PDFs
-    #   - /data/shared-papers
+  embed_model: Qwen/Qwen3-Embedding
+  embed_device: cpu
 
 llm:
   backend: openai-compat
@@ -361,15 +317,23 @@ llm:
   # api_key: ${DEEPSEEK_API_KEY}   # or export DEEPSEEK_API_KEY
   timeout: 30
 
-ingest:
-  extractor: robust
-  mineru_endpoint: http://localhost:8000
-  # mineru_api_key: ${MINERU_API_KEY}
+extract:
+  ocr_backend: tesseract
+  extract_tables: true
+  cache_max_mb: 500
 
-logging:
+tidy:
+  dry_run: false
+  confirm: true
+  templates:
+    paper: "{title}_{author}"
+    generic: "{title}_{author}"
+    invoice: "{vendor}_{amount}"
+    contract: "{parties_slug}_contract"
+
+log:
   level: INFO
   file: linkora.log
-  metrics_db: metrics.db
 """
 
 
@@ -401,15 +365,15 @@ def run_init(force: bool = False) -> InitResult:
         print(f"Config already exists at {config_path}  (use --force to overwrite)")
 
     # Bootstrap the default workspace.
+    from linkora.db import get_db
     from linkora.workspace import WorkspaceStore
 
-    store = WorkspaceStore(get_data_root())
+    store = WorkspaceStore(get_db())
     dirs_created = False
 
     if not store.exists("default"):
         store.create("default", description="Default workspace")
-        dirs_created = True
-        print(f"Created default workspace at {store.paths('default').workspace_dir}")
+        print("Created default workspace")
 
     return InitResult(
         config_written=config_written,

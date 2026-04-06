@@ -17,6 +17,3 @@ sources:
       - /backup/physics
       - /mnt/external/physics-papers
 
-  openalex:
-    enabled: true
-    # api_key: ""  # Set via OPENALEX_API_KEY env var

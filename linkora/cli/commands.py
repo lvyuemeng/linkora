@@ -2,338 +2,101 @@
 commands.py — CLI command handlers.
 
 All handlers receive (args: argparse.Namespace, ctx: AppContext).
-They access workspace paths via ctx.workspace and workspace
-management via ctx.store.  They never access private internals of
-AppConfig or WorkspaceStore.
+They access shared state via ctx.config, ctx.store, ctx.workspace_name,
+and helper methods for log paths. They never access private
+internals of AppConfig or WorkspaceStore.
 
 Config file read/write
 ──────────────────────
-``cmd_config_set`` writes to the global config YAML.  To preserve
-comments and key ordering we use ruamel.yaml when available, falling
-back to plain PyYAML with a notice that comments will be lost.
-
-There is no workspace-local config.  All settings live in the single
-global config file.
+``cmd_config_set`` writes to the global config YAML. There is no
+workspace-local config. All settings live in the single global config file.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import TYPE_CHECKING
 
-from linkora.cli.context import AppContext
-from linkora.cli.errors import IndexNotFoundError
-from linkora.cli.output import ui, print_results_list
-from linkora.config import ConfigLoader
-from linkora.log import get_logger
+from linkora.cli.args import (
+    AddArgs,
+    SearchArgs,
+    EnrichArgs,
+    IndexArgs,
+    ConfigShowArgs,
+    ConfigSetArgs,
+    DoctorArgs,
+    InitArgs,
+    FilesDedupArgs,
+    FilesInboxArgs,
+    FilesRescanArgs,
+    FilesTidyArgs,
+    FilesWatchAddArgs,
+)
+from linkora.log import ui
+from linkora.config import render_config_yaml, set_config_value
+from linkora.sources import (
+    SourceIngestRequest,
+    run_source_ingest,
+)
+from linkora.files import (
+    FilesInboxRequest,
+    FilesTidyRequest,
+    FilesDedupRequest,
+    FilesRescanRequest,
+    FilesWatchAddRequest,
+    run_files_inbox,
+    run_files_tidy,
+    run_files_dedup,
+    run_files_rescan,
+    run_files_watch_add,
+    run_files_watch_list,
+    run_files_watch_start,
+)
+from linkora.paths import get_data_root
 
-_log = get_logger(__name__)
-
-SearchMode = Literal["fulltext", "author", "vector", "hybrid"]
-IndexType = Literal["fts", "vector"]
-
-
-# ============================================================================
-#  YAML round-trip helpers
-# ============================================================================
+if TYPE_CHECKING:
+    from linkora.config import AppConfig
+    from linkora.workspace import WorkspaceStore
 
 
-def _load_yaml_roundtrip(path: Path) -> tuple[Any, str]:
+@dataclass(frozen=True)
+class AppContext:
     """
-    Load a YAML file for in-place editing.
+    Per-invocation CLI context.
 
-    Returns (document, engine) where engine is either "ruamel" or "pyyaml".
-    With ruamel.yaml the document preserves comments and key order.
-    With pyyaml it is a plain dict (comments will be lost on write).
+    Parameters
+    ----------
+    config:
+        Loaded application settings (frozen Pydantic model).
+    config_dir:
+        Directory that contained the active config.yml.
+    store:
+        WorkspaceStore bound to the data root.
+    workspace_name:
+        Name of the active workspace for this invocation.
     """
-    try:
-        from ruamel.yaml import YAML  # type: ignore[import]
 
-        yaml = YAML()
-        yaml.preserve_quotes = True
-        with path.open(encoding="utf-8") as f:
-            return yaml.load(f) or {}, "ruamel"
-    except ImportError:
-        import yaml as pyyaml
+    config: "AppConfig"
+    config_dir: Path
+    store: "WorkspaceStore"
+    workspace_name: str
 
-        data = pyyaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        return data, "pyyaml"
+    @property
+    def data_root(self) -> Path:
+        return get_data_root()
 
+    def log_file(self, name: str) -> Path:
+        return self.data_root / name
 
-def _dump_yaml_roundtrip(data: Any, path: Path, engine: str) -> None:
-    """Write *data* back to *path* using the same engine it was loaded with."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if engine == "ruamel":
-        from ruamel.yaml import YAML  # type: ignore[import]
+    def resolve_workspace_id(self, override: str | None = None) -> str:
+        return override or self.workspace_name or "default"
 
-        yaml = YAML()
-        yaml.preserve_quotes = True
-        with path.open("w", encoding="utf-8") as f:
-            yaml.dump(data, f)
-    else:
-        import yaml as pyyaml
-
-        path.write_text(
-            pyyaml.dump(data, allow_unicode=True, default_flow_style=False),
-            encoding="utf-8",
-        )
-
-
-def _set_nested(doc: Any, parts: list[str], value: Any) -> None:
-    """
-    Set a nested key path in *doc* (dict or ruamel CommentedMap) to *value*.
-
-    Creates intermediate dicts as needed.
-    """
-    current = doc
-    for part in parts[:-1]:
-        if part not in current or not isinstance(current[part], dict):
-            # Preserve ruamel type if possible.
-            try:
-                from ruamel.yaml.comments import CommentedMap  # type: ignore[import]
-
-                current[part] = CommentedMap()
-            except ImportError:
-                current[part] = {}
-        current = current[part]
-    current[parts[-1]] = value
-
-
-def _get_nested(doc: dict, parts: list[str]) -> Any:
-    """Return the value at *parts* key path, or ``None`` if not found."""
-    current: Any = doc
-    for part in parts:
-        if not isinstance(current, dict):
-            return None
-        current = current.get(part)
-    return current
-
-
-def _parse_cli_value(raw: str) -> Any:
-    """
-    Coerce a CLI string to the most specific Python type.
-
-    Conversion order: bool → int → float → str.
-    """
-    lower = raw.strip().lower()
-    if lower in ("true", "yes", "on"):
-        return True
-    if lower in ("false", "no", "off"):
-        return False
-    try:
-        return int(raw)
-    except ValueError:
+    def close(self) -> None:
+        """Close any open resources."""
         pass
-    try:
-        return float(raw)
-    except ValueError:
-        pass
-    return raw
-
-
-def _resolve_config_write_path(ctx: AppContext) -> Path:
-    """
-    Return the path to write config changes to.
-
-    Uses the currently active config file when one exists; otherwise
-    returns the canonical default write path so a new file is created
-    in the right place.
-    """
-    from linkora.config import get_config_path
-
-    return get_config_path() or ConfigLoader.default_write_path()
-
-
-# ============================================================================
-#  Config commands
-# ============================================================================
-
-
-def cmd_config_show(args: argparse.Namespace, ctx: AppContext) -> None:
-    """
-    Show configuration or workspace information.
-
-    Subcommands (via positional field arg and flags):
-      linkora config show               — active workspace summary
-      linkora config show --all         — all workspaces
-      linkora config show <field>       — single effective config value
-                                          e.g.  llm.model  or  index.top_k
-    """
-    if getattr(args, "all", False):
-        _show_all_workspaces(ctx)
-        return
-
-    field: str | None = getattr(args, "field", None)
-    if field:
-        _show_config_field(field, ctx)
-        return
-
-    _show_workspace(getattr(args, "workspace", None) or ctx.workspace_name, ctx)
-
-
-def _show_all_workspaces(ctx: AppContext) -> None:
-    workspaces = ctx.store.list_workspaces()
-    default_ws = ctx.store.get_default()
-    ui("All workspaces:\n")
-    for name in workspaces:
-        meta = ctx.store.get_metadata(name)
-        count = ctx.store.get_paper_count(name)
-        marker = " *" if name == default_ws else "  "
-        desc = meta.description or "(no description)"
-        ui(f"{marker} {name:<18} {desc}  ({count} papers)")
-    ui("\n* = default workspace")
-
-
-def _show_config_field(field: str, ctx: AppContext) -> None:
-    """Print the effective (env-resolved) value of a dot-separated field."""
-    import yaml
-
-    # Serialise AppConfig to a plain dict via Pydantic, then navigate it.
-    # We use model_dump() so nested Pydantic models become plain dicts.
-    config_dict = ctx.config.model_dump()
-    parts = field.split(".")
-    value = _get_nested(config_dict, parts)
-
-    if value is None:
-        ui(f"Field '{field}' not found in config.")
-        return
-
-    ui(yaml.dump({field: value}, allow_unicode=True, default_flow_style=False).rstrip())
-
-
-def _show_workspace(name: str, ctx: AppContext) -> None:
-    meta = ctx.store.get_metadata(name)
-    count = ctx.store.get_paper_count(name)
-    default_ws = ctx.store.get_default()
-    paths = ctx.store.paths(name)
-
-    from linkora.config import get_config_path
-
-    active_config = get_config_path()
-
-    ui(f"Workspace: {name}" + (" (default)" if name == default_ws else ""))
-    ui(f"  Description : {meta.description or '(none)'}")
-    ui(f"  Papers      : {count}")
-    ui(f"  Data dir    : {paths.workspace_dir}")
-    ui(f"  Papers dir  : {paths.papers_dir}")
-    ui(f"  Index DB    : {paths.index_db}")
-    ui(f"  Config file : {active_config or '(built-in defaults)'}")
-
-
-def cmd_config_set(args: argparse.Namespace, ctx: AppContext) -> None:
-    """
-    Set a configuration value in the global config file.
-
-    Usage:
-        linkora config set llm.model gpt-4o
-        linkora config set index.top_k 30
-        linkora config set sources.local.enabled false
-
-    Values are coerced: "true"/"false" → bool, numeric strings → int/float.
-    The file is rewritten preserving comments when ruamel.yaml is installed.
-    """
-    field: str = args.field
-    raw_value: str = args.value
-    value = _parse_cli_value(raw_value)
-
-    # Reject attempts to set unknown top-level sections.
-    _VALID_TOP_KEYS = {"sources", "index", "llm", "ingest", "topics", "logging"}
-    top_key = field.split(".")[0]
-    if top_key not in _VALID_TOP_KEYS:
-        ui(
-            f"Error: Unknown config section '{top_key}'. "
-            f"Valid sections: {', '.join(sorted(_VALID_TOP_KEYS))}"
-        )
-        return
-
-    config_path = _resolve_config_write_path(ctx)
-
-    if config_path.exists():
-        doc, engine = _load_yaml_roundtrip(config_path)
-    else:
-        doc, engine = {}, "pyyaml"
-        ui(f"Creating new config file at {config_path}")
-
-    if engine == "pyyaml":
-        ui("Note: ruamel.yaml not installed — comments will not be preserved.")
-
-    _set_nested(doc, field.split("."), value)
-    _dump_yaml_roundtrip(doc, config_path, engine)
-    ui(f"Set {field} = {value!r}  ({config_path})")
-
-
-def cmd_config_mv(args: argparse.Namespace, ctx: AppContext) -> None:
-    """
-    Rename or relocate a workspace.
-
-    Usage:
-        linkora config mv old-name new-name
-        linkora config mv my-ws /data/linkora/my-ws
-    """
-    source: str = args.source
-    target: str = args.target
-
-    src_paths = ctx.store.paths(source)
-    target_p = Path(target)
-    dst_display = str(
-        target_p
-        if target_p.is_absolute()
-        else ctx.store.data_root / "workspace" / target
-    )
-
-    ui(f"Migrating workspace '{source}' → '{target}'")
-    ui(f"  Source : {src_paths.workspace_dir}")
-    ui(f"  Target : {dst_display}")
-
-    try:
-        count = ctx.store.migrate(source, target)
-    except FileNotFoundError as exc:
-        ui(f"Error: {exc}")
-        return
-    except FileExistsError as exc:
-        ui(f"Error: {exc}")
-        return
-
-    new_name = target_p.name if target_p.is_absolute() else target
-    ui(f"Done — {count} paper(s) migrated.")
-
-    if ctx.workspace_name == source:
-        ui(f"\nNote: '{source}' was your active workspace.")
-        ui(f"Use '--workspace {new_name}' to switch to it.")
-
-
-def cmd_config_set_default(args: argparse.Namespace, ctx: AppContext) -> None:
-    """Set the default workspace."""
-    name: str = args.workspace
-    try:
-        old = ctx.store.get_default()
-        ctx.store.set_default(name)
-        ui(f"Default workspace: '{old}' → '{name}'")
-    except KeyError as exc:
-        ui(f"Error: {exc}")
-
-
-def cmd_config_set_meta(args: argparse.Namespace, ctx: AppContext) -> None:
-    """
-    Set workspace metadata.
-
-    Settable fields:
-        description   — free-text description of the workspace
-
-    Usage:
-        linkora config set-meta description "My ML papers"
-        linkora config set-meta description "My ML papers" --workspace ml
-    """
-    name: str = getattr(args, "workspace", None) or ctx.workspace_name
-    field: str = args.field
-    value: str = args.value
-
-    if field == "description":
-        ctx.store.set_metadata(name, description=value)
-        ui(f"Updated workspace '{name}' description: \"{value}\"")
-    else:
-        ui(f"Error: Unknown metadata field '{field}'. Available fields: description")
 
 
 # ============================================================================
@@ -342,312 +105,255 @@ def cmd_config_set_meta(args: argparse.Namespace, ctx: AppContext) -> None:
 
 
 def cmd_search(args: argparse.Namespace, ctx: AppContext) -> None:
-    """Unified search with --mode flag (fulltext / author / vector / hybrid)."""
-    query = " ".join(args.query) if getattr(args, "query", None) else ""
-    mode: SearchMode = args.mode
-    top_k: int = args.top if args.top is not None else ctx.config.index.top_k
-    filters = _extract_filters(args)
+    """Search documents using full-text or vector search."""
+    from linkora.schema.registry import (
+        DEFAULT_SCHEMA_REGISTRY,
+        SearchFilter,
+        filter_schema_documents,
+        parse_schema_documents,
+    )
 
-    try:
-        _SEARCH_DISPATCH[mode](ctx, query, top_k, filters)
-    except FileNotFoundError:
-        raise IndexNotFoundError(str(ctx.workspace.index_db))
+    cmd_args = SearchArgs.from_namespace(args)
+    query = " ".join(cmd_args.query) if cmd_args.query else ""
+    if not query:
+        ui("Error: provide a search query")
+        return
 
+    mode = cmd_args.mode
+    top_k = cmd_args.top
 
-def _extract_filters(args: argparse.Namespace) -> dict:
-    return {
-        "year": getattr(args, "year", None),
-        "journal": getattr(args, "journal", None),
-        "paper_type": getattr(args, "paper_type", None),
-    }
+    store = ctx.store.document_store()
+    search_index = ctx.store.search_index()
+    vector_index = ctx.store.vector_index()
+    ws_id = ctx.resolve_workspace_id()
 
+    filter_fields: dict[str, str] = {}
+    if args.year:
+        filter_fields["year"] = args.year
+    if args.journal:
+        filter_fields["journal"] = args.journal
+    filters = SearchFilter(
+        doc_type=args.paper_type or None,
+        fields=filter_fields,
+    )
 
-def _search_fulltext(ctx: AppContext, query: str, top_k: int, filters: dict) -> None:
-    with ctx.search_index() as idx:
-        results = idx.search(query, top_k=top_k, **filters)
-    print_results_list(results, f'Found {len(results)} papers (fulltext: "{query}")')
+    run_fulltext = mode in (None, "fulltext")
+    run_vector = mode in (None, "vector")
 
+    if run_fulltext:
+        doc_type = filters.doc_type
+        candidates = list(
+            search_index.search(
+                query,
+                workspace_id=ws_id,
+                doc_type=doc_type,
+                limit=top_k,
+            )
+        )
+        docs: list = []
+        for r in candidates:
+            doc = store.get_by_id(r.doc_id)
+            if not doc:
+                continue
+            docs.append(doc)
+        parsed_docs = parse_schema_documents(docs, registry=DEFAULT_SCHEMA_REGISTRY)
+        results = filter_schema_documents(parsed_docs, filters)
+        ui(f"Found {len(results)} document(s) (fulltext: '{query}')")
+        for r in results:
+            ui(f"  - {r.title[:60]}")
 
-def _search_author(ctx: AppContext, query: str, top_k: int, filters: dict) -> None:
-    with ctx.search_index() as idx:
-        results = idx.search_author(query, top_k=top_k, **filters)
-    print_results_list(results, f'Found {len(results)} papers (author: "{query}")')
-
-
-def _search_vector(ctx: AppContext, query: str, top_k: int, filters: dict) -> None:
-    try:
-        with ctx.vector_index() as vidx:
-            results = vidx.search(query, top_k=top_k, **filters)
-        print_results_list(results, f'Found {len(results)} papers (vector: "{query}")')
-    except ImportError as exc:
-        ui(f"Vector search unavailable: {exc}")
-        ui("Install faiss-cpu to enable vector search.")
-
-
-def _search_hybrid(ctx: AppContext, query: str, top_k: int, filters: dict) -> None:
-    _log.warning("Hybrid search not yet implemented; falling back to fulltext.")
-    _search_fulltext(ctx, query, top_k, filters)
-
-
-_SEARCH_DISPATCH: dict[SearchMode, Callable[[AppContext, str, int, dict], None]] = {
-    "fulltext": _search_fulltext,
-    "author": _search_author,
-    "vector": _search_vector,
-    "hybrid": _search_hybrid,
-}
-
-
-def cmd_top_cited(args: argparse.Namespace, ctx: AppContext) -> None:
-    """List top-cited papers."""
-    top_k: int = args.top if args.top is not None else ctx.config.index.top_k
-    filters = _extract_filters(args)
-    with ctx.search_index() as idx:
-        results = idx.top_cited(top_k=top_k, **filters)
-    print_results_list(results, f"Found {len(results)} papers (top-cited)")
-
-
-# ============================================================================
-#  Add / Enrich / Index / Audit
-# ============================================================================
-
-
-def _parse_year_arg(year_val: str | None) -> tuple[int | None, int | None]:
-    if not year_val:
-        return None, None
-    s = str(year_val)
-    if "-" not in s:
-        y = int(s)
-        return y, y
-    lo, hi = s.split("-", 1)
-    return (int(lo) if lo else None), (int(hi) if hi else None)
+    if run_vector:
+        try:
+            doc_type = filters.doc_type
+            candidates = list(
+                vector_index.search(
+                    query,
+                    workspace_id=ws_id,
+                    doc_type=doc_type,
+                    limit=top_k,
+                )
+            )
+            docs: list = []
+            score_map: dict[str, float] = {}
+            for r in candidates:
+                doc = store.get_by_id(r.doc_id)
+                if not doc:
+                    continue
+                docs.append(doc)
+                score_map[doc.id] = float(r.score)
+            parsed_docs = parse_schema_documents(docs, registry=DEFAULT_SCHEMA_REGISTRY)
+            filtered = filter_schema_documents(parsed_docs, filters)
+            ui(f"Found {len(filtered)} document(s) (vector: '{query}')")
+            for doc in filtered:
+                ui(f"  - {doc.title[:60]} (score: {score_map.get(doc.id, 0.0):.2f})")
+        except ImportError as e:
+            ui(f"Vector search unavailable: {e}")
 
 
 def cmd_add(args: argparse.Namespace, ctx: AppContext) -> None:
-    """Add papers from various sources."""
-    from linkora.ingest.matching import DefaultDispatcher, match_papers
-    from linkora.sources.protocol import PaperQuery
+    """Add documents from various sources."""
 
-    doi: str = getattr(args, "doi", "") or ""
-    issn: str = getattr(args, "issn", "") or ""
-    author: str = getattr(args, "author", "") or ""
-    title: str = getattr(args, "title", "") or ""
-    freeform: str = getattr(args, "query", "") or ""
-    year_start, year_end = _parse_year_arg(getattr(args, "year", None))
-
-    if any((doi, issn, author, title, year_start)):
-        query = PaperQuery(
-            doi=doi,
-            issn=issn,
-            author=author,
-            title=title,
-            year_start=year_start,
-            year_end=year_end,
-        )
-    elif freeform:
-        query = _parse_freeform(freeform)
-    else:
-        ui("Error: provide --doi, --issn, --author, --title, or a free-form query.")
+    cmd_args = AddArgs.from_namespace(args)
+    if not cmd_args.targets:
+        ui("Error: provide at least one target")
         return
 
-    if query.is_empty:
-        ui("Error: query is empty.")
-        return
-
-    local_dirs = ctx.resolve_local_source_paths()
-    http = ctx.http_client()
-
-    try:
-        dispatcher = DefaultDispatcher(local_pdf_dirs=local_dirs, http_client=http)
-        limit: int = getattr(args, "limit", 5) or 5
-
-        ui(f"Searching: {query}")
-        matched = match_papers(query=query, dispatcher=dispatcher, limit=limit)
-
-        if not matched:
-            ui("No papers found.")
-            return
-
-        ui(f"Found {len(matched)} paper(s):")
-        for i, paper in enumerate(matched, 1):
-            title_s = paper.get("title", "Untitled")[:60]
-            doi_s = paper.get("doi", "")
-            score = paper.get("_match_score", 0)
-            source = paper.get("_match_source", "unknown")
-            ui(f"  {i}. {title_s}…")
-            ui(f"     doi={doi_s}  score={score:.0f}  source={source}")
-
-        if getattr(args, "dry_run", False):
-            ui("(dry-run — nothing saved)")
-    finally:
-        http.close()
+    output_dir = Path(cmd_args.output or (Path.home() / "Downloads"))
+    request = SourceIngestRequest(
+        targets=cmd_args.targets,
+        source=cmd_args.source,
+        output_dir=output_dir,
+        workspace_id=ctx.resolve_workspace_id(cmd_args.workspace),
+        doc_type_hint=cmd_args.doc_type,
+        dry_run=cmd_args.dry_run,
+    )
+    run_source_ingest(request)
 
 
-def _parse_freeform(query_str: str):
-    import re
-    from linkora.sources.protocol import PaperQuery
-
-    q = query_str.strip()
-    if re.match(r"^10\.\d{4,}/", q):
-        return PaperQuery(doi=q)
-    if re.match(r"^\d{4}\.\d{4,5}$", q):
-        return PaperQuery(title=q)
-    return PaperQuery(title=q)
+# ============================================================================
+#  Add / Enrich / Index
+# ============================================================================
 
 
 def cmd_enrich(args: argparse.Namespace, ctx: AppContext) -> None:
-    """Enrich papers with table-of-contents and conclusions."""
-    paper_id: str | None = getattr(args, "paper", None)
-    do_toc: bool = getattr(args, "toc", False)
-    do_conclusion: bool = getattr(args, "conclusion", False)
-    limit: int | None = getattr(args, "limit", None)
-    force: bool = getattr(args, "force", False)
+    """Re-run LLM enrichment on existing documents."""
+    from linkora.pipeline.enrich import EnrichRequest, enrich_store
 
-    if not do_toc and not do_conclusion:
-        do_toc = do_conclusion = True
-
-    enricher = ctx.paper_enricher()
-    store = ctx.paper_store()
-
-    papers = [paper_id] if paper_id else [p.name for p in store.iter_papers()]
-    if limit:
-        papers = papers[:limit]
-
-    if not papers:
-        ui("No papers found.")
-        return
-
-    ui(
-        f"Enriching {len(papers)} paper(s)  toc={do_toc}  conclusion={do_conclusion}  force={force}"
+    cmd_args = EnrichArgs.from_namespace(args)
+    store = ctx.store.document_store()
+    request = EnrichRequest(
+        workspace_id=ctx.resolve_workspace_id(),
+        paper_id=cmd_args.paper,
+        limit=cmd_args.limit,
+        force=cmd_args.force,
+        summary=cmd_args.summary,
+        outline=cmd_args.outline,
     )
-    ok = 0
-    for pid in papers:
-        try:
-            toc_ok = enricher.enrich_toc(pid, force=force) if do_toc else False
-            conc_ok = (
-                enricher.enrich_conclusion(pid, force=force) if do_conclusion else False
-            )
-            if toc_ok or conc_ok:
-                ok += 1
-        except Exception as exc:
-            _log.error("Failed to enrich %s: %s", pid, exc)
+    asyncio.run(enrich_store(store, request))
 
-    ui(f"Enriched {ok}/{len(papers)} papers.")
+
+def cmd_files_inbox(args: argparse.Namespace, ctx: AppContext) -> None:
+    cmd_args = FilesInboxArgs.from_namespace(args)
+    request = FilesInboxRequest(
+        path=cmd_args.path,
+        workspace_id=ctx.resolve_workspace_id(cmd_args.workspace),
+    )
+    run_files_inbox(request)
+
+
+def cmd_files_tidy(args: argparse.Namespace, ctx: AppContext) -> None:
+    cmd_args = FilesTidyArgs.from_namespace(args)
+    store = ctx.store.document_store()
+    request = FilesTidyRequest(
+        path=cmd_args.path,
+        doc_type_hint=cmd_args.type or None,
+        dry_run=cmd_args.dry_run or ctx.config.tidy.dry_run,
+        confirm=ctx.config.tidy.confirm,
+        templates=ctx.config.tidy.templates,
+    )
+    run_files_tidy(store, request)
+
+
+def cmd_files_dedup(args: argparse.Namespace, ctx: AppContext) -> None:
+    cmd_args = FilesDedupArgs.from_namespace(args)
+    request = FilesDedupRequest(
+        path=cmd_args.path,
+        delete_older=cmd_args.delete_older,
+    )
+    run_files_dedup(request)
+
+
+def cmd_files_rescan(args: argparse.Namespace, ctx: AppContext) -> None:
+    cmd_args = FilesRescanArgs.from_namespace(args)
+    store = ctx.store.document_store()
+    request = FilesRescanRequest(
+        workspace_id=ctx.resolve_workspace_id(),
+        scan_path=cmd_args.path,
+    )
+    run_files_rescan(store, request)
+
+
+def cmd_files_watch_add(args: argparse.Namespace, ctx: AppContext) -> None:
+    cmd_args = FilesWatchAddArgs.from_namespace(args)
+    request = FilesWatchAddRequest(
+        path=cmd_args.path.resolve(),
+        workspace_id=ctx.resolve_workspace_id(cmd_args.workspace),
+        doc_type_hint=cmd_args.type or None,
+    )
+    run_files_watch_add(ctx.store, request)
+
+
+def cmd_files_watch_list(args: argparse.Namespace, ctx: AppContext) -> None:
+    run_files_watch_list(ctx.store)
+
+
+def cmd_files_watch_start(args: argparse.Namespace, ctx: AppContext) -> None:
+    daemon = args.daemon
+    if daemon:
+        ui("Daemon mode is not supported yet; running in foreground.")
+    run_files_watch_start(ctx.store)
 
 
 def cmd_index(args: argparse.Namespace, ctx: AppContext) -> None:
-    """Build or rebuild a search index (fts or vector)."""
-    index_type: IndexType = args.type
-    rebuild: bool = args.rebuild
+    """Build or rebuild search indexes."""
+    from linkora.topics import TopicModelStore, TopicsUnavailable, build_topics
 
-    if not ctx.workspace.papers_dir.exists():
-        ui(f"Error: papers directory does not exist: {ctx.workspace.papers_dir}")
-        return
+    cmd_args = IndexArgs.from_namespace(args)
+    run_fts = cmd_args.fts
+    run_vector = cmd_args.vector
+    run_topics = cmd_args.topics
+    if cmd_args.all:
+        run_fts = True
+        run_vector = True
+        run_topics = True
+    if not (run_fts or run_vector or run_topics):
+        run_fts = True
+        run_vector = True
 
-    store = ctx.paper_store()
-    action = "Rebuilding" if rebuild else "Building"
+    data_root = get_data_root()
+    ui(f"Data root: {data_root}")
 
-    if index_type == "fts":
-        ui(f"{action} FTS index → {ctx.workspace.index_db}")
-        with ctx.search_index() as idx:
-            count = idx.rebuild(store) if rebuild else idx.update(store)
-        ui(f"Done — indexed {count} papers.")
+    if run_fts:
+        ui("Building FTS index...")
+        idx = ctx.store.search_index()
+        idx.rebuild()
+        ui("FTS index built.")
 
-    elif index_type == "vector":
+    if run_vector:
+        ui("Building vector index...")
         try:
-            ui(f"{action} vector index → {ctx.workspace.vectors_file}")
-            with ctx.vector_index() as vidx:
-                count = vidx.rebuild(store) if rebuild else vidx.update(store)
-            ui(f"Done — embedded {count} papers.")
-        except ImportError as exc:
-            ui(f"Vector index unavailable: {exc}")
-            ui("Install faiss-cpu to enable vector indexing.")
+            vidx = ctx.store.vector_index()
+            vidx.rebuild()
+            ui("Vector index built.")
+        except ImportError as e:
+            ui(f"Vector index unavailable: {e}")
 
-
-def cmd_audit(args: argparse.Namespace, ctx: AppContext) -> None:
-    """Audit paper data quality."""
-    store = ctx.paper_store()
-    issues = store.audit()
-
-    if not issues:
-        ui("No issues found.")
-        return
-
-    severity: str | None = getattr(args, "severity", None)
-    if severity:
-        issues = [i for i in issues if i.severity == severity]
-
-    _SEVERITY_PREFIX = {"error": "[ERROR]", "warning": "[WARN ]", "info": "[INFO ]"}
-    ui(f"Found {len(issues)} issue(s):\n")
-    for issue in issues:
-        prefix = _SEVERITY_PREFIX.get(issue.severity, "[     ]")
-        ui(f"{prefix} {issue.rule}: {issue.message}")
-        ui(f"        paper: {issue.paper_id}\n")
-
-    if getattr(args, "fix", False):
-        ui(f"Auto-fix not yet implemented ({len(issues)} issues).")
-
-
-# ============================================================================
-#  System commands
-# ============================================================================
-
-
-def cmd_metrics(args: argparse.Namespace, ctx: AppContext) -> None:
-    """Show LLM / system metrics."""
-    from datetime import datetime, timezone
-    from linkora.metrics import EventCategory, MetricsQuery, MetricsStore, TimeRange
-
-    metrics_db = ctx.workspace.metrics_db(ctx.config.log.metrics_db)
-    store = MetricsStore(metrics_db, session_id="cli")
-
-    if getattr(args, "summary", False):
-        s = store.summary()
-        ui(f"LLM calls     : {s.call_count}")
-        ui(f"Input tokens  : {s.total_tokens_in}")
-        ui(f"Output tokens : {s.total_tokens_out}")
-        ui(f"Total tokens  : {s.total_tokens_in + s.total_tokens_out}")
-        ui(f"Total duration: {s.total_duration_s:.2f}s")
-        return
-
-    cat_str = getattr(args, "category", None) or "llm"
-    try:
-        category = EventCategory(cat_str)
-    except ValueError:
-        category = None
-
-    time_range = None
-    if getattr(args, "since", None):
-        since_dt = datetime.fromisoformat(args.since).replace(tzinfo=timezone.utc)
-        time_range = TimeRange(since=since_dt)
-
-    result = store.query_events(
-        MetricsQuery(category=category, time_range=time_range, limit=args.last)
-    )
-
-    if not result.events:
-        ui("No metrics found.")
-        return
-
-    ui(f"Recent {len(result.events)} event(s):")
-    for ev in result.events:
-        ui(
-            f"  [{ev.get('timestamp', '')}] {ev.get('category', '')}:{ev.get('name', '')}  status={ev.get('status', '')}"
-        )
-        if ev.get("duration_s"):
-            ui(f"    duration={ev['duration_s']:.2f}s")
-        if ev.get("tokens_in") or ev.get("tokens_out"):
-            ui(
-                f"    tokens: {ev.get('tokens_in', 0)} in / {ev.get('tokens_out', 0)} out"
+    if run_topics:
+        ui("Building topics...")
+        try:
+            store = ctx.store.document_store()
+            vidx = ctx.store.vector_index()
+            model_store = TopicModelStore.from_config(ctx.config.topics)
+            build_topics(
+                store=store,
+                vector_index=vidx,
+                workspace_id=ctx.resolve_workspace_id(),
+                cfg=ctx.config.topics,
+                model_store=model_store,
             )
-        if ev.get("model"):
-            ui(f"    model={ev['model']}")
+            ui("Topics built.")
+        except TopicsUnavailable as e:
+            ui(str(e))
+        except ImportError as e:
+            ui(f"Topics unavailable: {e}")
 
 
 def cmd_doctor(args: argparse.Namespace, ctx: AppContext) -> None:
     """Run full or quick health check."""
     from linkora.setup import run_check, run_doctor, format_result
 
-    if getattr(args, "light", False):
+    cmd_args = DoctorArgs.from_namespace(args)
+    if cmd_args.light:
         result = run_check(ctx)
         print(format_result(result, "Quick Check"))
     else:
@@ -659,7 +365,155 @@ def cmd_init(args: argparse.Namespace, ctx: AppContext) -> None:
     """Interactive setup wizard."""
     from linkora.setup import run_init
 
-    run_init(force=getattr(args, "force", False))
+    cmd_args = InitArgs.from_namespace(args)
+    run_init(force=cmd_args.force)
+
+
+def cmd_config_show(args: argparse.Namespace, ctx: AppContext) -> None:
+    """Show configuration values."""
+    cmd_args = ConfigShowArgs.from_namespace(args)
+    ui(render_config_yaml(ctx.config, cmd_args.field))
+
+
+def cmd_config_set(args: argparse.Namespace, ctx: AppContext) -> None:
+    """Set a configuration value in the global config file."""
+    cmd_args = ConfigSetArgs.from_namespace(args)
+    msg, _, note = set_config_value(cmd_args.field, cmd_args.value)
+    if note:
+        ui(note)
+    ui(msg)
+
+
+def cmd_topics_build(args: argparse.Namespace, ctx: AppContext) -> None:
+    from linkora.topics import TopicModelStore, TopicsUnavailable, build_topics
+
+    limit = args.limit
+    workspace_id = ctx.resolve_workspace_id(args.workspace)
+    try:
+        store = ctx.store.document_store()
+        vidx = ctx.store.vector_index()
+        model_store = TopicModelStore.from_config(ctx.config.topics)
+        build_topics(
+            store=store,
+            vector_index=vidx,
+            workspace_id=workspace_id,
+            cfg=ctx.config.topics,
+            limit=limit,
+            model_store=model_store,
+        )
+        ui("Topics built.")
+    except TopicsUnavailable as e:
+        ui(str(e))
+
+
+def cmd_topics_list(args: argparse.Namespace, ctx: AppContext) -> None:
+    workspace_id = ctx.resolve_workspace_id(args.workspace)
+    topic_store = ctx.store.topic_store()
+    topics = topic_store.list_topics(workspace_id)
+    if not topics:
+        ui("No topics found.")
+        return
+    ui(f"Topics in '{workspace_id}':")
+    for topic in topics:
+        ui(f"  {topic.topic_id:>4}  {topic.size:>4}  {topic.label}")
+
+
+def cmd_topics_show(args: argparse.Namespace, ctx: AppContext) -> None:
+    workspace_id = ctx.resolve_workspace_id(args.workspace)
+    topic_store = ctx.store.topic_store()
+    try:
+        topic_id = int(args.topic_id)
+    except Exception:
+        ui("Invalid topic_id")
+        return
+    topic = topic_store.get_topic(workspace_id, topic_id)
+    if not topic:
+        ui("Topic not found.")
+        return
+    ui(f"Topic {topic.topic_id} ({topic.size} docs)")
+    ui(f"Label: {topic.label}")
+    if topic.top_terms:
+        ui("Top terms:")
+        ui("  " + ", ".join(topic.top_terms[:20]))
+
+
+def cmd_topics_assign(args: argparse.Namespace, ctx: AppContext) -> None:
+    from linkora.topics import TopicModelStore, TopicsUnavailable, assign_topics
+
+    limit = args.limit
+    workspace_id = ctx.resolve_workspace_id(args.workspace)
+    try:
+        store = ctx.store.document_store()
+        vidx = ctx.store.vector_index()
+        model_store = TopicModelStore.from_config(ctx.config.topics)
+        assign_topics(
+            store=store,
+            vector_index=vidx,
+            workspace_id=workspace_id,
+            cfg=ctx.config.topics,
+            limit=limit,
+            model_store=model_store,
+        )
+        ui("Topics assigned.")
+    except TopicsUnavailable as e:
+        ui(str(e))
+
+
+def cmd_topics_prune(args: argparse.Namespace, ctx: AppContext) -> None:
+    from linkora.topics import prune_topics
+
+    min_size = args.min_size or ctx.config.topics.min_topic_size
+    workspace_id = ctx.resolve_workspace_id(args.workspace)
+    store = ctx.store.document_store()
+    removed_topics, removed_assignments = prune_topics(store, workspace_id, min_size)
+    ui(f"Pruned {removed_topics} topic(s) and {removed_assignments} assignment(s).")
+
+
+def cmd_topics_export(args: argparse.Namespace, ctx: AppContext) -> None:
+    import csv
+    import json
+
+    workspace_id = ctx.resolve_workspace_id(args.workspace)
+    fmt = args.format
+    out_path = args.path or f"topics_{workspace_id}.{fmt}"
+    path = Path(out_path)
+
+    topic_store = ctx.store.topic_store()
+    topics = topic_store.list_topics(workspace_id)
+    assignments = topic_store.list_assignments(workspace_id)
+    if fmt == "json":
+        payload = {
+            "workspace_id": workspace_id,
+            "topics": [
+                {
+                    "topic_id": t.topic_id,
+                    "label": t.label,
+                    "top_terms": t.top_terms,
+                    "size": t.size,
+                    "created_at": t.created_at,
+                }
+                for t in topics
+            ],
+            "assignments": [
+                {
+                    "doc_id": a.doc_id,
+                    "topic_id": a.topic_id,
+                    "score": a.score,
+                }
+                for a in assignments
+            ],
+        }
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    else:
+        topic_map = {t.topic_id: t.label for t in topics}
+        with path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["doc_id", "topic_id", "label", "score"])
+            for a in assignments:
+                writer.writerow(
+                    [a.doc_id, a.topic_id, topic_map.get(a.topic_id, ""), a.score]
+                )
+    ui(f"Exported topics to {path}")
 
 
 # ============================================================================
@@ -671,134 +525,306 @@ def register_all(subparsers) -> None:
     """Register all CLI sub-commands."""
 
     # ── search ──────────────────────────────────────────────────────────
-    p = subparsers.add_parser("search", help="Search papers")
+    p = subparsers.add_parser(
+        "search",
+        help="Search documents (FTS + vector)",
+        description=(
+            "Search documents in the active workspace.\n"
+            "Default behavior runs both full-text and vector search paths.\n"
+            "Use --mode to restrict to one path."
+        ),
+    )
     p.set_defaults(func=cmd_search)
-    p.add_argument("query", nargs="*", help="Search query")
-    p.add_argument("--top", type=int, help="Max results")
+    p.add_argument("query", nargs="*", help="Query text (required)")
+    p.add_argument("--top", type=int, help="Max results per mode (default: 20)")
     p.add_argument(
         "--mode",
-        choices=["fulltext", "author", "vector", "hybrid"],
-        default="fulltext",
-        help="Search mode (default: fulltext)",
+        choices=["fulltext", "vector"],
+        help="Run only one mode (default: run both)",
     )
-    _add_filter_args(p)
-
-    # ── top-cited ────────────────────────────────────────────────────────
-    p = subparsers.add_parser("top-cited", help="List top-cited papers")
-    p.set_defaults(func=cmd_top_cited)
-    p.add_argument("--top", type=int, help="Max results")
     _add_filter_args(p)
 
     # ── add ──────────────────────────────────────────────────────────────
-    p = subparsers.add_parser("add", help="Add papers from various sources")
-    p.set_defaults(func=cmd_add)
-    g = p.add_mutually_exclusive_group()
-    g.add_argument("--doi", help="DOI (exact match)")
-    g.add_argument("--issn", help="Journal ISSN")
-    g.add_argument("--author", help="Author name")
-    g.add_argument("--title", help="Paper title")
-    p.add_argument("--year", help="Year or range (e.g. 2024, 2020-2024)")
-    p.add_argument("query", nargs="?", help="Free-form query (fallback)")
-    p.add_argument("--source", "-s", help="Preferred source (local / openalex / auto)")
-    p.add_argument(
-        "--limit", "-n", type=int, default=5, help="Max papers to fetch (default: 5)"
+    p = subparsers.add_parser(
+        "add",
+        help="Ingest targets (path/dir/DOI/arXiv/web)",
+        description=(
+            "Ingest one or more targets.\n"
+            "Targets can be local paths, DOI IDs, arXiv IDs, or URLs.\n"
+            "Remote targets may download artifacts to --output before ingest."
+        ),
     )
-    p.add_argument("--cache", "-c", action="store_true", help="Cache as symlinks")
+    p.set_defaults(func=cmd_add)
+    p.add_argument(
+        "targets",
+        nargs="+",
+        help="Targets: paths, directories, DOI/arXiv IDs, or URLs",
+    )
+    p.add_argument(
+        "--source",
+        "-s",
+        help="Force source scheme: file/local/doi/arxiv/web",
+    )
+    p.add_argument(
+        "--output",
+        "-o",
+        help="Download output directory for remote sources (default: ~/Downloads)",
+    )
+    p.add_argument("--workspace", "-w", help="Target workspace")
+    p.add_argument("--type", help="Document type hint, e.g. paper/invoice/manual")
     p.add_argument("--dry-run", action="store_true", help="Preview without saving")
 
     # ── enrich ───────────────────────────────────────────────────────────
-    p = subparsers.add_parser("enrich", help="Enrich papers with TOC and conclusions")
+    p = subparsers.add_parser(
+        "enrich",
+        help="Run enrichment for stored docs",
+        description=(
+            "Re-run schema-aware metadata enrichment for documents already in DB.\n"
+            "Without --summary/--outline, both are refreshed by default."
+        ),
+    )
     p.set_defaults(func=cmd_enrich)
-    p.add_argument("--paper", help="Specific paper ID")
-    p.add_argument("--toc", action="store_true", help="Extract table of contents")
-    p.add_argument("--conclusion", action="store_true", help="Extract conclusion")
-    p.add_argument("--limit", type=int, help="Max papers to process")
+    p.add_argument("--paper", help="Specific document ID")
+    p.add_argument("--summary", action="store_true", help="Update summary")
+    p.add_argument("--outline", action="store_true", help="Update outline")
+    p.add_argument("--limit", type=int, help="Max documents to process")
     p.add_argument("--force", action="store_true", help="Force re-extraction")
 
     # ── index ────────────────────────────────────────────────────────────
-    p = subparsers.add_parser("index", help="Build search index")
-    p.set_defaults(func=cmd_index)
-    p.add_argument("--rebuild", action="store_true", help="Force full rebuild")
-    p.add_argument(
-        "--type",
-        choices=["fts", "vector"],
-        default="fts",
-        help="Index type (default: fts)",
+    p = subparsers.add_parser(
+        "index",
+        help="Build FTS/vector/topics indexes",
+        description=(
+            "Build search and topic indexes.\n"
+            "Default behavior builds FTS + vector when no mode flags are provided."
+        ),
     )
-
-    # ── metrics ──────────────────────────────────────────────────────────
-    p = subparsers.add_parser("metrics", help="Show performance metrics")
-    p.set_defaults(func=cmd_metrics)
-    p.add_argument("--last", type=int, default=20, help="Number of recent events")
-    p.add_argument("--category", default="llm", help="Event category")
-    p.add_argument("--since", help="ISO datetime lower bound")
-    p.add_argument("--summary", action="store_true", help="Show aggregate summary")
-
-    # ── audit ────────────────────────────────────────────────────────────
-    p = subparsers.add_parser("audit", help="Audit data quality")
-    p.set_defaults(func=cmd_audit)
-    p.add_argument("--severity", choices=["error", "warning", "info"])
-    p.add_argument("--fix", action="store_true", help="Auto-fix where possible")
+    p.set_defaults(func=cmd_index)
+    p.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="Reserved rebuild flag (currently index build always refreshes)",
+    )
+    p.add_argument("--fts", action="store_true", help="Build FTS index")
+    p.add_argument("--vector", action="store_true", help="Build vector index")
+    p.add_argument("--topics", action="store_true", help="Build topics model")
+    p.add_argument("--all", action="store_true", help="Build all indexes")
 
     # ── doctor ───────────────────────────────────────────────────────────
-    p = subparsers.add_parser("doctor", help="Health check")
+    p = subparsers.add_parser(
+        "doctor",
+        help="Run environment health checks",
+        description="Run setup and dependency checks for the current environment.",
+    )
     p.set_defaults(func=cmd_doctor)
     p.add_argument("--light", action="store_true", help="Quick check (no network)")
     p.add_argument("--fix", action="store_true", help="Auto-fix issues")
 
     # ── config ───────────────────────────────────────────────────────────
     cfg_p = subparsers.add_parser(
-        "config", help="Configuration and workspace management"
+        "config",
+        help="Read/write global config",
+        description=(
+            "Manage global linkora config.\nNo workspace-local config is supported."
+        ),
     )
     cfg_sub = cfg_p.add_subparsers(dest="config_action", required=True)
 
     # config show
-    p = cfg_sub.add_parser("show", help="Show config or workspace info")
+    p = cfg_sub.add_parser(
+        "show",
+        help="Show current config",
+        description="Show full config or one dot-path field.",
+    )
     p.set_defaults(func=cmd_config_show)
     p.add_argument("field", nargs="?", help="Dot-path field to show, e.g. llm.model")
-    p.add_argument("--workspace", "-w", help="Workspace name (default: active)")
-    p.add_argument("--all", "-a", action="store_true", help="List all workspaces")
 
     # config set
-    p = cfg_sub.add_parser("set", help="Set a config value")
+    p = cfg_sub.add_parser(
+        "set",
+        help="Set config value",
+        description=(
+            "Set one config key using dot-path syntax.\n"
+            "Value is parsed as YAML scalar/list/map."
+        ),
+    )
     p.set_defaults(func=cmd_config_set)
     p.add_argument("field", help="Dot-path field, e.g. llm.model or index.top_k")
     p.add_argument("value", help="New value")
 
-    # config set-meta
-    p = cfg_sub.add_parser("set-meta", help="Set workspace metadata")
-    p.set_defaults(func=cmd_config_set_meta)
-    p.add_argument("field", help="Metadata field: description")
-    p.add_argument("value", help="New value")
-    p.add_argument("--workspace", "-w", help="Workspace name (default: active)")
+    # ── files ────────────────────────────────────────────────────────────
+    files_p = subparsers.add_parser(
+        "files",
+        help="File system operations",
+        description=(
+            "Operations on user directories: tidy, dedup, rescan, inbox, watch.\n"
+            "These commands are independent from source connectors."
+        ),
+    )
+    files_sub = files_p.add_subparsers(dest="files_action", required=True)
 
-    # config mv
-    p = cfg_sub.add_parser("mv", help="Rename or relocate a workspace")
-    p.set_defaults(func=cmd_config_mv)
-    p.add_argument("source", help="Current workspace name")
-    p.add_argument("target", help="New name or absolute destination path")
+    p = files_sub.add_parser(
+        "tidy",
+        help="Rename files from metadata templates",
+        description=(
+            "Rename files using schema fields and tidy.templates.\n"
+            "Metadata is loaded from DB when available; otherwise extracted on the fly."
+        ),
+    )
+    p.set_defaults(func=cmd_files_tidy)
+    p.add_argument("path", help="Directory to tidy")
+    p.add_argument("--type", help="Document type hint (auto-detect if omitted)")
+    p.add_argument("--dry-run", action="store_true", help="Preview changes only")
 
-    # config set-default
-    p = cfg_sub.add_parser("set-default", help="Set the default workspace")
-    p.set_defaults(func=cmd_config_set_default)
-    p.add_argument("workspace", help="Workspace name to make default")
+    p = files_sub.add_parser(
+        "dedup",
+        help="Find duplicate files",
+        description="Detect duplicates by content hash; optionally delete older copies.",
+    )
+    p.set_defaults(func=cmd_files_dedup)
+    p.add_argument("path", help="Directory to scan for duplicates")
+    p.add_argument(
+        "--delete-older", action="store_true", help="Keep newest, delete others"
+    )
+
+    p = files_sub.add_parser(
+        "rescan",
+        help="Repair moved file paths",
+        description="Rescan filesystem and update stored source_path references.",
+    )
+    p.set_defaults(func=cmd_files_rescan)
+    p.add_argument("path", nargs="?", help="Directory to rescan (all if omitted)")
+
+    p = files_sub.add_parser(
+        "inbox",
+        help="Ingest all supported files in directory",
+        description="Scan a directory and ingest each supported file into workspace.",
+    )
+    p.set_defaults(func=cmd_files_inbox)
+    p.add_argument("path", help="Directory to ingest")
+    p.add_argument("--workspace", "-w", help="Target workspace")
+
+    watch_p = files_sub.add_parser(
+        "watch",
+        help="Manage auto-import watchers",
+        description="Add/list/start file watchers for automatic ingestion.",
+    )
+    watch_sub = watch_p.add_subparsers(dest="watch_action", required=True)
+
+    p = watch_sub.add_parser(
+        "add",
+        help="Register watch directory",
+        description="Add or update one directory watch rule.",
+    )
+    p.set_defaults(func=cmd_files_watch_add)
+    p.add_argument("path", help="Directory to watch")
+    p.add_argument("--workspace", "-w", help="Target workspace")
+    p.add_argument("--type", help="Document type hint")
+
+    p = watch_sub.add_parser(
+        "list",
+        help="List watch rules",
+        description="List all configured watched directories.",
+    )
+    p.set_defaults(func=cmd_files_watch_list)
+
+    p = watch_sub.add_parser(
+        "start",
+        help="Start watcher loop",
+        description="Start foreground watcher loop (daemon flag is reserved).",
+    )
+    p.set_defaults(func=cmd_files_watch_start)
+    p.add_argument("--daemon", action="store_true", help="Run in background")
 
     # ── init ─────────────────────────────────────────────────────────────
-    p = subparsers.add_parser("init", help="Interactive setup wizard")
+    p = subparsers.add_parser(
+        "init",
+        help="Initialize config and environment",
+        description="Initialize global config and run setup checks.",
+    )
     p.set_defaults(func=cmd_init)
     p.add_argument("--force", action="store_true", help="Overwrite existing config")
+
+    # ── topics ───────────────────────────────────────────────────────────
+    topics_p = subparsers.add_parser(
+        "topics",
+        help="Topic modeling operations",
+        description=("Build, inspect, assign, prune, and export workspace topics."),
+    )
+    topics_sub = topics_p.add_subparsers(dest="topics_action", required=True)
+
+    p = topics_sub.add_parser(
+        "build",
+        help="Build workspace topics",
+        description="Fit/update topic model for one workspace.",
+    )
+    p.set_defaults(func=cmd_topics_build)
+    p.add_argument("--workspace", "-w", help="Target workspace")
+    p.add_argument("--limit", type=int, help="Limit number of documents")
+
+    p = topics_sub.add_parser(
+        "list",
+        help="List topics",
+        description="List topic summaries in one workspace.",
+    )
+    p.set_defaults(func=cmd_topics_list)
+    p.add_argument("--workspace", "-w", help="Target workspace")
+
+    p = topics_sub.add_parser(
+        "show",
+        help="Show topic detail",
+        description="Show label and top terms for one topic id.",
+    )
+    p.set_defaults(func=cmd_topics_show)
+    p.add_argument("topic_id", help="Topic ID")
+
+    p = topics_sub.add_parser(
+        "assign",
+        help="Assign docs to topics",
+        description="Assign workspace documents to existing topic clusters.",
+    )
+    p.set_defaults(func=cmd_topics_assign)
+    p.add_argument("--workspace", "-w", help="Target workspace")
+    p.add_argument("--limit", type=int, help="Limit number of documents")
+
+    p = topics_sub.add_parser(
+        "prune",
+        help="Prune small topics",
+        description="Remove topics smaller than threshold and delete assignments.",
+    )
+    p.set_defaults(func=cmd_topics_prune)
+    p.add_argument("--workspace", "-w", help="Target workspace")
+    p.add_argument("--min-size", type=int, help="Minimum topic size")
+
+    p = topics_sub.add_parser(
+        "export",
+        help="Export topics",
+        description="Export topics and assignments as JSON or CSV.",
+    )
+    p.set_defaults(func=cmd_topics_export)
+    p.add_argument("--format", choices=["json", "csv"], default="json")
+    p.add_argument("--path", help="Output path")
+    p.add_argument("--workspace", "-w", help="Target workspace")
 
 
 def _add_filter_args(p) -> None:
     """Add common paper-filter arguments to a subcommand parser."""
-    p.add_argument("--year", default=None, help="Year filter: 2023 / 2020-2024 / 2020-")
-    p.add_argument("--journal", default=None, help="Journal name filter (LIKE)")
+    p.add_argument(
+        "--year",
+        default=None,
+        help="Schema year filter value (string match), e.g. 2023",
+    )
+    p.add_argument(
+        "--journal",
+        default=None,
+        help="Schema journal filter value (substring match)",
+    )
     p.add_argument(
         "--type",
         dest="paper_type",
         default=None,
-        help="Paper type filter: review / journal-article etc. (LIKE)",
+        help="Document type filter, e.g. paper/invoice/manual",
     )
 
 
-__all__ = ["register_all"]
+__all__ = ["AppContext", "register_all"]

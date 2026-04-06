@@ -4,13 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "linkora"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local Knowledge Network — AI-native research cli powered by local-first architecture"
 
 requires-python = ">=3.12"
 license = "MIT"
 authors = [
-    # The original project creator
     { name = "Zimo Liao", email = "zimoliao@mail.ustc.edu.cn" },
     { name = "nostalgia", email = "lv15623448685@gmail.com" },
 ]
@@ -32,10 +31,12 @@ classifiers = [
     "Topic :: Text Processing :: Indexing",
 ]
 dependencies = [
-    "requests>=2.28",
+    "httpx>=0.27",
     "pyyaml>=6.0",
-    "tenacity>=9.1.4",
-    "pydantic>=2.12.5",
+    "pydantic>=2.12",
+    "tenacity>=9.1",
+    "litellm>=1.50",
+    "kreuzberg[pdf]>=4.7.2",
 ]
 
 [project.urls]
@@ -43,23 +44,32 @@ Homepage = "https://github.com/lvyuemeng/linkora"
 Repository = "https://github.com/lvyuemeng/linkora"
 
 [project.optional-dependencies]
+extract = [
+    "kreuzberg[pdf]>=4.0",
+]
+extract-ocr = [
+    "kreuzberg[all]>=4.0",
+]
 embed = [
+    "lancedb>=0.15",
     "sentence-transformers>=3.0",
-    "numpy>=1.24",
-    "faiss-cpu>=1.7",
     "modelscope>=1.10",
 ]
-topics = ["linkora[embed]", "bertopic>=0.16", "pandas>=2.0"]
-import = [
-    "endnote-utils>=1.0",
-    "pyzotero>=1.5",
-    "rapidfuzz>=3.14.3",
-    "tqdm>=4.67.3",
+topics = [
+    "linkora[embed]",
+    "bertopic>=0.16",
+    "pandas>=2.0",
 ]
 full = [
+    "linkora[extract]",
     "linkora[embed]",
     "linkora[topics]",
-    "linkora[import]",
+    "curl-cffi>=0.5",
+]
+full-ocr = [
+    "linkora[extract-ocr]",
+    "linkora[embed]",
+    "linkora[topics]",
     "curl-cffi>=0.5",
 ]
 
@@ -71,6 +81,7 @@ dev = ["pytest>=7.0", "ruff>=0.15.5", "ty>=0.0.23"]
 
 [tool.setuptools.packages.find]
 where = ["."]
+include = ["linkora*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

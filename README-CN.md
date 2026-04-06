@@ -1,227 +1,170 @@
 # linkora
 
-> **本地知识网络** — 由本地优先架构驱动的 AI 原生研究终端。
+本地优先（local-first）的文档语料 CLI，面向 AI 协作工作流。
 
 [English](./README.md) | [中文](./README-CN.md)
 
 ---
 
-## 目标
+## linkora 是什么
 
-研究工作往往是分散的。论文散落在多个文件夹中，搜索分散在各种工具之间，上下文在会话之间丢失。**linkora** 通过构建**本地知识网络**来解决这个问题：
+linkora 在原文件位置建立索引，按 schema 做结构化元数据增强，并提供全文 + 向量检索。
 
-- 所有数据本地存储（隐私，离线可用）
-- 分层访问（L1 元数据 → L4 全文）
-- 向量嵌入支持语义搜索
-- 与 AI 编码代理无缝协作
+核心原则：
+- 用户文件不搬运，`source_path` 始终指向原文件
+- 工作区是数据库命名空间，不是工作区目录树
+- 流水线显式可组合（source -> fetch -> ingest，schema -> parse -> filter）
 
-**目标用户**：AI 编码代理（Claude、Cursor）和喜欢 CLI 工作流的研究者。
+架构权威文档：[`docs/design-v2.md`](docs/design-v2.md)
 
-## 核心功能
+---
 
-| | |
-|---|---|
-| **分层阅读** | L1 元数据 → L2 摘要 → L3 章节 → L4 全文——按需加载 |
-| **融合检索** | FTS5 关键词 + Qwen3 语义 → RRF 排序融合 |
-| **多源导入** | 本地 PDF、OpenAlex API、Zotero、EndNote XML/RIS |
-| **工作区** | 多个研究项目，隔离搜索和数据 |
+## 核心能力
+
+- 源导入：
+  - 本地文件/目录
+  - `doi:<id>`
+  - `arxiv:<id>`
+  - `web:<url>`
+- 管线处理：
+  - 文本提取（Kreuzberg）
+  - 元数据增强（schema + LLM）
+  - SQLite 持久化
+- 检索：
+  - `fulltext`（FTS5）
+  - `vector`（LanceDB）
+- 文件工作流：
+  - `files tidy`、`files dedup`、`files rescan`、`files inbox`、`files watch`
+- 主题工作流：
+  - `topics build`、`list`、`show`、`assign`、`prune`、`export`
+
+---
 
 ## 安装
 
-### 前置要求
+前置要求：
+- Python 3.12+
+- `uv`
 
-- **uv**（必需）：[通过 astral.sh 安装](https://astral.sh/uv/install)
-- **Python 3.12+**
-
-### 快速安装
-
-```bash
-uv tool install "linkora[full]"
-```
-
-### 从源码安装
+源码安装：
 
 ```bash
-git clone https://github.com/your-repo/linkora.git
+git clone https://github.com/lvyuemeng/linkora.git
 cd linkora
 uv sync
 ```
 
+检查 CLI：
+
+```bash
+uv run linkora --help
+```
+
+---
+
 ## 快速开始
 
 ```bash
-# 显示设计上下文（AI 代理使用）
-linkora --context
+# 查看 AI/代理上下文
+uv run linkora --context
 
-# 交互式设置
-linkora init
+# 初始化配置和环境
+uv run linkora init
 
-# 添加论文（将 PDF 放入工作区）
-linkora add /path/to/paper.pdf
+# 导入本地文件
+uv run linkora add ./docs/paper.pdf --workspace default
 
-# 构建搜索索引
-linkora index
+# 按来源导入
+uv run linkora add doi:10.48550/arXiv.1706.03762 --output ~/Downloads --workspace default
+uv run linkora add arxiv:2401.01234 --output ~/Downloads --workspace default
+uv run linkora add web:https://example.com/post --output ~/Downloads --workspace default
 
-# 搜索论文
-linkora search "machine learning"
-linkora search "turbulence" --mode vector
+# 构建索引
+uv run linkora index
+
+# 搜索
+uv run linkora search "transformer"
+uv run linkora search "embedding" --mode vector
 ```
+
+---
 
 ## 配置
 
-linkora **需要显式配置** — 不是零配置工具。详见 [config.md](./docs/config.md)。
+配置是可选的。没有配置文件时，linkora 会使用内置默认值。
 
-### 配置文件位置
+配置模型：
+- 单文件生效（single-file-wins）
+- 若命中多个候选文件会发出 warning
+- 仅全局配置（不支持 workspace-local 覆盖）
 
-linkora 按以下优先级查找配置（最高优先级优先）：
+详见：[`docs/config.md`](docs/config.md)
 
-| 位置 | 平台 |
-|------|------|
-| `~/.linkora/config.yml` | 全平台 |
-| `~/.config/linkora/config.yml` | 全平台 |
-
-如果未找到配置文件，则使用内置默认值。
-
-### 快速配置
-
-```yaml
-# ~/.linkora/config.yml
-sources:
-  local:
-    enabled: true
-    papers_dir: papers
-
-llm:
-  backend: openai-compat
-  model: deepseek-chat
-  base_url: https://api.deepseek.com
-```
-
-完整配置请参阅 [`examples/config/full.yml`](examples/config/full.yml)。
-
-### 环境变量
-
-| 变量 | 描述 |
-|------|------|
-| `LINKORA_ROOT` | 所有工作区的根目录 |
-| `LINKORA_WORKSPACE` | 活动工作区名称 |
-| `LINKORA_LLM_API_KEY` | LLM API 密钥（回退：`DEEPSEEK_API_KEY`、`OPENAI_API_KEY`）|
-| `MINERU_API_KEY` | PDF 解析 API 密钥（MineU）|
-| `ZOTERO_API_KEY` | Zotero API 密钥 |
-| `ZOTERO_LIBRARY_ID` | Zotero 库 ID |
-| `OPENALEX_API_KEY` | OpenAlex API 密钥 |
-
----
-
-## 工作区概念
-
-**工作区**是自包含的研究环境，具有独立的：
-- 论文目录
-- 全文搜索索引（FTS5）
-- 向量搜索索引（FAISS）
-- 元数据
-
-工作区通过 CLI 命令管理：
+常用命令：
 
 ```bash
-# 显示当前工作区信息
-linkora config show
-
-# 列出所有工作区
-linkora config show --all
-
-# 设置默认工作区
-linkora config set-default ml
-
-# 设置工作区描述
-linkora config set-meta description "机器学习论文"
-
-# 迁移/重命名工作区
-linkora config mv old-name new-name
+uv run linkora config show
+uv run linkora config show llm.model
+uv run linkora config set llm.model deepseek-chat
 ```
 
 ---
 
-## CLI 命令
+## 命令概览
 
-| 命令 | 描述 |
-|------|------|
-| **搜索** | |
-| `linkora search <query>` | 搜索论文（默认：FTS5 全文） |
-| `linkora search <query> --mode fulltext` | FTS5 全文搜索 |
-| `linkora search <query> --mode author` | 按作者搜索 |
-| `linkora search <query> --mode vector` | 语义向量搜索（FAISS） |
-| `linkora search <query> --mode hybrid` | FTS + 向量混合搜索 |
-| `linkora top-cited` | 获取高引用论文 |
-| **索引** | |
-| `linkora index` | 构建/更新 FTS5 索引 |
-| `linkora index --type fts` | 构建 FTS5 全文索引 |
-| `linkora index --type vector` | 构建向量索引（FAISS） |
-| `linkora index --rebuild` | 从头重建索引 |
-| **论文管理** | |
-| `linkora add --doi <doi>` | 通过 DOI 添加论文 |
-| `linkora add --title <title>` | 通过标题搜索添加论文 |
-| `linkora add "<query>"` | 通过自由形式查询添加论文 |
-| `linkora enrich` | 丰富论文目录和结论 |
-| **工作区** | |
-| `linkora config show` | 显示工作区配置 |
-| `linkora config show --all` | 列出所有工作区 |
-| `linkora config set <字段> <值>` | 设置配置值 |
-| `linkora config set-meta <字段> <值>` | 设置工作区元数据 |
-| `linkora config set-default <工作区>` | 设置默认工作区 |
-| `linkora config mv <源> <目标>` | 迁移/重命名工作区 |
-| **系统** | |
-| `linkora init` | 交互式设置向导 |
-| `linkora audit` | 数据质量审计 |
-| `linkora doctor` | 完整健康检查（含网络） |
-| `linkora doctor --light` | 快速健康检查（无网络） |
-| `linkora metrics` | 显示 LLM 指标 |
-| `linkora --context` | 显示设计上下文（AI 代理使用） |
+- 导入：`add`
+- 检索：`search`
+- 建索引：`index`
+- 增强：`enrich`
+- 文件：`files ...`
+- 主题：`topics ...`
+- 配置：`config show/set`
+- 诊断：`doctor`
 
-## 架构
+可通过 `uv run linkora <command> --help` 查看详细参数。
 
-详见 [`docs/design.md`](docs/design.md)。
+---
+
+## 数据目录
+
+数据根目录（可用 `LINKORA_ROOT` 覆盖）下：
+
+```text
+<data_root>/
+  linkora.db
+  vectors/
+  cache/
+  linkora.log
+```
+
+---
 
 ## 开发
 
-详见 [`docs/AGENT.md`](docs/AGENT.md)。
-
-linkora 使用 [just](https://github.com/casey/just) 进行开发工作流。安装 just 后可使用以下命令：
+仅使用 `uv` 工作流：
 
 ```bash
-# 显示所有可用命令
-just
-
-# 常用命令
-just setup        # 创建虚拟环境并同步依赖
-just test         # 运行测试
-just lint         # 代码检查
-just ty           # 类型检查
-just quality      # 所有质量检查
-just ci           # 完整 CI 流程
-```
-
-### 手动设置
-
-```bash
-uv venv
-uv sync
-
-# 运行测试
-uv run pytest tests/ -v
-
-# 代码检查
-uv run ruff check .
 uv run ruff format .
-
-# 类型检查
+uv run ruff check .
 uv run ty check
+uv run -m pytest
 ```
 
-## 感谢
+贡献说明：[`docs/AGENT.md`](docs/AGENT.md)
 
-- [Scholaraio ZimoLiao](https://github.com/ZimoLiao/scholaraio): 原代码库，质量不均。
+可选的 `just` 快捷命令（见 `justfile`）：
+
+```bash
+just setup
+just format
+just lint
+just type
+just test
+just ci
+```
+
+---
 
 ## 许可证
 
-[MIT](LICENSE) © 2026
+[MIT](LICENSE)

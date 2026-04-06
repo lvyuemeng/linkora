@@ -13,8 +13,14 @@ linkora --context
 
 This provides:
 - CLI workflow (init → add → index → search)
-- Usage patterns for paper ingestion, search, layered loading
+- Source ingest pipeline context (parse → resolve → fetch → ingest)
+- Schema pipeline context (resolve type/schema → parse fields → filter/render)
+- Config resolution model (single-file-wins, multi-file warning)
 - Communication pattern for user interaction
+
+Read these docs before major edits:
+- `docs/design-v2.md` (authoritative architecture)
+- `docs/config.md` (user-facing config semantics and defaults)
 
 ---
 
@@ -124,6 +130,17 @@ Read [justfile](/justfile) for `just` command related workflow.
 just ci # for ci check.
 ```
 
+Common recipes:
+
+```bash
+just setup
+just format
+just lint
+just type
+just test
+just ci
+```
+
 ---
 
 ## Coding Philosophy
@@ -157,6 +174,7 @@ just ci # for ci check.
 - **No repetition**: Extract common patterns to shared utilities (e.g., hash computation)
 - **No huge argument lists**: Group related parameters into config dataclasses
 - **Type safety**: Full type hints, TypedDict for complex structures, Protocol for interfaces
+- **No between-process helpers**: If a helper only adapts one caller's store/context into another shape, keep data loading at the orchestration boundary and pass final data into pure/internal steps
 - **Language**: Code comments and docstrings in **English only** (avoid encoding issues)
 
 ### 6. Avoid Metaprogramming

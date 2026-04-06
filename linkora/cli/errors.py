@@ -24,23 +24,6 @@ class ConfigError(CLIError):
     pass
 
 
-class PaperNotFoundError(CLIError):
-    """Paper not found in the library."""
-
-    def __init__(self, paper_id: str):
-        super().__init__(f"Paper not found: {paper_id}", exit_code=2)
-
-
-class IndexNotFoundError(CLIError):
-    """Index database not found."""
-
-    def __init__(self, db_path: str):
-        super().__init__(
-            f"Index file not found: {db_path}\nRun `linkora index` first.",
-            exit_code=3,
-        )
-
-
 def handle_error(e: Exception) -> None:
     """Handle an exception and exit with appropriate code."""
     if isinstance(e, CLIError):
@@ -51,10 +34,4 @@ def handle_error(e: Exception) -> None:
         sys.exit(1)
 
 
-__all__ = [
-    "CLIError",
-    "ConfigError",
-    "PaperNotFoundError",
-    "IndexNotFoundError",
-    "handle_error",
-]
+__all__ = ["CLIError", "ConfigError", "handle_error"]

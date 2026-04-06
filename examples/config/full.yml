@@ -41,22 +41,6 @@ sources:
       - /mnt/library/papers
       - ~/Documents/research
 
-  # OpenAlex API for paper metadata
-  openalex:
-    enabled: false
-    # api_key: ""  # Set via OPENALEX_API_KEY env var
-
-  # Zotero library sync
-  zotero:
-    enabled: false
-    # library_id: ""   # Set via ZOTERO_LIBRARY_ID env var
-    # api_key: ""     # Set via ZOTERO_API_KEY env var
-    library_type: user
-
-  # EndNote XML/RIS import
-  endnote:
-    enabled: true
-
 # =============================================================================
 # Index and Search Settings
 # =============================================================================
@@ -149,5 +133,3 @@ logging:
   max_bytes: 10_000_000
   backup_count: 3
 
-  # Metrics database
-  metrics_db: metrics.db

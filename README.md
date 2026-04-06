@@ -1,231 +1,171 @@
 # linkora
 
-> **Local Knowledge Network** — AI-native research terminal powered by local-first architecture.
+Local-first document corpus CLI for AI-assisted workflows.
 
 [English](./README.md) | [中文](./README-CN.md)
 
 ---
 
-## Motive
+## What linkora is
 
-Research is fragmented. Papers live in multiple folders, search is scattered across tools, and context is lost between sessions. **linkora** solves this by building a **local knowledge network** that:
+linkora indexes documents where they already live, enriches metadata by schema,
+and supports full-text plus vector search.
 
-- Stores all data locally (privacy, offline capability)
-- Provides layered access (L1 metadata → L4 full text)
-- Enables semantic search with embeddings
-- Works seamlessly with AI coding agents
+Architecture principles:
+- user files stay in place (`source_path` references original files)
+- workspace is a DB namespace (not a workspace folder tree)
+- explicit composable pipelines (source -> fetch -> ingest, schema -> parse -> filter)
 
-**Target Audience**: AI coding agents (Claude, Cursor) and researchers who want CLI-driven workflows.
+Authoritative design document: [`docs/design-v2.md`](docs/design-v2.md)
 
-## Features
+---
 
-| | |
-|---|---|
-| **Layered Reading** | L1 metadata → L2 abstract → L3 sections → L4 full text — read at the depth you need |
-| **Hybrid Search** | FTS5 keyword + Qwen3 semantic → RRF fusion ranking |
-| **Multi-Source Import** | Local PDFs, OpenAlex API, Zotero, EndNote XML/RIS |
-| **Workspaces** | Multiple research projects with isolated search and data |
+## Key capabilities
 
-## Installation
+- Source ingest:
+  - local file/dir
+  - `doi:<id>`
+  - `arxiv:<id>`
+  - `web:<url>`
+- Pipeline ingest:
+  - extract text (Kreuzberg)
+  - enrich metadata (schema + LLM)
+  - persist to SQLite
+- Search:
+  - `fulltext` mode (FTS5)
+  - `vector` mode (LanceDB)
+- File workflows:
+  - `files tidy`, `files dedup`, `files rescan`, `files inbox`, `files watch`
+- Topics workflows:
+  - `topics build`, `list`, `show`, `assign`, `prune`, `export`
 
-### Prerequisites
+---
 
-- **uv** (required): [Install via astral.sh](https://astral.sh/uv/install)
-- **Python 3.12+**
+## Install
 
-### Quick Install
+Prerequisites:
+- Python 3.12+
+- `uv`
+
+From source:
 
 ```bash
-uv tool install "linkora[full]"
-```
-
-### From Source
-
-```bash
-git clone https://github.com/your-repo/linkora.git
+git clone https://github.com/lvyuemeng/linkora.git
 cd linkora
 uv sync
 ```
 
-## Quick Start
+CLI check:
 
 ```bash
-# Show design context for AI agents
-linkora --context
-
-# Interactive setup
-linkora init
-
-# Add papers (place PDFs in workspace)
-linkora add /path/to/paper.pdf
-
-# Build search index
-linkora index
-
-# Search papers
-linkora search "machine learning"
-linkora search "turbulence" --mode vector
+uv run linkora --help
 ```
+
+---
+
+## Quick start
+
+```bash
+# AI/agent context snapshot
+uv run linkora --context
+
+# initialize config + environment
+uv run linkora init
+
+# ingest local files
+uv run linkora add ./docs/paper.pdf --workspace default
+
+# ingest by source
+uv run linkora add doi:10.48550/arXiv.1706.03762 --output ~/Downloads --workspace default
+uv run linkora add arxiv:2401.01234 --output ~/Downloads --workspace default
+uv run linkora add web:https://example.com/post --output ~/Downloads --workspace default
+
+# build indexes
+uv run linkora index
+
+# search
+uv run linkora search "transformer"
+uv run linkora search "embedding" --mode vector
+```
+
+---
 
 ## Configuration
 
-linkora **requires explicit configuration** — it is NOT a zero-config tool. See [config.md](./docs/config.md) for full details.
+Config is optional. If no config file exists, linkora uses built-in defaults.
 
-### Config File Locations
+Config model:
+- single-file-wins resolution
+- warning if multiple config candidates exist
+- global config only (no workspace-local override)
 
-linkora looks for config in (highest priority first):
+See full guide: [`docs/config.md`](docs/config.md)
 
-| Location | Platform |
-|----------|----------|
-| `~/.linkora/config.yml` | All |
-| `~/.config/linkora/config.yml` | All |
-
-If no config file is found, built-in defaults are used.
-
-### Quick Setup
-
-```yaml
-# ~/.linkora/config.yml
-sources:
-  local:
-    enabled: true
-    papers_dir: papers
-
-llm:
-  backend: openai-compat
-  model: deepseek-chat
-  base_url: https://api.deepseek.com
-```
-
-See [`examples/config/full.yml`](examples/config/full.yml) for complete configuration.
-
-### Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `LINKORA_ROOT` | Root directory for all workspaces |
-| `LINKORA_WORKSPACE` | Active workspace name |
-| `LINKORA_LLM_API_KEY` | LLM API key (fallback: `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`) |
-| `MINERU_API_KEY` | PDF parsing API key (MinerU) |
-| `ZOTERO_API_KEY` | Zotero API key |
-| `ZOTERO_LIBRARY_ID` | Zotero library ID |
-| `OPENALEX_API_KEY` | OpenAlex API key |
-
----
-
-## Workspace Concept
-
-A **workspace** is a self-contained research environment with its own:
-- Papers directory
-- Full-text search index (FTS5)
-- Vector search index (FAISS)
-- Metadata
-
-Workspaces are managed via CLI commands:
+Common commands:
 
 ```bash
-# Show current workspace info
-linkora config show
-
-# List all workspaces
-linkora config show --all
-
-# Set default workspace
-linkora config set-default ml
-
-# Set workspace description
-linkora config set-meta description "Machine learning papers"
-
-# Migrate/rename workspace
-linkora config mv old-name new-name
+uv run linkora config show
+uv run linkora config show llm.model
+uv run linkora config set llm.model deepseek-chat
 ```
 
 ---
 
-## CLI Commands
+## Command overview
 
-| Command | Description |
-|---------|-------------|
-| **Search** | |
-| `linkora search <query>` | Search papers (default: FTS5 fulltext) |
-| `linkora search <query> --mode fulltext` | Full-text search using FTS5 |
-| `linkora search <query> --mode author` | Search by author name |
-| `linkora search <query> --mode vector` | Semantic vector search (FAISS) |
-| `linkora search <query> --mode hybrid` | Combined FTS + vector search |
-| `linkora top-cited` | Get top-cited papers |
-| **Index** | |
-| `linkora index` | Build/update FTS5 index |
-| `linkora index --type fts` | Build FTS5 full-text index |
-| `linkora index --type vector` | Build vector index (FAISS) |
-| `linkora index --rebuild` | Rebuild index from scratch |
-| **Paper Management** | |
-| `linkora add --doi <doi>` | Add paper by DOI |
-| `linkora add --title <title>` | Add paper by title search |
-| `linkora add "<query>"` | Add papers by free-form query |
-| `linkora enrich` | Enrich papers with TOC and conclusions |
-| **Workspace** | |
-| `linkora config show` | Show workspace configuration |
-| `linkora config show --all` | List all workspaces |
-| `linkora config set <field> <value>` | Set config value |
-| `linkora config set-meta <field> <value>` | Set workspace metadata |
-| `linkora config set-default <workspace>` | Set default workspace |
-| `linkora config mv <source> <target>` | Migrate workspace |
-| **System** | |
-| `linkora init` | Interactive setup wizard |
-| `linkora audit` | Data quality audit |
-| `linkora doctor` | Full health check (with network) |
-| `linkora doctor --light` | Quick health check (no network) |
-| `linkora metrics` | Show LLM metrics |
-| `linkora --context` | Show design context for AI agents |
+- ingest: `add`
+- search: `search`
+- indexing: `index`
+- enrichment: `enrich`
+- file operations: `files ...`
+- topics: `topics ...`
+- config: `config show/set`
+- diagnostics: `doctor`
+
+Run `uv run linkora <command> --help` for detailed usage.
 
 ---
 
-## Architecture
+## Data layout
 
-See [`docs/design.md`](docs/design.md) for detailed architecture.
+Under data root (`LINKORA_ROOT` override supported):
+
+```text
+<data_root>/
+  linkora.db
+  vectors/
+  cache/
+  linkora.log
+```
+
+---
 
 ## Development
 
-Please refer to [`docs/AGENT.md`](docs/AGENT.md) for development guidelines.
-
-linkora uses [just](https://github.com/casey/just) for development workflows. However, it's **optional** for convenience.
-
-Install just first, then use the commands below.
+Use `uv` workflows only.
 
 ```bash
-# Show all available commands
-just
-
-# Common commands
-just setup        # Create venv and sync dependencies
-just test         # Run tests
-just lint         # Check linting
-just ty           # Type checking
-just quality      # All quality checks
-just ci           # Full CI pipeline
-```
-
-### Manual Setup
-
-```bash
-uv venv
-uv sync
-
-# Run tests
-uv run pytest tests/ -v
-
-# Lint
-uv run ruff check .
 uv run ruff format .
-
-# Type check
+uv run ruff check .
 uv run ty check
+uv run -m pytest
 ```
 
-## Thanks
+Contributor guidance: [`docs/AGENT.md`](docs/AGENT.md)
 
-- [Scholaraio ZimoLiao](https://github.com/ZimoLiao/scholaraio): The original repo, with a mediocre quality.
+Optional `just` shortcuts (`justfile`):
+
+```bash
+just setup
+just format
+just lint
+just type
+just test
+just ci
+```
+
+---
 
 ## License
 
-[MIT](LICENSE) © 2026
+[MIT](LICENSE)
