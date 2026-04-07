@@ -155,7 +155,23 @@ uv run ty check
 uv run -m pytest
 ```
 
+### 贡献说明（分层与拆分）
+
+- CLI/运行时引导集中在 `linkora/cli/setup.py`。
+- core 模块不得依赖 `linkora.cli.*`。
+- core 依赖应显式注入（store/config/path/cache 由编排边界传入）。
+- 不在 core 内新增独立 `application` 层，沿用现有模块边界进行编排。
+
+版本与发布同步辅助命令：
+
+```bash
+just release-show
+just release-verify
+just release-bump 0.4.0
+```
+
 贡献说明：[`docs/AGENT.md`](docs/AGENT.md)
+架构与迁移参考：[`docs/design-v2.md`](docs/design-v2.md)
 
 可选的 `just` 快捷命令（见 `justfile`）：
 

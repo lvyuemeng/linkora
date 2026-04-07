@@ -1,38 +1,59 @@
 """
-config.py — linkora application configuration
+config.py - linkora application configuration.
 
-Resolution order:
-
-    1. ~/.linkora/config.yml
-    2. ~/.linkora/config.yaml
-    3. ~/.linkora.yml
-    4. ~/.linkora.yaml
-    5. ~/.config/linkora/config.yml
-    6. ~/.config/linkora/config.yaml
-
-There is NO workspace-local config override.  Per-workspace settings
-are not supported; use the global config for all settings.
-
-If multiple config files exist, only the highest-priority file is active;
-lower-priority files are ignored and a warning is emitted.
+Configuration is immutable at runtime and does not contain workspace runtime state.
 """
 
 from __future__ import annotations
 
 import os
+import re
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
 ENV_PREFIX = "LINKORA_"
+_ENV_PATTERN = re.compile(r"\$\{([^}:]+)(?::-([^}]*))?\}")
+_MISSING = object()
 
 
-# ---------------------------------------------------------------------------
-# Sub-config models  (pure Pydantic — NO @dataclass decorator)
-# ---------------------------------------------------------------------------
+def _expand_env_string(
+    value: str,
+    dotenv: Mapping[str, str],
+    environ: Mapping[str, str],
+) -> str:
+    def _sub(match: re.Match[str]) -> str:
+        name, fallback = match.group(1), match.group(2)
+        if name in dotenv:
+            return dotenv[name]
+        env_value = environ.get(name)
+        if env_value is not None:
+            return env_value
+        return fallback or ""
+
+    return _ENV_PATTERN.sub(_sub, value)
+
+
+def _expand_env_value(
+    value: Any,
+    dotenv: Mapping[str, str],
+    environ: Mapping[str, str],
+) -> Any:
+    if isinstance(value, str):
+        return _expand_env_string(value, dotenv, environ)
+    if isinstance(value, dict):
+        return {k: _expand_env_value(v, dotenv, environ) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand_env_value(v, dotenv, environ) for v in value]
+    return value
+
+
+def _resolve_path(value: str, data_root: Path) -> str:
+    raw = Path(value).expanduser()
+    resolved = raw if raw.is_absolute() else (data_root / raw)
+    return str(resolved.resolve())
 
 
 class ArxivSourceConfig(BaseModel):
@@ -111,20 +132,7 @@ class LogConfig(BaseModel):
     backup_count: int = 3
 
 
-# ---------------------------------------------------------------------------
-# Top-level config
-# ---------------------------------------------------------------------------
-
-
 class AppConfig(BaseModel):
-    """
-    Immutable application settings loaded from a single YAML file.
-
-    Does NOT contain workspace names, workspace paths, or runtime state.
-    All API keys are resolved lazily via the `resolve_*` methods so that
-    environment variables are read at call time, not at load time.
-    """
-
     model_config = {"frozen": True, "extra": "forbid"}
 
     sources: SourcesConfig = Field(default_factory=SourcesConfig)
@@ -135,12 +143,69 @@ class AppConfig(BaseModel):
     topics: TopicsConfig = Field(default_factory=TopicsConfig)
     log: LogConfig = Field(default_factory=LogConfig)
 
-    # ------------------------------------------------------------------
-    # Key resolution  (environment variable fallbacks)
-    # ------------------------------------------------------------------
-
-    def resolve_llm_api_key(self) -> str:
+    @property
+    def llm_api_key(self) -> str:
         return self.llm.api_key or os.environ.get(f"{ENV_PREFIX}LLM_API_KEY", "")
+
+    @classmethod
+    def from_document(
+        cls,
+        doc: dict[str, Any],
+        *,
+        data_root: Path,
+        dotenv: Mapping[str, str] | None = None,
+        environ: Mapping[str, str] | None = None,
+    ) -> "AppConfig":
+        dotenv_map = dotenv or {}
+        env_map = environ or os.environ
+        expanded = _expand_env_value(doc, dotenv_map, env_map)
+        return cls.model_validate(expanded).normalize_paths(data_root)
+
+    @classmethod
+    def from_root(cls, data_root: Path) -> "AppConfig":
+        """Build default config and normalize all path fields for data root."""
+        return cls().normalize_paths(data_root)
+
+    def normalize_paths(self, data_root: Path) -> "AppConfig":
+        topics_cfg = self.topics.model_copy(
+            update={"model_dir": _resolve_path(self.topics.model_dir, data_root)}
+        )
+        return self.model_copy(update={"topics": topics_cfg})
+
+    def _read_nested(self, parts: list[str]) -> Any:
+        current: Any = self
+        for part in parts:
+            if isinstance(current, BaseModel):
+                if not hasattr(current, part):
+                    return _MISSING
+                current = getattr(current, part)
+                continue
+            if isinstance(current, Mapping):
+                mapping_current = current
+                if part not in mapping_current:
+                    return _MISSING
+                current = mapping_current.get(part, _MISSING)
+                continue
+            return _MISSING
+        return current
+
+    def to_yaml(self, field: str | None = None) -> str:
+        import yaml
+
+        if not field:
+            payload: Any = self.model_dump()
+        else:
+            value = self._read_nested(field.split("."))
+            if value is _MISSING:
+                return f"Field '{field}' not found in config."
+            payload = {field: value}
+
+        return yaml.safe_dump(
+            payload,
+            allow_unicode=True,
+            default_flow_style=False,
+            sort_keys=False,
+        )
 
 
 __all__ = [

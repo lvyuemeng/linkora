@@ -83,7 +83,19 @@ quality: lint-full type
 # ============================================================================
 
 # Run CI pipeline locally (lint + typecheck + test)
-ci: quality test
+ci: quality test release-verify release-show
+
+# Verify release version sync across split packages
+release-verify:
+    uv run python scripts/release_sync.py verify
+
+# Show current release sync state
+release-show:
+    uv run python scripts/release_sync.py show
+
+# Bump release version (updates root __version__ and CLI core pin)
+release-bump version:
+    uv run python scripts/release_sync.py bump {{version}}
 
 
 # ============================================================================

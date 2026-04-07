@@ -35,7 +35,7 @@ def test_design_context_mentions_pipeline_and_config_resolution():
 
 
 def test_design_context_renders_config_candidates_from_setup(monkeypatch):
-    from linkora import setup
+    import linkora.cli.setup as setup
 
     candidates = [
         Path("candidate-a.yml"),

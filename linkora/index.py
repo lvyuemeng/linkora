@@ -4,16 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 import sqlite3
-from typing import TYPE_CHECKING, Any, Iterator, cast
+from typing import Any, Iterator, cast
 
 from pydantic import BaseModel, Field
+from linkora.config import AppConfig
 from linkora.db import DatabaseManager
-from linkora.setup import get_runtime_config, get_vectors_dir
 from linkora.store import DocumentStore
-
-if TYPE_CHECKING:
-    from linkora.config import AppConfig
-
 
 _VECTOR_TABLE = "documents"
 
@@ -69,7 +65,7 @@ class VectorStore(BaseModel):
 
     @classmethod
     def default(cls) -> "VectorStore":
-        return cls(vectors_dir=get_vectors_dir())
+        return cls(vectors_dir=Path("vectors").expanduser().resolve())
 
     def open_table(self):
         import lancedb
@@ -166,7 +162,7 @@ class VectorIndex:
         vector_store: VectorStore | None = None,
     ):
         self._db = db_manager
-        self._config = config or get_runtime_config()
+        self._config = config or AppConfig()
         self._vector_store = vector_store or VectorStore.default()
         self._table = None
         self._embedder = None

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 
 def content_hash(path: Path, buffer_size: int = 65536) -> str:

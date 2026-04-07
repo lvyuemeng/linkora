@@ -5,7 +5,6 @@ from pathlib import Path
 import json
 
 from linkora import content_hash
-from linkora.setup import get_cache_dir
 
 
 @dataclass(frozen=True)
@@ -18,10 +17,6 @@ class ExtractionResult:
 @dataclass(frozen=True)
 class ExtractionCache:
     cache_dir: Path
-
-    @classmethod
-    def default(cls) -> "ExtractionCache":
-        return cls(cache_dir=get_cache_dir())
 
     def path_for(self, key: str) -> Path:
         return self.cache_dir / f"{key}.json"
@@ -58,10 +53,10 @@ async def extract_text(
 ) -> ExtractionResult:
     """Extract text from a file using Kreuzberg with content-hash caching."""
     key = content_hash(path)
-    cache_store = cache or ExtractionCache.default()
-    cached = cache_store.load(key)
-    if cached:
-        return cached
+    if cache is not None:
+        cached = cache.load(key)
+        if cached:
+            return cached
 
     from kreuzberg import ExtractionConfig, extract_file
 
@@ -81,7 +76,8 @@ async def extract_text(
         },
         tables=result.tables if hasattr(result, "tables") else None,
     )
-    cache_store.save(key, extraction)
+    if cache is not None:
+        cache.save(key, extraction)
     return extraction
 
 

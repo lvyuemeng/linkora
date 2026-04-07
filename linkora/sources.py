@@ -64,6 +64,7 @@ class SourceIngestRequest:
     workspace_id: str
     doc_type_hint: str | None
     dry_run: bool
+    store: object
 
 
 @dataclass(frozen=True)
@@ -651,6 +652,7 @@ def _ingest_results(
                 workspace_id=request.workspace_id,
                 metadata_hint=result.raw_metadata or None,
                 doc_type_hint=doc_type_hint,
+                store=request.store,
             )
         except Exception as exc:
             error_message = f"Failed to ingest {result.path.name}: {exc}"

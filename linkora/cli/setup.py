@@ -1,11 +1,10 @@
-"""setup.py - Unified path resolution and diagnostics helpers."""
+"""cli/setup.py - CLI bootstrap, doctor checks, and config edit helpers."""
 
 from __future__ import annotations
 
 import os
 import platform
-import re
-from collections.abc import Mapping
+import tempfile
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
@@ -16,13 +15,195 @@ if TYPE_CHECKING:
     from linkora.config import AppConfig
     from linkora.db import Database
 
-
-_ENV_PATTERN = re.compile(r"\$\{([^}:]+)(?::-([^}]*))?\}")
 _runtime_db: "Database | None" = None
 _runtime_db_path: Path | None = None
 _runtime_config: "AppConfig | None" = None
 _runtime_config_path: Path | None = None
 _runtime_config_loaded: bool = False
+_yaml_module: Any | None = None
+
+
+@dataclass(frozen=True)
+class ConfigDiscovery:
+    candidates: tuple[Path, ...]
+    existing: tuple[Path, ...]
+    active: Path | None
+
+    def load_warnings(self) -> list[str]:
+        if len(self.existing) <= 1 or self.active is None:
+            return []
+        ignored = ", ".join(str(p) for p in self.existing[1:])
+        return [
+            "Multiple config files found. "
+            f"'{self.active}' is active; ignoring: {ignored}. "
+            "Remove the ignored file(s) to silence this warning."
+        ]
+
+
+@dataclass(frozen=True)
+class ConfigLoadResult:
+    config: "AppConfig"
+    active_path: Path | None
+    warnings: tuple[str, ...] = ()
+
+
+def get_data_root() -> Path:
+    """Return the platform-appropriate linkora data directory."""
+    env_root = os.environ.get("LINKORA_ROOT")
+    if env_root:
+        return Path(env_root).expanduser().resolve()
+
+    home = Path.home()
+    system = platform.system()
+
+    if system == "Windows":
+        base = Path(os.environ.get("APPDATA", home / "AppData" / "Roaming"))
+    elif system == "Darwin":
+        base = home / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME", home / ".local" / "share"))
+
+    return (base / "linkora").expanduser().resolve()
+
+
+def ensure_data_root() -> Path:
+    root = get_data_root()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def get_db_path() -> Path:
+    """Return the path to the SQLite database file."""
+    return get_data_root() / "linkora.db"
+
+
+def get_cache_dir() -> Path:
+    """Return the extraction cache directory."""
+    return get_data_root() / "cache"
+
+
+def get_vectors_dir() -> Path:
+    """Return the vector index directory."""
+    return get_data_root() / "vectors"
+
+
+def get_config_candidates() -> list[Path]:
+    """Return ordered global config path candidates."""
+    home = Path.home()
+    return [
+        home / ".linkora" / "config.yml",
+        home / ".linkora" / "config.yaml",
+        home / ".linkora.yml",
+        home / ".linkora.yaml",
+        home / ".config" / "linkora" / "config.yml",
+        home / ".config" / "linkora" / "config.yaml",
+    ]
+
+
+def get_config_path() -> Path:
+    """Return canonical config write path."""
+    return get_config_candidates()[0]
+
+
+def discover_config_candidates() -> ConfigDiscovery:
+    candidates = tuple(get_config_candidates())
+    existing = tuple(p for p in candidates if p.exists())
+    active = existing[0] if existing else None
+    return ConfigDiscovery(candidates=candidates, existing=existing, active=active)
+
+
+def get_active_config_path() -> Path | None:
+    """Return active config path, if any."""
+    return discover_config_candidates().active
+
+
+def get_runtime_config_dir() -> Path:
+    """Return active config dir or canonical write dir parent."""
+    if _runtime_config_loaded and _runtime_config_path is not None:
+        return _runtime_config_path.parent
+    active = get_active_config_path()
+    return active.parent if active else get_config_path().parent
+
+
+def load_runtime_config(data_root: Path) -> ConfigLoadResult:
+    """Run config load pipeline: discover -> read -> env -> validate -> normalize."""
+    from linkora.config import AppConfig
+
+    discovery = discover_config_candidates()
+    warnings = tuple(discovery.load_warnings())
+
+    if discovery.active is None:
+        config = AppConfig.from_root(data_root)
+        return ConfigLoadResult(config=config, active_path=None, warnings=warnings)
+
+    raw = _read_yaml_file(discovery.active)
+    dotenv = _load_dotenv(discovery.active.parent / ".env")
+    normalized = AppConfig.from_document(
+        raw,
+        data_root=data_root,
+        dotenv=dotenv,
+        environ=os.environ,
+    )
+    return ConfigLoadResult(
+        config=normalized,
+        active_path=discovery.active,
+        warnings=warnings,
+    )
+
+
+def get_runtime_config() -> "AppConfig":
+    """Return process runtime config singleton managed by setup."""
+    from linkora.log import get_logger
+
+    global _runtime_config, _runtime_config_path, _runtime_config_loaded
+    if not _runtime_config_loaded:
+        result = load_runtime_config(get_data_root())
+        log = get_logger(__name__)
+        for warning in result.warnings:
+            log.warning(warning)
+        if result.active_path is None:
+            log.info("No config file found; using built-in defaults.")
+        else:
+            log.debug("Loading config from %s", result.active_path)
+
+        _runtime_config = result.config
+        _runtime_config_path = result.active_path
+        _runtime_config_loaded = True
+    if _runtime_config is None:
+        raise RuntimeError("Runtime config failed to load")
+    return _runtime_config
+
+
+def get_runtime_db(db_path: Path | None = None) -> "Database":
+    """Return process runtime DB singleton managed by setup."""
+    from linkora.db import Database
+
+    global _runtime_db, _runtime_db_path
+    resolved = db_path.expanduser().resolve() if db_path else get_db_path()
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+
+    if _runtime_db is None or _runtime_db_path != resolved:
+        if _runtime_db is not None:
+            _runtime_db.close()
+        _runtime_db = Database(resolved)
+        _runtime_db_path = resolved
+    return _runtime_db
+
+
+def reset_runtime_state() -> None:
+    """Reset setup-managed DB/config singletons (for tests)."""
+    global _runtime_db, _runtime_db_path
+    global _runtime_config, _runtime_config_path, _runtime_config_loaded
+
+    if _runtime_db is not None:
+        _runtime_db.close()
+    _runtime_db = None
+    _runtime_db_path = None
+
+    _runtime_config = None
+    _runtime_config_path = None
+    _runtime_config_loaded = False
+
 
 VALID_CONFIG_SECTIONS = {
     "sources",
@@ -66,127 +247,24 @@ class CheckResult:
         return sum(1 for i in self.items if not i.ok)
 
 
-# ---------------------------------------------------------------------------
-# Path APIs
-# ---------------------------------------------------------------------------
-
-
-def get_data_root() -> Path:
-    """Return the platform-appropriate linkora data directory."""
-    env_root = os.environ.get("LINKORA_ROOT")
-    if env_root:
-        return Path(env_root).expanduser().resolve()
-
-    home = Path.home()
-    system = platform.system()
-
-    if system == "Windows":
-        base = Path(os.environ.get("APPDATA", home / "AppData" / "Roaming"))
-    elif system == "Darwin":
-        base = home / "Library" / "Application Support"
-    else:
-        base = Path(os.environ.get("XDG_DATA_HOME", home / ".local" / "share"))
-
-    return (base / "linkora").expanduser().resolve()
-
-
-def ensure_data_root() -> Path:
-    root = get_data_root()
-    root.mkdir(parents=True, exist_ok=True)
-    return root
-
-
-def get_db_path() -> Path:
-    """Return the path to the SQLite database file."""
-    return get_data_root() / "linkora.db"
-
-
-def get_cache_dir() -> Path:
-    """Return the extraction cache directory."""
-    return get_data_root() / "cache"
-
-
-def get_vectors_dir() -> Path:
-    """Return the vector index directory."""
-    return get_data_root() / "vectors"
-
-
-def resolve_data_path(value: str) -> Path:
-    """Resolve a path under data root unless already absolute."""
-    raw = Path(value).expanduser()
-    return raw if raw.is_absolute() else (get_data_root() / raw)
-
-
-def get_config_candidates() -> list[Path]:
-    """Return ordered global config path candidates."""
-    home = Path.home()
-    return [
-        home / ".linkora" / "config.yml",
-        home / ".linkora" / "config.yaml",
-        home / ".linkora.yml",
-        home / ".linkora.yaml",
-        home / ".config" / "linkora" / "config.yml",
-        home / ".config" / "linkora" / "config.yaml",
-    ]
-
-
-def get_config_path() -> Path:
-    """Return canonical config write path."""
-    return get_config_candidates()[0]
-
-
-def _resolve_config_files() -> tuple[list[Path], Path | None]:
-    existing = [p for p in get_config_candidates() if p.exists()]
-    active = existing[0] if existing else None
-    return existing, active
-
-
-def get_existing_config_candidates() -> list[Path]:
-    """Return existing config files in candidate order."""
-    existing, _ = _resolve_config_files()
-    return existing
-
-
-def get_active_config_path() -> Path | None:
-    """Return active config path, if any."""
-    _, active = _resolve_config_files()
-    return active
-
-
-def get_runtime_config_dir() -> Path:
-    """Return active config dir or canonical write dir parent."""
-    if _runtime_config_loaded and _runtime_config_path is not None:
-        return _runtime_config_path.parent
-    active = get_active_config_path()
-    return active.parent if active else get_config_path().parent
-
-
-def _expand_env(value: str) -> str:
-    def _sub(match: re.Match) -> str:
-        name, fallback = match.group(1), match.group(2)
-        return os.environ.get(name) or fallback or ""
-
-    return _ENV_PATTERN.sub(_sub, value)
-
-
-def _resolve_env(value: Any) -> Any:
-    if isinstance(value, str):
-        return _expand_env(value)
-    if isinstance(value, dict):
-        return {k: _resolve_env(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_resolve_env(v) for v in value]
-    return value
-
-
 def _yaml_load(raw: str) -> Any:
-    import yaml
+    global _yaml_module
+    if _yaml_module is None:
+        import yaml
+
+        _yaml_module = yaml
+    yaml = _yaml_module
 
     return yaml.safe_load(raw)
 
 
 def _yaml_dump(data: Any) -> str:
-    import yaml
+    global _yaml_module
+    if _yaml_module is None:
+        import yaml
+
+        _yaml_module = yaml
+    yaml = _yaml_module
 
     return yaml.safe_dump(
         data,
@@ -197,7 +275,6 @@ def _yaml_dump(data: Any) -> str:
 
 
 def _read_yaml_file(path: Path) -> dict[str, Any]:
-    """Read YAML mapping from path; return empty dict on errors."""
     try:
         payload = _yaml_load(path.read_text(encoding="utf-8"))
     except Exception as exc:
@@ -210,7 +287,30 @@ def _read_yaml_file(path: Path) -> dict[str, Any]:
 
 def _write_yaml_file(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_yaml_dump(data), encoding="utf-8")
+    content = _yaml_dump(data)
+    if path.exists():
+        try:
+            existing = path.read_text(encoding="utf-8")
+            if existing == content:
+                return
+        except Exception:
+            pass
+
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        newline="",
+        dir=path.parent,
+        delete=False,
+    ) as tmp:
+        tmp.write(content)
+        tmp_path = Path(tmp.name)
+
+    try:
+        tmp_path.replace(path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
 
 
 def _set_nested(doc: Any, parts: list[str], value: Any) -> None:
@@ -222,48 +322,34 @@ def _set_nested(doc: Any, parts: list[str], value: Any) -> None:
     current[parts[-1]] = value
 
 
-_MISSING = object()
+def _load_dotenv(path: Path) -> dict[str, str]:
+    if not path.exists() or not path.is_file():
+        return {}
 
+    env_map: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return {}
 
-def _to_yaml_value(value: Any) -> Any:
-    from pydantic import BaseModel
-
-    if isinstance(value, BaseModel):
-        return value.model_dump()
-    return value
-
-
-def _read_nested_model_value(obj: Any, parts: list[str]) -> Any:
-    from pydantic import BaseModel
-
-    current = obj
-    for part in parts:
-        if isinstance(current, BaseModel):
-            if not hasattr(current, part):
-                return _MISSING
-            current = getattr(current, part)
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
             continue
-        if isinstance(current, Mapping):
-            if part not in current:
-                return _MISSING
-            current = current[part]
+        if line.startswith("export "):
+            line = line[7:].strip()
+        if "=" not in line:
             continue
-        return _MISSING
-    return current
-
-
-def render_config_yaml(config: "AppConfig", field: str | None = None) -> str:
-    """Render full runtime config or one field as YAML."""
-    if not field:
-        return _yaml_dump(config.model_dump())
-    value = _read_nested_model_value(config, field.split("."))
-    if value is _MISSING:
-        return f"Field '{field}' not found in config."
-    return _yaml_dump({field: _to_yaml_value(value)})
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            env_map[key] = value
+    return env_map
 
 
 def set_config_value(field: str, raw_value: str) -> tuple[str, Path, str | None]:
-    """Write one config field and reset setup runtime cache."""
+    """Write one config field and reset runtime state."""
     value = _yaml_load(raw_value)
     top_key = field.split(".")[0]
     if top_key not in VALID_CONFIG_SECTIONS:
@@ -289,81 +375,9 @@ def set_config_value(field: str, raw_value: str) -> tuple[str, Path, str | None]
     return (f"Set {field} = {value!r}  ({config_path})", config_path, note)
 
 
-def load_app_config() -> tuple["AppConfig", Path | None]:
-    """Load active config file and return ``(config, active_path)``."""
-    from linkora.config import AppConfig
-    from linkora.log import get_logger
-
-    log = get_logger(__name__)
-    candidates, active = _resolve_config_files()
-    if len(candidates) > 1:
-        log.warning(
-            "Multiple config files found. '%s' is active; ignoring: %s. "
-            "Remove the ignored file(s) to silence this warning.",
-            candidates[0],
-            ", ".join(str(p) for p in candidates[1:]),
-        )
-
-    if active is None:
-        log.info("No config file found; using built-in defaults.")
-        return AppConfig(), None
-
-    log.debug("Loading config from %s", active)
-    raw = _read_yaml_file(active)
-    resolved = _resolve_env(raw)
-    return AppConfig.model_validate(resolved), active
-
-
-def get_runtime_config() -> "AppConfig":
-    """Return process runtime config singleton managed by setup."""
-    global _runtime_config, _runtime_config_path, _runtime_config_loaded
-    if not _runtime_config_loaded:
-        _runtime_config, _runtime_config_path = load_app_config()
-        _runtime_config_loaded = True
-    if _runtime_config is None:
-        raise RuntimeError("Runtime config failed to load")
-    return _runtime_config
-
-
-def get_runtime_db(db_path: Path | None = None) -> "Database":
-    """Return process runtime DB singleton managed by setup."""
-    from linkora.db import Database
-
-    global _runtime_db, _runtime_db_path
-    resolved = db_path.expanduser().resolve() if db_path else get_db_path()
-    resolved.parent.mkdir(parents=True, exist_ok=True)
-
-    if _runtime_db is None or _runtime_db_path != resolved:
-        if _runtime_db is not None:
-            _runtime_db.close()
-        _runtime_db = Database(resolved)
-        _runtime_db_path = resolved
-    return _runtime_db
-
-
-def reset_runtime_state() -> None:
-    """Reset setup-managed DB/config singletons (for tests)."""
-    global _runtime_db, _runtime_db_path
-    global _runtime_config, _runtime_config_path, _runtime_config_loaded
-
-    if _runtime_db is not None:
-        _runtime_db.close()
-    _runtime_db = None
-    _runtime_db_path = None
-
-    _runtime_config = None
-    _runtime_config_path = None
-    _runtime_config_loaded = False
-
-
-def _check_config_resolution(ctx) -> Iterator[CheckItem]:
-    """
-    Inspect global config file resolution.
-
-    Reports which file is active and warns when multiple candidates exist
-    (the non-active ones are silently ignored, which can confuse users).
-    """
-    existing, active = _resolve_config_files()
+def _check_config_resolution(ctx: "AppContext") -> Iterator[CheckItem]:
+    existing = [p for p in get_config_candidates() if p.exists()]
+    active = existing[0] if existing else None
 
     if not existing:
         yield CheckItem(
@@ -406,7 +420,7 @@ def _check_config_resolution(ctx) -> Iterator[CheckItem]:
     )
 
 
-def _check_secrets(ctx) -> Iterator[CheckItem]:
+def _check_secrets(ctx: "AppContext") -> Iterator[CheckItem]:
     config_key_set = bool(ctx.config.llm.api_key)
     env_key_set = bool(os.environ.get("LINKORA_LLM_API_KEY"))
     yield CheckItem(
@@ -469,12 +483,7 @@ def _check_paths() -> Iterator[CheckItem]:
             detail=f"failed to create data root: {exc}",
         )
 
-    yield CheckItem(
-        CheckCategory.PATH,
-        "paths.db",
-        ok=True,
-        detail=str(get_db_path()),
-    )
+    yield CheckItem(CheckCategory.PATH, "paths.db", ok=True, detail=str(get_db_path()))
     yield CheckItem(
         CheckCategory.PATH,
         "paths.cache",
@@ -489,24 +498,14 @@ def _check_paths() -> Iterator[CheckItem]:
     )
 
 
-# ---------------------------------------------------------------------------
-# Collection pipelines
-# ---------------------------------------------------------------------------
-
-
-def _collect_doctor(ctx) -> Iterator[CheckItem]:
+def _collect_doctor(ctx: "AppContext") -> Iterator[CheckItem]:
     yield from _check_config_resolution(ctx)
     yield from _check_env_vars()
     yield from _check_secrets(ctx)
     yield from _check_paths()
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-
-def run_doctor(ctx) -> CheckResult:
+def run_doctor(ctx: "AppContext") -> CheckResult:
     """Run config/env/path doctor checks (no network calls)."""
     return CheckResult(items=tuple(_collect_doctor(ctx)))
 
@@ -537,22 +536,15 @@ def format_result(result: CheckResult, title: str = "Check") -> str:
 
 
 def run_init(cli_workspace: str | None = None, force: bool = False) -> "AppContext":
-    """
-    Bootstrap runtime context for CLI and command handlers.
-
-    Workspace resolution order is:
-      CLI override > LINKORA_WORKSPACE env var > default workspace in registry.
-    """
+    """Bootstrap runtime context for CLI command handlers."""
     from linkora.cli.commands import AppContext
+    from linkora.workspace import WorkspaceStore
 
     if force:
         print("'--force' has no effect: init no longer writes config files.")
 
     data_root = ensure_data_root()
-
-    from linkora.workspace import WorkspaceStore
-
-    db = get_runtime_db(data_root / "linkora.db")
+    db = get_runtime_db(get_db_path())
     store = WorkspaceStore(db)
     default_workspace_name, _ = store.ensure_default_workspace()
     workspace_name = (
@@ -572,28 +564,14 @@ def run_init(cli_workspace: str | None = None, force: bool = False) -> "AppConte
 
 
 __all__ = [
+    "VALID_CONFIG_SECTIONS",
     "CheckCategory",
     "CheckItem",
     "CheckResult",
-    "get_data_root",
-    "ensure_data_root",
-    "get_db_path",
-    "get_cache_dir",
-    "get_vectors_dir",
-    "resolve_data_path",
-    "get_config_path",
-    "get_config_candidates",
     "set_config_value",
-    "render_config_yaml",
-    "VALID_CONFIG_SECTIONS",
-    "get_existing_config_candidates",
-    "get_active_config_path",
-    "get_runtime_config",
-    "get_runtime_config_dir",
-    "load_app_config",
-    "get_runtime_db",
-    "reset_runtime_state",
     "run_doctor",
     "format_result",
     "run_init",
+    "get_config_candidates",
+    "load_runtime_config",
 ]

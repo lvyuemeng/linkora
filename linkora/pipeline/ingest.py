@@ -37,7 +37,9 @@ async def ingest(
     store: IngestStoreLike | None = None,
 ) -> IngestResult:
     """Main pipeline: path in, DB out."""
-    doc_store = store or _default_store()
+    if store is None:
+        raise ValueError("store is required for ingest()")
+    doc_store = store
     doc_id = content_hash(path)
 
     if not force and doc_store.get_by_id(doc_id):
@@ -61,13 +63,6 @@ async def ingest(
         )
     )
     return IngestResult(doc_id=doc_id, success=True)
-
-
-def _default_store() -> IngestStoreLike:
-    from linkora.setup import get_runtime_db
-    from linkora.store import DocumentStore
-
-    return DocumentStore(get_runtime_db())
 
 
 __all__ = ["IngestResult", "ingest"]

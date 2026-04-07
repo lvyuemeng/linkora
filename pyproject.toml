@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "linkora"
-version = "0.3.1"
 description = "Local Knowledge Network — AI-native research cli powered by local-first architecture"
+dynamic = ["version"]
 
 requires-python = ">=3.12"
 license = "MIT"
@@ -17,8 +17,8 @@ keywords = [
     "literature",
     "research",
     "knowledge-base",
+    "knowledge-graph",
     "semantic-search",
-    "mcp",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -44,9 +44,6 @@ Repository = "https://github.com/lvyuemeng/linkora"
 
 [project.optional-dependencies]
 extract = [
-    "kreuzberg[pdf]>=4.0",
-]
-extract-ocr = [
     "kreuzberg[all]>=4.0",
 ]
 embed = [
@@ -57,19 +54,11 @@ embed = [
 topics = [
     "linkora[embed]",
     "bertopic>=0.16",
-    "pandas>=2.0",
 ]
 full = [
-    "linkora[extract]",
-    "linkora[embed]",
-    "linkora[topics]",
-    "curl-cffi>=0.5",
-]
-full-ocr = [
     "linkora[extract-ocr]",
     "linkora[embed]",
     "linkora[topics]",
-    "curl-cffi>=0.5",
 ]
 
 [project.scripts]
@@ -81,6 +70,29 @@ dev = ["pytest>=7.0", "ruff>=0.15.5", "ty>=0.0.23"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["linkora*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "linkora.__version__" }
+
+[tool.linkora.separation]
+core_package = "linkora-core"
+cli_package = "linkora-cli"
+shared_version_attr = "linkora.__version__"
+workspace_members = [
+    "packages/linkora-core",
+    "packages/linkora-cli",
+]
+
+[tool.linkora.separation.workflow]
+prepare = [
+    "uv sync",
+    "uv run ruff check .",
+    "uv run -m pytest",
+]
+release = [
+    "uv run python scripts/release_sync.py bump <version>",
+    "uv run python scripts/release_sync.py verify",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

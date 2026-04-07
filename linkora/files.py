@@ -86,6 +86,7 @@ class WatchRule:
 class FilesInboxRequest:
     path: Path
     workspace_id: str
+    store: DocumentStore
 
 
 @dataclass(frozen=True)
@@ -159,7 +160,7 @@ def run_files_inbox(request: FilesInboxRequest) -> None:
         IngestTask(path=file_path, workspace_id=request.workspace_id)
         for file_path in batch.files
     ]
-    outcomes = _process_ingest_tasks(tasks)
+    outcomes = _process_ingest_tasks(tasks, request.store)
     ok = sum(1 for outcome in outcomes if outcome.success)
     ui(f"Ingested {ok}/{len(tasks)} files.", logger=_LOG)
 
@@ -367,7 +368,7 @@ def run_files_watch_start(store: WatchStoreLike) -> None:
                 _collect_pending_tasks(rule, known, processed, doc_store, pending)
 
             if pending:
-                outcomes = _process_ingest_tasks(pending)
+                outcomes = _process_ingest_tasks(pending, store.document_store())
                 for outcome in outcomes:
                     if not outcome.success:
                         continue
@@ -461,7 +462,10 @@ def _load_watch_rules(store: WatchStoreLike) -> list[WatchRule]:
     return rules
 
 
-def _process_ingest_tasks(tasks: Iterable[IngestTask]) -> list[IngestOutcome]:
+def _process_ingest_tasks(
+    tasks: Iterable[IngestTask],
+    document_store: DocumentStore,
+) -> list[IngestOutcome]:
     from linkora.pipeline.ingest import ingest
 
     async def _run_all() -> list[IngestOutcome]:
@@ -473,6 +477,7 @@ def _process_ingest_tasks(tasks: Iterable[IngestTask]) -> list[IngestOutcome]:
                     workspace_id=task.workspace_id,
                     metadata_hint=task.metadata_hint,
                     doc_type_hint=task.doc_type_hint,
+                    store=document_store,
                 )
                 ui(f"+ {task.path.name} -> {ingest_result.doc_id}", logger=_LOG)
                 outcomes.append(

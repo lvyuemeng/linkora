@@ -3,24 +3,14 @@ workspace.py - Workspace model.
 
 Design invariants:
 - Workspaces are namespace labels in the DB, NOT directories.
-- All linkora data lives under get_data_root().
 - Single SQLite database stores all workspace data.
-- Use get_db_path() for database, get_cache_dir() for cache.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
-
 from linkora.db import DatabaseManager
-from linkora import setup as _setup
-
-get_data_root = _setup.get_data_root
-get_db_path = _setup.get_db_path
-get_cache_dir = _setup.get_cache_dir
-get_config_path = _setup.get_config_path
 
 
 @dataclass(frozen=True)
@@ -214,8 +204,3 @@ class WorkspaceStore:
         self._db_manager.execute_update(
             "DELETE FROM watched_dirs WHERE path = ?", (path,)
         )
-
-    @property
-    def data_root(self) -> Path:
-        """Return data root path."""
-        return get_data_root()

@@ -156,7 +156,23 @@ uv run ty check
 uv run -m pytest
 ```
 
+### Contribution notes (separation)
+
+- CLI/runtime bootstrap is in `linkora/cli/setup.py`.
+- Core modules must not depend on `linkora.cli.*`.
+- Keep core dependencies explicit (store/config/path/cache should be injected from orchestration boundaries).
+- Do not introduce a separate `application` layer inside core; orchestration remains in existing module boundaries.
+
+Version and release sync helpers:
+
+```bash
+just release-show
+just release-verify
+just release-bump 0.4.0
+```
+
 Contributor guidance: [`docs/AGENT.md`](docs/AGENT.md)
+Architecture and migration reference: [`docs/design-v2.md`](docs/design-v2.md)
 
 Optional `just` shortcuts (`justfile`):
 

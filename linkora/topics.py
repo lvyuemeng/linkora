@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any, Protocol, Sequence
 
 from linkora.config import TopicsConfig
-from linkora.setup import resolve_data_path
 from linkora.store import Document, DocumentTopic, Topic
 
 
@@ -73,7 +72,7 @@ class TopicModelStore:
 
     @classmethod
     def from_config(cls, cfg: TopicsConfig) -> "TopicModelStore":
-        return cls(model_dir=resolve_data_path(cfg.model_dir))
+        return cls(model_dir=Path(cfg.model_dir))
 
     def path_for(self, workspace_id: str) -> Path:
         return self.model_dir / f"topics_{workspace_id}.bertopic"

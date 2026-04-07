@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import re
+from dataclasses import dataclass
 from typing import Protocol
 
+from linkora.config import AppConfig
 from linkora.log import get_logger, ui
 from linkora.schema.registry import (
     DEFAULT_SCHEMA_REGISTRY,
@@ -59,14 +60,13 @@ async def enrich(
     raw_content: str,
     schema: type[DocumentSchema],
     seed: dict | None = None,
+    config: AppConfig | None = None,
 ) -> EnrichResult:
     """Enrich document metadata with schema-aware LLM extraction."""
-    from linkora.setup import get_runtime_config
-
-    config = get_runtime_config()
+    runtime_config = config or AppConfig()
     known = {k: v for k, v in (seed or {}).items() if v}
     missing = [name for name in schema.fields_model.model_fields if name not in known]
-    api_key = config.resolve_llm_api_key()
+    api_key = runtime_config.llm_api_key
 
     if not missing:
         return EnrichResult(fields=schema.fields_model(**known), token_count=0)
@@ -78,11 +78,11 @@ async def enrich(
     llm_fields = await _call_llm(
         prompt=schema.extraction_prompt(raw_content, missing),
         fields_model=schema.fields_model,
-        model=config.llm.model,
-        base_url=config.llm.base_url,
+        model=runtime_config.llm.model,
+        base_url=runtime_config.llm.base_url,
         api_key=api_key,
-        timeout=config.llm.timeout,
-        backend=config.llm.backend,
+        timeout=runtime_config.llm.timeout,
+        backend=runtime_config.llm.backend,
     )
     known.update(llm_fields.model_dump(exclude_none=True))
     return EnrichResult(

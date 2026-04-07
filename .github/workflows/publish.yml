@@ -1,6 +1,3 @@
-# PyPI Publishing Workflow
-# Builds and publishes package to PyPI on tag push
-
 name: Publish
 
 on:
@@ -12,42 +9,99 @@ permissions:
   contents: read
 
 jobs:
-  publish:
+  preflight:
+    name: Preflight
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - name: pypi
-            index: ""
-            token: PYPI_TOKEN
-          - name: testpypi
-            index: "--index testpypi"
-            token: TEST_PYPI_TOKEN
+    outputs:
+      version: ${{ steps.version.outputs.value }}
 
     steps:
       - uses: actions/checkout@v6
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - run: uv sync --extra full
+
+      - id: version
+        name: Parse version from tag
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          echo "value=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Release preflight
+        run: uv run python scripts/release_sync.py preflight --tag "${GITHUB_REF_NAME}"
+
+  publish_core:
+    name: Publish linkora-core
+    needs: preflight
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - run: uv sync --extra full
+
+      - name: Build linkora-core
+        run: uv build --project packages/linkora-core
+
+      - name: Publish linkora-core
+        run: uv publish
+        working-directory: packages/linkora-core
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
+
+  verify_core_available:
+    name: Verify core availability
+    needs: [preflight, publish_core]
+    runs-on: ubuntu-latest
+
+    steps:
       - uses: astral-sh/setup-uv@v7
 
-      # Build the package
+      - uses: actions/checkout@v6
+
+      - name: Wait for linkora-core availability
+        run: uv run python scripts/release_sync.py wait-core --version "${RELEASE_VERSION}" --attempts 6 --delay 20
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+
+  publish_cli:
+    name: Publish linkora
+    needs: [preflight, verify_core_available]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
       - run: uv sync --extra full
-      - run: uv build
 
-      # Optional: debug list
-      - run: ls -la dist/
+      - name: Build linkora
+        run: uv build --project packages/linkora
 
-      # Check token exists
-      - name: Ensure token exists
-        run: |
-          if [ -z "${UV_PUBLISH_TOKEN}" ]; then
-            echo "Missing token for ${{ matrix.name }}"
-            exit 1
-          fi
-        env:
-          UV_PUBLISH_TOKEN: ${{ secrets[matrix.token] }}
-
-      # Publish directly from build folder
-      - name: Publish to ${{ matrix.name }}
-        if: matrix.name == 'pypi' || contains(github.ref_name, 'rc')
+      - name: Publish linkora
         run: uv publish
+        working-directory: packages/linkora
         env:
-          UV_PUBLISH_TOKEN: ${{ secrets[matrix.token] }}
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
+
+  post_publish_smoke:
+    name: Post-publish smoke
+    needs: publish_cli
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: astral-sh/setup-uv@v7
+
+      - name: CLI smoke check
+        run: uvx --from linkora linkora --help

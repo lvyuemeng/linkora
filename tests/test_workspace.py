@@ -1,20 +1,6 @@
 """Integration tests for workspace module."""
 
-from linkora.workspace import WorkspaceStore, get_data_root, get_db_path
-
-
-def test_get_data_root_platform_aware():
-    """Test data root is platform-appropriate."""
-    root = get_data_root()
-    assert root.name == "linkora"
-    assert root.exists() or True  # May not exist yet
-
-
-def test_get_db_path_uses_data_root():
-    """Test db path uses unified path resolution."""
-    db_path = get_db_path()
-    assert db_path.name == "linkora.db"
-    assert db_path.parent == get_data_root()
+from linkora.workspace import WorkspaceStore
 
 
 def test_workspace_store_init(tmp_db):

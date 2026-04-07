@@ -34,7 +34,7 @@ from linkora.cli.args import (
     FilesWatchAddArgs,
 )
 from linkora.log import ui
-from linkora.setup import render_config_yaml, set_config_value
+from linkora.cli.setup import set_config_value
 from linkora.sources import (
     SourceIngestRequest,
     run_source_ingest,
@@ -202,6 +202,7 @@ def cmd_add(args: argparse.Namespace, ctx: AppContext) -> None:
         workspace_id=ctx.resolve_workspace_id(cmd_args.workspace),
         doc_type_hint=cmd_args.doc_type,
         dry_run=cmd_args.dry_run,
+        store=ctx.store.document_store(),
     )
     run_source_ingest(request)
 
@@ -233,6 +234,7 @@ def cmd_files_inbox(args: argparse.Namespace, ctx: AppContext) -> None:
     request = FilesInboxRequest(
         path=cmd_args.path,
         workspace_id=ctx.resolve_workspace_id(cmd_args.workspace),
+        store=ctx.store.document_store(),
     )
     run_files_inbox(request)
 
@@ -345,7 +347,7 @@ def cmd_index(args: argparse.Namespace, ctx: AppContext) -> None:
 
 def cmd_doctor(args: argparse.Namespace, ctx: AppContext) -> None:
     """Run config/environment health check."""
-    from linkora.setup import run_doctor, format_result
+    from linkora.cli.setup import run_doctor, format_result
 
     result = run_doctor(ctx)
     print(format_result(result, "Doctor"))
@@ -354,7 +356,7 @@ def cmd_doctor(args: argparse.Namespace, ctx: AppContext) -> None:
 def cmd_config_show(args: argparse.Namespace, ctx: AppContext) -> None:
     """Show configuration values."""
     cmd_args = ConfigShowArgs.from_namespace(args)
-    ui(render_config_yaml(ctx.config, cmd_args.field))
+    ui(ctx.config.to_yaml(cmd_args.field))
 
 
 def cmd_config_set(args: argparse.Namespace, ctx: AppContext) -> None:

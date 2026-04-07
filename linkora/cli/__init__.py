@@ -4,7 +4,7 @@ __init__.py / main.py — linkora CLI entry point.
 Startup sequence
 ────────────────
 1. Early-parse `--context` / `--workspace`.
-2. Bootstrap runtime via `linkora.setup.run_init`.
+2. Bootstrap runtime via `linkora.cli.setup.run_init`.
 3. Initialize logging with runtime context.
 4. Build full parser and dispatch command.
 
@@ -45,7 +45,7 @@ def main() -> None:
         print(_design_context())
         return
 
-    from linkora.setup import run_init
+    from linkora.cli.setup import run_init
 
     ctx = run_init(cli_workspace=early_args.workspace)
 
@@ -104,7 +104,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _design_context() -> str:
-    from linkora.setup import get_config_candidates
+    from linkora.cli.setup import get_config_candidates
 
     candidates_text = "\n".join(
         f"    {idx}) {path}"
