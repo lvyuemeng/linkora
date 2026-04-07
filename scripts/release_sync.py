@@ -19,6 +19,7 @@ CORE_DIR = ROOT / "linkora"
 CLI_DIR = CORE_DIR / "cli"
 
 VERSION_RE = re.compile(r'^__version__\s*=\s*"(?P<version>[^"]+)"\s*$', re.M)
+PROJECT_VERSION_RE = re.compile(r'^version\s*=\s*"(?P<version>[^"]+)"\s*$', re.M)
 CORE_PIN_RE = re.compile(r'"linkora-core==(?P<version>[^"]+)"')
 TAG_RE = re.compile(r"^v(?P<version>.+)$")
 SEMVER_RE = re.compile(
@@ -71,8 +72,20 @@ def read_cli_core_pin() -> str:
     return match.group("version")
 
 
+def read_project_version(path: Path) -> str:
+    project = _read_toml(path).get("project", {})
+    version = project.get("version")
+    if not isinstance(version, str) or not version:
+        raise ReleaseSyncError(
+            f"Cannot find static project.version in {path.relative_to(ROOT)}"
+        )
+    return version
+
+
 def show() -> None:
     print(f"root_version={read_root_version()}")
+    print(f"core_project_version={read_project_version(CORE_PYPROJECT)}")
+    print(f"cli_project_version={read_project_version(CLI_PYPROJECT)}")
     print(f"cli_core_pin={read_cli_core_pin()}")
 
 
@@ -84,19 +97,34 @@ def bump(version: str, dry_run: bool = False) -> None:
         raise ReleaseSyncError("Cannot update __version__; pattern missing")
     updated_init = VERSION_RE.sub(f'__version__ = "{version}"', init_text, count=1)
 
+    core_text = _read_text(CORE_PYPROJECT)
+    if not PROJECT_VERSION_RE.search(core_text):
+        raise ReleaseSyncError(
+            "Cannot update core package version; 'project.version' not found"
+        )
+    updated_core = PROJECT_VERSION_RE.sub(f'version = "{version}"', core_text, count=1)
+
     cli_text = _read_text(CLI_PYPROJECT)
+    if not PROJECT_VERSION_RE.search(cli_text):
+        raise ReleaseSyncError(
+            "Cannot update CLI package version; 'project.version' not found"
+        )
     if not CORE_PIN_RE.search(cli_text):
         raise ReleaseSyncError(
             "Cannot update CLI dependency pin; 'linkora-core==...' not found"
         )
-    updated_cli = CORE_PIN_RE.sub(f'"linkora-core=={version}"', cli_text, count=1)
+    updated_cli = PROJECT_VERSION_RE.sub(f'version = "{version}"', cli_text, count=1)
+    updated_cli = CORE_PIN_RE.sub(f'"linkora-core=={version}"', updated_cli, count=1)
 
     if dry_run:
         print(f"[dry-run] would set __version__ to {version}")
+        print(f"[dry-run] would set core package version to {version}")
+        print(f"[dry-run] would set CLI package version to {version}")
         print(f"[dry-run] would set CLI dependency pin to linkora-core=={version}")
         return
 
     _write_text(ROOT_INIT, updated_init)
+    _write_text(CORE_PYPROJECT, updated_core)
     _write_text(CLI_PYPROJECT, updated_cli)
     print(f"Bumped release version to {version}")
 
@@ -143,6 +171,8 @@ def verify() -> None:
             raise ReleaseSyncError(f"Missing required file: {path}")
 
     root_version = read_root_version()
+    core_version = read_project_version(CORE_PYPROJECT)
+    cli_version = read_project_version(CLI_PYPROJECT)
     cli_pin = read_cli_core_pin()
 
     root_proj = _read_toml(ROOT_PYPROJECT)
@@ -156,11 +186,19 @@ def verify() -> None:
     if cli_proj.get("project", {}).get("name") != "linkora":
         raise ReleaseSyncError("CLI pyproject project.name must be 'linkora'")
 
-    if root_version != cli_pin:
+    if not (root_version == core_version == cli_version):
         raise ReleaseSyncError(
-            "Version mismatch: CLI dependency pin does not match root __version__. "
-            f"root={root_version}, cli_pin={cli_pin}"
+            "Version mismatch across root/core/cli. "
+            f"root={root_version}, core={core_version}, cli={cli_version}"
         )
+
+    if core_version != cli_pin:
+        raise ReleaseSyncError(
+            "Version mismatch: CLI dependency pin does not match core package version. "
+            f"core={core_version}, cli_pin={cli_pin}"
+        )
+
+    check_boundary()
 
     print("Version sync verified")
 
@@ -214,7 +252,9 @@ def main() -> int:
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    bump_parser = sub.add_parser("bump", help="Bump root version and CLI core pin")
+    bump_parser = sub.add_parser(
+        "bump", help="Bump root/core/cli versions and CLI core pin"
+    )
     bump_parser.add_argument("version", help="Target version, e.g. 0.4.0")
     bump_parser.add_argument(
         "--dry-run",
@@ -234,7 +274,7 @@ def main() -> int:
     wait_parser.add_argument("--version", required=True)
     wait_parser.add_argument("--attempts", type=int, default=6)
     wait_parser.add_argument("--delay", type=int, default=20)
-    sub.add_parser("show", help="Show current root version and CLI core pin")
+    sub.add_parser("show", help="Show current root/core/cli versions and CLI core pin")
 
     args = parser.parse_args()
 

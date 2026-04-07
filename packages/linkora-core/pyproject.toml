@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "linkora-core"
-dynamic = ["version"]
+version = "0.4.0"
 description = "Core runtime and domain modules for linkora"
 requires-python = ">=3.12"
 license = "MIT"
@@ -44,6 +44,3 @@ package-dir = { "" = "../.." }
 where = ["../.."]
 include = ["linkora", "linkora.*"]
 exclude = ["linkora.cli", "linkora.cli.*"]
-
-[tool.setuptools.dynamic]
-version = { attr = "linkora.__version__" }

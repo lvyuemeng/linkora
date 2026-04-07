@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "linkora"
-dynamic = ["version"]
+version = "0.4.0"
 description = "Local Knowledge Network CLI"
 requires-python = ">=3.12"
 license = "MIT"
@@ -25,5 +25,3 @@ package-dir = { "" = "../.." }
 where = ["../.."]
 include = ["linkora.cli", "linkora.cli.*"]
 
-[tool.setuptools.dynamic]
-version = { attr = "linkora.__version__" }

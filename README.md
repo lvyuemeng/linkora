@@ -1,117 +1,110 @@
 # linkora
 
-Local-first knowledge CLI for both humans and AI agents.
+Local-first knowledge CLI for people and AI agents who need fast, reliable retrieval from real files.
 
 [English](./README.md) | [中文](./README-CN.md)
 
 ---
 
-## What it does
+## Introduction
 
-linkora builds a local knowledge layer on top of your existing files and sources.
-It can be used directly by users in terminal workflows and by AI agents that need a
-structured, searchable context store.
+linkora turns your existing documents into a searchable knowledge layer without forcing you into a cloud migration or a heavyweight UI. It keeps the workflow close to your terminal, close to your files, and fully auditable.
 
-- Keep files in place: linkora stores references (`source_path`), not duplicated documents.
-- Ingest from mixed sources: local files/directories, DOI, arXiv, and web URLs.
-- Extract + enrich: parse content, apply schema fields, optionally enrich with LLM.
-- Search in two ways: FTS5 full-text and LanceDB vector retrieval.
-- Operate by workspace: each workspace is a DB namespace for isolation.
+Think of it as a practical bridge between raw documents and intelligent workflows:
+
+- Your files stay where they are. linkora stores references, not duplicated blobs.
+- AI agents get deterministic, structured context instead of brittle ad-hoc prompts.
+- Research and engineering teams get one reproducible pipeline from ingest to retrieval.
 
 Design reference: [`docs/design-v2.md`](docs/design-v2.md)
 
-## Who it is for
+## Why it matters
 
-- Users: build a personal or team research corpus and search it quickly.
-- AI agents: consume `linkora --context`, then run deterministic add/index/search flows.
-- Engineering workflows: keep everything local-first with explicit data paths.
-
----
-
-## Features
-
-- Multi-source ingest: `add` local files/dirs, DOI IDs, arXiv IDs, and URLs.
-- Structured enrichment: schema-aware metadata extraction with optional LLM enhancement.
-- Hybrid retrieval: full-text (`fulltext`) and semantic vector (`vector`) search.
-- File operations: tidy, dedup, rescan, inbox import, and directory watch.
-- Topic workflows: build, inspect, assign, prune, and export topic clusters.
-- Local-first runtime: single SQLite DB + local vector/cache directories.
+- **Local-first by default**: data paths are explicit, inspectable, and easy to back up.
+- **Built for mixed sources**: local files/directories, DOI, arXiv, and web URLs in one flow.
+- **Hybrid retrieval that feels immediate**: keyword precision (FTS5) plus semantic recall (vectors).
+- **Workspace isolation**: separate corpora cleanly for projects, teams, or experiments.
+- **Agent-ready context**: `linkora --context` exposes operational guidance for deterministic automation.
 
 ---
 
 ## Install
 
-Prerequisites:
+Requirements:
+
 - Python 3.12+
 - `uv`
 
-From source:
+Install `uv`:
+
+```bash
+pip install uv
+```
+
+Install linkora with full optional capabilities:
+
+```bash
+uv tool install "linkora[full]"
+```
+
+Check installation:
+
+```bash
+linkora --help
+```
+
+### Development install (from source)
 
 ```bash
 git clone https://github.com/lvyuemeng/linkora.git
 cd linkora
 uv sync
-```
-
-CLI check:
-
-```bash
 uv run linkora --help
 ```
 
 ---
 
-## How to use
+## Basic usage
 
-Typical flow:
-1. Inspect environment and defaults.
-2. Add content into a workspace.
-3. Build index and search.
+A minimal end-to-end flow:
 
 ```bash
-# AI/agent context snapshot
-uv run linkora --context
+# 1) Show runtime context (great for humans and agents)
+linkora --context
 
-# optional diagnostics (config/env)
-uv run linkora doctor
+# 2) Optional health checks (config/env/path)
+linkora doctor
 
-# ingest local files
-uv run linkora add ./docs/paper.pdf --workspace default
+# 3) Add documents into a workspace
+linkora add ./docs/paper.pdf --workspace default
+linkora add doi:10.48550/arXiv.1706.03762 --output ~/Downloads --workspace default
 
-# ingest by source
-uv run linkora add doi:10.48550/arXiv.1706.03762 --output ~/Downloads --workspace default
-uv run linkora add arxiv:2401.01234 --output ~/Downloads --workspace default
-uv run linkora add web:https://example.com/post --output ~/Downloads --workspace default
+# 4) Build retrieval indexes
+linkora index
 
-# build indexes
-uv run linkora index
-
-# search
-uv run linkora search "transformer"
-uv run linkora search "embedding" --mode vector
+# 5) Search (keyword and vector)
+linkora search "transformer"
+linkora search "embedding alignment" --mode vector
 ```
 
-Workspace selection priority is: CLI flag `--workspace` > `LINKORA_WORKSPACE` > registry default.
+Workspace priority: CLI `--workspace` > `LINKORA_WORKSPACE` > registry default.
 
 ---
 
 ## Configuration
 
-Config is optional. If no config file exists, linkora uses built-in defaults.
+Configuration is optional. If no config file is found, linkora runs with built-in defaults.
 
-Config model:
-- single-file-wins resolution
-- warning if multiple config candidates exist
-- global config only (no workspace-local override)
+- Single-file-wins resolution
+- Warning when multiple config candidates are present
+- Global config only (no workspace-local override)
 
-See full guide: [`docs/config.md`](docs/config.md)
-
-Common commands:
+Guide: [`docs/config.md`](docs/config.md)
 
 ```bash
-uv run linkora config show
-uv run linkora config show llm.model
-uv run linkora config set llm.model deepseek-chat
+linkora config show
+linkora config show llm.model
+linkora config set llm.model deepseek-chat
 ```
 
 ---
@@ -127,13 +120,13 @@ uv run linkora config set llm.model deepseek-chat
 - config: `config show/set`
 - diagnostics: `doctor`
 
-Run `uv run linkora <command> --help` for detailed usage.
+Use `linkora <command> --help` for details.
 
 ---
 
 ## Data layout
 
-Under data root (`LINKORA_ROOT` override supported):
+Under data root (`LINKORA_ROOT` can override):
 
 ```text
 <data_root>/
@@ -147,45 +140,14 @@ Under data root (`LINKORA_ROOT` override supported):
 
 ## Development
 
-Use `uv` workflows only.
-
 ```bash
 uv run ruff format .
 uv run ruff check .
-uv run ty check
+uv run ty check .
 uv run -m pytest
 ```
 
-### Contribution notes (separation)
-
-- CLI/runtime bootstrap is in `linkora/cli/setup.py`.
-- Core modules must not depend on `linkora.cli.*`.
-- Keep core dependencies explicit (store/config/path/cache should be injected from orchestration boundaries).
-- Do not introduce a separate `application` layer inside core; orchestration remains in existing module boundaries.
-
-Version and release sync helpers:
-
-```bash
-just release-show
-just release-verify
-just release-bump 0.4.0
-```
-
-Contributor guidance: [`docs/AGENT.md`](docs/AGENT.md)
-Architecture and migration reference: [`docs/design-v2.md`](docs/design-v2.md)
-
-Optional `just` shortcuts (`justfile`):
-
-```bash
-just setup
-just format
-just lint
-just type
-just test
-just ci
-```
-
----
+Contribution guide: [`docs/AGENT.md`](docs/AGENT.md)
 
 ## License
 
