@@ -1,43 +1,41 @@
 # linkora
 
-Local-first document corpus CLI for AI-assisted workflows.
+Local-first knowledge CLI for both humans and AI agents.
 
 [English](./README.md) | [中文](./README-CN.md)
 
 ---
 
-## What linkora is
+## What it does
 
-linkora indexes documents where they already live, enriches metadata by schema,
-and supports full-text plus vector search.
+linkora builds a local knowledge layer on top of your existing files and sources.
+It can be used directly by users in terminal workflows and by AI agents that need a
+structured, searchable context store.
 
-Architecture principles:
-- user files stay in place (`source_path` references original files)
-- workspace is a DB namespace (not a workspace folder tree)
-- explicit composable pipelines (source -> fetch -> ingest, schema -> parse -> filter)
+- Keep files in place: linkora stores references (`source_path`), not duplicated documents.
+- Ingest from mixed sources: local files/directories, DOI, arXiv, and web URLs.
+- Extract + enrich: parse content, apply schema fields, optionally enrich with LLM.
+- Search in two ways: FTS5 full-text and LanceDB vector retrieval.
+- Operate by workspace: each workspace is a DB namespace for isolation.
 
-Authoritative design document: [`docs/design-v2.md`](docs/design-v2.md)
+Design reference: [`docs/design-v2.md`](docs/design-v2.md)
+
+## Who it is for
+
+- Users: build a personal or team research corpus and search it quickly.
+- AI agents: consume `linkora --context`, then run deterministic add/index/search flows.
+- Engineering workflows: keep everything local-first with explicit data paths.
 
 ---
 
-## Key capabilities
+## Features
 
-- Source ingest:
-  - local file/dir
-  - `doi:<id>`
-  - `arxiv:<id>`
-  - `web:<url>`
-- Pipeline ingest:
-  - extract text (Kreuzberg)
-  - enrich metadata (schema + LLM)
-  - persist to SQLite
-- Search:
-  - `fulltext` mode (FTS5)
-  - `vector` mode (LanceDB)
-- File workflows:
-  - `files tidy`, `files dedup`, `files rescan`, `files inbox`, `files watch`
-- Topics workflows:
-  - `topics build`, `list`, `show`, `assign`, `prune`, `export`
+- Multi-source ingest: `add` local files/dirs, DOI IDs, arXiv IDs, and URLs.
+- Structured enrichment: schema-aware metadata extraction with optional LLM enhancement.
+- Hybrid retrieval: full-text (`fulltext`) and semantic vector (`vector`) search.
+- File operations: tidy, dedup, rescan, inbox import, and directory watch.
+- Topic workflows: build, inspect, assign, prune, and export topic clusters.
+- Local-first runtime: single SQLite DB + local vector/cache directories.
 
 ---
 
@@ -63,14 +61,19 @@ uv run linkora --help
 
 ---
 
-## Quick start
+## How to use
+
+Typical flow:
+1. Inspect environment and defaults.
+2. Add content into a workspace.
+3. Build index and search.
 
 ```bash
 # AI/agent context snapshot
 uv run linkora --context
 
-# initialize config + environment
-uv run linkora init
+# optional diagnostics (config/env)
+uv run linkora doctor
 
 # ingest local files
 uv run linkora add ./docs/paper.pdf --workspace default
@@ -87,6 +90,8 @@ uv run linkora index
 uv run linkora search "transformer"
 uv run linkora search "embedding" --mode vector
 ```
+
+Workspace selection priority is: CLI flag `--workspace` > `LINKORA_WORKSPACE` > registry default.
 
 ---
 

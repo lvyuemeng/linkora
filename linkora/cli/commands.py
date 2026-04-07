@@ -27,8 +27,6 @@ from linkora.cli.args import (
     IndexArgs,
     ConfigShowArgs,
     ConfigSetArgs,
-    DoctorArgs,
-    InitArgs,
     FilesDedupArgs,
     FilesInboxArgs,
     FilesRescanArgs,
@@ -36,7 +34,7 @@ from linkora.cli.args import (
     FilesWatchAddArgs,
 )
 from linkora.log import ui
-from linkora.config import render_config_yaml, set_config_value
+from linkora.setup import render_config_yaml, set_config_value
 from linkora.sources import (
     SourceIngestRequest,
     run_source_ingest,
@@ -55,10 +53,10 @@ from linkora.files import (
     run_files_watch_list,
     run_files_watch_start,
 )
-from linkora.paths import get_data_root
 
 if TYPE_CHECKING:
     from linkora.config import AppConfig
+    from linkora.db import Database
     from linkora.workspace import WorkspaceStore
 
 
@@ -83,10 +81,8 @@ class AppContext:
     config_dir: Path
     store: "WorkspaceStore"
     workspace_name: str
-
-    @property
-    def data_root(self) -> Path:
-        return get_data_root()
+    data_root: Path
+    db: "Database"
 
     def log_file(self, name: str) -> Path:
         return self.data_root / name
@@ -96,7 +92,7 @@ class AppContext:
 
     def close(self) -> None:
         """Close any open resources."""
-        pass
+        self.db.close()
 
 
 # ============================================================================
@@ -310,8 +306,7 @@ def cmd_index(args: argparse.Namespace, ctx: AppContext) -> None:
         run_fts = True
         run_vector = True
 
-    data_root = get_data_root()
-    ui(f"Data root: {data_root}")
+    ui(f"Data root: {ctx.data_root}")
 
     if run_fts:
         ui("Building FTS index...")
@@ -349,24 +344,11 @@ def cmd_index(args: argparse.Namespace, ctx: AppContext) -> None:
 
 
 def cmd_doctor(args: argparse.Namespace, ctx: AppContext) -> None:
-    """Run full or quick health check."""
-    from linkora.setup import run_check, run_doctor, format_result
+    """Run config/environment health check."""
+    from linkora.setup import run_doctor, format_result
 
-    cmd_args = DoctorArgs.from_namespace(args)
-    if cmd_args.light:
-        result = run_check(ctx)
-        print(format_result(result, "Quick Check"))
-    else:
-        result = run_doctor(ctx)
-        print(format_result(result, "Doctor"))
-
-
-def cmd_init(args: argparse.Namespace, ctx: AppContext) -> None:
-    """Interactive setup wizard."""
-    from linkora.setup import run_init
-
-    cmd_args = InitArgs.from_namespace(args)
-    run_init(force=cmd_args.force)
+    result = run_doctor(ctx)
+    print(format_result(result, "Doctor"))
 
 
 def cmd_config_show(args: argparse.Namespace, ctx: AppContext) -> None:
@@ -614,11 +596,9 @@ def register_all(subparsers) -> None:
     p = subparsers.add_parser(
         "doctor",
         help="Run environment health checks",
-        description="Run setup and dependency checks for the current environment.",
+        description="Report config resolution and environment/dependency status.",
     )
     p.set_defaults(func=cmd_doctor)
-    p.add_argument("--light", action="store_true", help="Quick check (no network)")
-    p.add_argument("--fix", action="store_true", help="Auto-fix issues")
 
     # ── config ───────────────────────────────────────────────────────────
     cfg_p = subparsers.add_parser(
@@ -735,15 +715,6 @@ def register_all(subparsers) -> None:
     )
     p.set_defaults(func=cmd_files_watch_start)
     p.add_argument("--daemon", action="store_true", help="Run in background")
-
-    # ── init ─────────────────────────────────────────────────────────────
-    p = subparsers.add_parser(
-        "init",
-        help="Initialize config and environment",
-        description="Initialize global config and run setup checks.",
-    )
-    p.set_defaults(func=cmd_init)
-    p.add_argument("--force", action="store_true", help="Overwrite existing config")
 
     # ── topics ───────────────────────────────────────────────────────────
     topics_p = subparsers.add_parser(

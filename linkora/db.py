@@ -12,29 +12,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-from linkora.paths import get_db_path
-
-_db_instance: "Database | None" = None
-
-
-def get_db(db_path: Path | None = None) -> Database:
-    """Get or create the global database instance."""
-    global _db_instance
-    if _db_instance is None:
-        if db_path is None:
-            db_path = get_db_path()
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        _db_instance = Database(db_path)
-    return _db_instance
-
-
-def reset_db() -> None:
-    """Reset the global database instance (for testing)."""
-    global _db_instance
-    if _db_instance:
-        _db_instance.close()
-        _db_instance = None
-
 
 class Database:
     """SQLite database connection manager."""
@@ -229,4 +206,4 @@ class DatabaseManager:
         return result is not None
 
 
-__all__ = ["Database", "DatabaseManager", "get_db", "reset_db"]
+__all__ = ["Database", "DatabaseManager"]

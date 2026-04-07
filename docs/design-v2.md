@@ -203,7 +203,7 @@ Workspace properties:
 - document store and index accessors
 - watch registration/list/remove
 
-Data root and canonical paths are provided via `linkora/paths.py`.
+Data root and canonical paths are provided via `linkora/setup.py`.
 
 ---
 
@@ -245,7 +245,11 @@ Primary command groups:
 - `topics` (`build`, `list`, `show`, `assign`, `prune`, `export`)
 - `config` (`show`, `set`)
 - `doctor`
-- `init`
+
+Runtime bootstrap note:
+- No explicit `init` command is required for normal usage.
+- First run auto-initializes database and default workspace.
+- Config file remains optional; defaults are loaded when absent.
 
 Design guidance from `docs/AGENT.md`:
 - CLI user-facing text should remain Chinese.
@@ -268,7 +272,7 @@ linkora/
   files.py
   index.py
   log.py
-  paths.py
+  setup.py
   pipeline/
     __init__.py
     extract.py
@@ -278,7 +282,6 @@ linkora/
     __init__.py
     registry.py
     types.py
-  setup.py
   sources.py
   store.py
   topics.py

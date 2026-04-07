@@ -5,7 +5,7 @@ from pathlib import Path
 import json
 
 from linkora import content_hash
-from linkora.paths import get_cache_dir
+from linkora.setup import get_cache_dir
 
 
 @dataclass(frozen=True)

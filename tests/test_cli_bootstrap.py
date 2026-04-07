@@ -1,63 +1,14 @@
 """Integration-oriented tests for CLI bootstrap composition."""
 
+from pathlib import Path
+
 import linkora.cli as cli_main
-
-
-class _FakeWorkspace:
-    def __init__(self, name: str):
-        self.name = name
-
-
-class _FakeStore:
-    def __init__(self, default_name: str | None, existing: list[str] | None = None):
-        self._default_name = default_name
-        self._existing = existing or []
-        self.set_default_calls: list[str] = []
-        self.create_calls: list[str] = []
-
-    def get_default(self):
-        if self._default_name is None:
-            return None
-        return _FakeWorkspace(self._default_name)
-
-    def list_workspaces(self):
-        return [_FakeWorkspace(name) for name in self._existing]
-
-    def set_default(self, name: str) -> None:
-        self.set_default_calls.append(name)
-        self._default_name = name
-
-    def create(self, name: str, description: str = ""):
-        self.create_calls.append(name)
-        self._default_name = name
-        return _FakeWorkspace(name)
 
 
 def test_parse_early_args_reads_context_and_workspace():
     args = cli_main._parse_early_args(["--context", "--workspace", "research"])
     assert args.context is True
     assert args.workspace == "research"
-
-
-def test_resolve_active_workspace_precedence_cli_env_default(monkeypatch):
-    store = _FakeStore(default_name="default")
-
-    monkeypatch.setenv("LINKORA_WORKSPACE", "env-ws")
-    assert cli_main._resolve_active_workspace_name(store, "cli-ws") == "cli-ws"
-
-    assert cli_main._resolve_active_workspace_name(store, None) == "env-ws"
-
-    monkeypatch.delenv("LINKORA_WORKSPACE")
-    assert cli_main._resolve_active_workspace_name(store, None) == "default"
-
-
-def test_ensure_default_workspace_creates_one_when_missing():
-    store = _FakeStore(default_name=None, existing=[])
-    resolved = cli_main._ensure_default_workspace(store)
-
-    assert resolved == "default"
-    assert store.create_calls == ["default"]
-    assert store.set_default_calls == ["default"]
 
 
 def test_build_parser_registers_core_commands():
@@ -81,3 +32,17 @@ def test_design_context_mentions_pipeline_and_config_resolution():
     assert (
         "Config is optional; built-in defaults are used when no file exists" in context
     )
+
+
+def test_design_context_renders_config_candidates_from_setup(monkeypatch):
+    from linkora import setup
+
+    candidates = [
+        Path("candidate-a.yml"),
+        Path("candidate-b.yaml"),
+    ]
+    monkeypatch.setattr(setup, "get_config_candidates", lambda: candidates)
+
+    context = cli_main._design_context()
+    assert f"1) {candidates[0]}" in context
+    assert f"2) {candidates[1]}" in context

@@ -64,10 +64,10 @@ async def ingest(
 
 
 def _default_store() -> IngestStoreLike:
-    from linkora.db import get_db
+    from linkora.setup import get_runtime_db
     from linkora.store import DocumentStore
 
-    return DocumentStore(get_db())
+    return DocumentStore(get_runtime_db())
 
 
 __all__ = ["IngestResult", "ingest"]

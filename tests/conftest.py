@@ -80,7 +80,8 @@ def fixtures_dir():
 @pytest.fixture(autouse=True)
 def reset_db_singleton():
     """Reset database singleton between tests."""
-    from linkora import db as db_module
+    from linkora import setup
 
+    setup.reset_runtime_state()
     yield
-    db_module.reset_db()
+    setup.reset_runtime_state()

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Protocol, Sequence
 
 from linkora.config import TopicsConfig
-from linkora.paths import resolve_data_path
+from linkora.setup import resolve_data_path
 from linkora.store import Document, DocumentTopic, Topic
 
 

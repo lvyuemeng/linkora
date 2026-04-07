@@ -7,9 +7,8 @@ import sqlite3
 from typing import TYPE_CHECKING, Any, Iterator, cast
 
 from pydantic import BaseModel, Field
-from linkora.config import get_config
 from linkora.db import DatabaseManager
-from linkora.paths import get_vectors_dir
+from linkora.setup import get_runtime_config, get_vectors_dir
 from linkora.store import DocumentStore
 
 if TYPE_CHECKING:
@@ -167,7 +166,7 @@ class VectorIndex:
         vector_store: VectorStore | None = None,
     ):
         self._db = db_manager
-        self._config = config or get_config()
+        self._config = config or get_runtime_config()
         self._vector_store = vector_store or VectorStore.default()
         self._table = None
         self._embedder = None

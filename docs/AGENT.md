@@ -12,7 +12,7 @@ linkora --context
 ```
 
 This provides:
-- CLI workflow (init → add → index → search)
+- CLI workflow (add → index → search)
 - Source ingest pipeline context (parse → resolve → fetch → ingest)
 - Schema pipeline context (resolve type/schema → parse fields → filter/render)
 - Config resolution model (single-file-wins, multi-file warning)

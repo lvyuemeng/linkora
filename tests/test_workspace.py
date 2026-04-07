@@ -115,3 +115,43 @@ def test_workspace_rename_updates_docs(tmp_db):
     doc_updated = doc_store.get_by_id("doc-1")
     assert doc_updated is not None
     assert doc_updated.workspace_id == "new-name"
+
+
+def test_ensure_default_workspace_keeps_existing_default(tmp_db):
+    store = WorkspaceStore(tmp_db)
+    store.create("alpha")
+    store.set_default("alpha")
+
+    name, created = store.ensure_default_workspace()
+
+    assert name == "alpha"
+    assert created is False
+    default_ws = store.get_default()
+    assert default_ws is not None
+    assert default_ws.name == "alpha"
+
+
+def test_ensure_default_workspace_promotes_first_existing(tmp_db):
+    store = WorkspaceStore(tmp_db)
+    store.create("alpha")
+    store.create("beta")
+
+    name, created = store.ensure_default_workspace()
+
+    assert name == "alpha"
+    assert created is False
+    default_ws = store.get_default()
+    assert default_ws is not None
+    assert default_ws.name == "alpha"
+
+
+def test_ensure_default_workspace_creates_default_when_empty(tmp_db):
+    store = WorkspaceStore(tmp_db)
+
+    name, created = store.ensure_default_workspace()
+
+    assert name == "default"
+    assert created is True
+    default_ws = store.get_default()
+    assert default_ws is not None
+    assert default_ws.name == "default"

@@ -4,11 +4,9 @@ __init__.py / main.py — linkora CLI entry point.
 Startup sequence
 ────────────────
 1. Early-parse `--context` / `--workspace`.
-2. Load global AppConfig (single-file-wins resolution).
-3. Build WorkspaceStore on the default DB.
-4. Resolve active workspace (CLI > env > DB default).
-5. Build AppContext and initialize logging.
-6. Build full parser and dispatch command.
+2. Bootstrap runtime via `linkora.setup.run_init`.
+3. Initialize logging with runtime context.
+4. Build full parser and dispatch command.
 
 Workspace flag
 ──────────────
@@ -22,93 +20,7 @@ Environment variable
 from __future__ import annotations
 
 import argparse
-import os
 from typing import Sequence
-
-
-def main() -> None:
-    """CLI entry point."""
-
-    early_args = _parse_early_args()
-    if early_args.context:
-        print(_design_context())
-        return
-
-    cfg, config_dir = _load_runtime_config()
-    store = _build_workspace_store()
-    workspace_name = _resolve_active_workspace_name(store, early_args.workspace)
-    ctx = _build_context(cfg, config_dir, store, workspace_name)
-
-    from linkora import log as linkora_log
-
-    linkora_log.init(cfg.log, ctx.log_file(cfg.log.file))
-
-    parser = _build_parser()
-    args = parser.parse_args()
-
-    try:
-        args.func(args, ctx)
-    finally:
-        ctx.close()
-
-
-def _parse_early_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Parse flags needed before full parser construction."""
-    early = argparse.ArgumentParser(add_help=False)
-    early.add_argument("--context", action="store_true")
-    early.add_argument("--workspace", "-W", default=None, metavar="NAME")
-    early_args, _ = early.parse_known_args(argv)
-    return early_args
-
-
-def _load_runtime_config():
-    """Load config and active config directory."""
-    from linkora.config import get_config, get_config_dir
-
-    return get_config(), get_config_dir()
-
-
-def _build_workspace_store():
-    """Create WorkspaceStore bound to default database."""
-    from linkora.workspace import WorkspaceStore
-    from linkora.db import get_db
-
-    return WorkspaceStore(get_db())
-
-
-def _resolve_active_workspace_name(store, cli_workspace: str | None) -> str:
-    """Resolve active workspace in precedence: CLI > env > default."""
-    default_ws = _ensure_default_workspace(store)
-    return cli_workspace or os.environ.get("LINKORA_WORKSPACE", "") or default_ws
-
-
-def _ensure_default_workspace(store) -> str:
-    """Ensure there is one default workspace and return its name."""
-    default_ws = store.get_default()
-    if default_ws:
-        return default_ws.name
-
-    existing = store.list_workspaces()
-    if existing:
-        name = existing[0].name
-        store.set_default(name)
-        return name
-
-    store.create("default", description="Default workspace")
-    store.set_default("default")
-    return "default"
-
-
-def _build_context(cfg, config_dir, store, workspace_name: str):
-    """Create AppContext instance."""
-    from linkora.cli.commands import AppContext
-
-    return AppContext(
-        config=cfg,
-        config_dir=config_dir,
-        store=store,
-        workspace_name=workspace_name,
-    )
 
 
 def run() -> int:
@@ -125,6 +37,54 @@ def run() -> int:
         return 1
 
 
+def main() -> None:
+    """CLI entry point."""
+
+    early_args = _parse_early_args()
+    if early_args.context:
+        print(_design_context())
+        return
+
+    from linkora.setup import run_init
+
+    ctx = run_init(cli_workspace=early_args.workspace)
+
+    from linkora import log as linkora_log
+
+    linkora_log.init(ctx.config.log, ctx.log_file(ctx.config.log.file))
+
+    parser = _build_parser()
+    args = parser.parse_args()
+
+    try:
+        args.func(args, ctx)
+    finally:
+        ctx.close()
+
+
+def _add_global_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--workspace",
+        "-W",
+        default=None,
+        metavar="NAME",
+        help="Active workspace (overrides LINKORA_WORKSPACE env var and registry default)",
+    )
+    parser.add_argument(
+        "--context",
+        action="store_true",
+        help="Show design context for AI agents",
+    )
+
+
+def _parse_early_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Parse flags needed before full parser construction."""
+    early = argparse.ArgumentParser(add_help=False)
+    _add_global_args(early)
+    early_args, _ = early.parse_known_args(argv)
+    return early_args
+
+
 def _build_parser() -> argparse.ArgumentParser:
     from linkora.cli.commands import register_all
 
@@ -136,17 +96,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
-        "--workspace",
-        "-W",
-        metavar="NAME",
-        help="Active workspace (overrides LINKORA_WORKSPACE env var and registry default)",
-    )
-    parser.add_argument(
-        "--context",
-        action="store_true",
-        help="Show design context for AI agents",
-    )
+    _add_global_args(parser)
 
     sub = parser.add_subparsers(dest="command", required=True)
     register_all(sub)
@@ -154,14 +104,22 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _design_context() -> str:
-    return """\
+    from linkora.setup import get_config_candidates
+
+    candidates_text = "\n".join(
+        f"    {idx}) {path}"
+        for idx, path in enumerate(get_config_candidates(), start=1)
+    )
+
+    return f"""\
 ================================================================================
                     linkora Design Context for AI Agents
 ================================================================================
 
-CLI workflow:  init -> add -> index -> search
+CLI workflow:  add -> index -> search
 
-  linkora init                          Set up config and database
+  # No explicit init step is required.
+  # DB/workspace bootstrap happens automatically on first run.
   linkora add ./paper.pdf               Add a local file
   linkora add doi:10.xxx/yyy            Add by DOI
   linkora add arxiv:2401.01234          Add by arXiv id
@@ -184,13 +142,9 @@ Data root layout
 
 Config resolution (single-file-wins)
 ────────────────────────────────────
+  linkora loads one global config file and does not merge multiple files.
   Candidates are checked in order; the first existing file is active:
-    1) ~/.linkora/config.yml
-    2) ~/.linkora/config.yaml
-    3) ~/.linkora.yml
-    4) ~/.linkora.yaml
-    5) ~/.config/linkora/config.yml
-    6) ~/.config/linkora/config.yaml
+{candidates_text}
 
   If multiple candidates exist, linkora logs a warning and ignores lower-priority files.
   Workspace names/paths are NOT stored in config.
@@ -221,8 +175,7 @@ Files commands
 
 Health
 ──────
-  linkora doctor       Full health check (incl. network)
-  linkora doctor --light  Quick check (no network)
+  linkora doctor       Config/environment diagnostics
 
 ================================================================================"""
 

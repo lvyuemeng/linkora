@@ -1,42 +1,40 @@
 # linkora
 
-本地优先（local-first）的文档语料 CLI，面向 AI 协作工作流。
+面向用户与 AI 代理的本地优先（local-first）知识库 CLI。
 
 [English](./README.md) | [中文](./README-CN.md)
 
 ---
 
-## linkora 是什么
+## 它能做什么
 
-linkora 在原文件位置建立索引，按 schema 做结构化元数据增强，并提供全文 + 向量检索。
+linkora 会在你现有文件之上建立本地知识层。
+既可以由用户在终端直接使用，也可以作为 AI 代理的可检索上下文后端。
 
-核心原则：
-- 用户文件不搬运，`source_path` 始终指向原文件
-- 工作区是数据库命名空间，不是工作区目录树
-- 流水线显式可组合（source -> fetch -> ingest，schema -> parse -> filter）
+- 文件不搬运：只记录 `source_path`，不复制原始文档。
+- 多源导入：支持本地文件/目录、DOI、arXiv、网页 URL。
+- 提取与增强：抽取文本，按 schema 结构化，支持可选 LLM 增强。
+- 双检索模式：FTS5 全文检索 + LanceDB 向量检索。
+- 工作区隔离：workspace 是数据库命名空间，适合多语料并行管理。
 
-架构权威文档：[`docs/design-v2.md`](docs/design-v2.md)
+架构文档：[`docs/design-v2.md`](docs/design-v2.md)
+
+## 适用场景
+
+- 用户：构建个人/团队研究语料并快速搜索。
+- AI 代理：先读 `linkora --context`，再走 add/index/search 的确定性流程。
+- 工程场景：本地优先，路径清晰，可审计。
 
 ---
 
-## 核心能力
+## 功能特性
 
-- 源导入：
-  - 本地文件/目录
-  - `doi:<id>`
-  - `arxiv:<id>`
-  - `web:<url>`
-- 管线处理：
-  - 文本提取（Kreuzberg）
-  - 元数据增强（schema + LLM）
-  - SQLite 持久化
-- 检索：
-  - `fulltext`（FTS5）
-  - `vector`（LanceDB）
-- 文件工作流：
-  - `files tidy`、`files dedup`、`files rescan`、`files inbox`、`files watch`
-- 主题工作流：
-  - `topics build`、`list`、`show`、`assign`、`prune`、`export`
+- 多源导入：`add` 支持本地文件/目录、DOI、arXiv、URL。
+- 结构化增强：schema 驱动元数据抽取，支持可选 LLM 增强。
+- 混合检索：`fulltext` 与 `vector` 两种检索模式。
+- 文件工作流：`files tidy/dedup/rescan/inbox/watch`。
+- 主题工作流：`topics build/list/show/assign/prune/export`。
+- 本地优先存储：单 SQLite 数据库 + 本地向量与缓存目录。
 
 ---
 
@@ -62,14 +60,19 @@ uv run linkora --help
 
 ---
 
-## 快速开始
+## 如何使用
+
+典型流程：
+1. 检查上下文与环境。
+2. 把内容导入工作区。
+3. 建索引并搜索。
 
 ```bash
 # 查看 AI/代理上下文
 uv run linkora --context
 
-# 初始化配置和环境
-uv run linkora init
+# 可选：诊断配置/环境
+uv run linkora doctor
 
 # 导入本地文件
 uv run linkora add ./docs/paper.pdf --workspace default
@@ -86,6 +89,8 @@ uv run linkora index
 uv run linkora search "transformer"
 uv run linkora search "embedding" --mode vector
 ```
+
+工作区优先级：CLI `--workspace` > `LINKORA_WORKSPACE` 环境变量 > 注册表默认工作区。
 
 ---
 

@@ -15,12 +15,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from linkora.db import DatabaseManager
-from linkora import paths as _paths
+from linkora import setup as _setup
 
-get_data_root = _paths.get_data_root
-get_db_path = _paths.get_db_path
-get_cache_dir = _paths.get_cache_dir
-get_config_path = _paths.get_config_path
+get_data_root = _setup.get_data_root
+get_db_path = _setup.get_db_path
+get_cache_dir = _setup.get_cache_dir
+get_config_path = _setup.get_config_path
 
 
 @dataclass(frozen=True)
@@ -71,7 +71,7 @@ class WorkspaceStore:
     def list_workspaces(self) -> list[WorkspaceMetadata]:
         """Return all workspace metadata."""
         rows = self._db_manager.execute_query(
-            "SELECT id, name, description, created_at, is_default FROM workspaces"
+            "SELECT id, name, description, created_at, is_default FROM workspaces ORDER BY created_at ASC, name ASC"
         )
         return [
             WorkspaceMetadata(
@@ -105,6 +105,23 @@ class WorkspaceStore:
         self._db_manager.execute_update(
             "UPDATE workspaces SET is_default = 1 WHERE name = ?", (name,)
         )
+
+    def ensure_default_workspace(self) -> tuple[str, bool]:
+        """Ensure one default workspace exists and return ``(name, created)``."""
+        default_ws = self.get_default()
+        if default_ws:
+            return default_ws.name, False
+
+        existing = self.list_workspaces()
+        if existing:
+            name = existing[0].name
+            self.set_default(name)
+            return name, False
+
+        name = "default"
+        self.create(name, description="Default workspace")
+        self.set_default(name)
+        return name, True
 
     def create(self, name: str, description: str = "") -> WorkspaceMetadata:
         """Create a new workspace."""

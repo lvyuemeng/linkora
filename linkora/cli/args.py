@@ -125,32 +125,6 @@ class ConfigSetArgs:
 
 
 @dataclass(frozen=True)
-class DoctorArgs:
-    """Arguments for 'doctor' command."""
-
-    light: bool = False
-    fix: bool = False
-
-    @classmethod
-    def from_namespace(cls, args: argparse.Namespace) -> DoctorArgs:
-        return cls(
-            light=getattr(args, "light", False) or False,
-            fix=getattr(args, "fix", False) or False,
-        )
-
-
-@dataclass(frozen=True)
-class InitArgs:
-    """Arguments for 'init' command."""
-
-    force: bool = False
-
-    @classmethod
-    def from_namespace(cls, args: argparse.Namespace) -> InitArgs:
-        return cls(force=getattr(args, "force", False) or False)
-
-
-@dataclass(frozen=True)
 class FilesInboxArgs:
     """Arguments for 'files inbox' command."""
 
@@ -249,8 +223,6 @@ __all__ = [
     "IndexArgs",
     "ConfigShowArgs",
     "ConfigSetArgs",
-    "DoctorArgs",
-    "InitArgs",
     "FilesInboxArgs",
     "FilesDedupArgs",
     "FilesWatchAddArgs",

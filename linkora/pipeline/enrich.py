@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import re
 from typing import Protocol
 
 from linkora.log import get_logger, ui
@@ -60,15 +61,19 @@ async def enrich(
     seed: dict | None = None,
 ) -> EnrichResult:
     """Enrich document metadata with schema-aware LLM extraction."""
-    from linkora.config import get_config
+    from linkora.setup import get_runtime_config
 
-    config = get_config()
+    config = get_runtime_config()
     known = {k: v for k, v in (seed or {}).items() if v}
     missing = [name for name in schema.fields_model.model_fields if name not in known]
     api_key = config.resolve_llm_api_key()
 
-    if not missing or not api_key:
+    if not missing:
         return EnrichResult(fields=schema.fields_model(**known), token_count=0)
+
+    if not api_key:
+        fallback = _fallback_fields(raw_content, known)
+        return EnrichResult(fields=schema.fields_model(**fallback), token_count=0)
 
     llm_fields = await _call_llm(
         prompt=schema.extraction_prompt(raw_content, missing),
@@ -137,6 +142,39 @@ def _parse_seed(metadata_json: str) -> dict:
     except Exception:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _fallback_fields(raw_content: str, known: dict) -> dict:
+    merged = dict(known)
+    if not raw_content.strip():
+        return merged
+
+    if not merged.get("summary"):
+        merged["summary"] = _summarize_text(raw_content)
+    if not merged.get("outline"):
+        merged["outline"] = _outline_text(raw_content)
+    return merged
+
+
+def _summarize_text(raw_content: str, max_chars: int = 360) -> str:
+    normalized = " ".join(raw_content.split())
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max_chars - 3].rstrip() + "..."
+
+
+def _outline_text(raw_content: str, max_items: int = 5) -> list[str]:
+    lines = [ln.strip() for ln in raw_content.splitlines() if ln.strip()]
+    heading_like = [
+        ln
+        for ln in lines
+        if len(ln) <= 120 and re.match(r"^(\d+[.)]|[A-Z][A-Za-z\s]{2,40}:?)", ln)
+    ]
+    if heading_like:
+        return heading_like[:max_items]
+
+    chunks = [ln for ln in lines if len(ln) > 20]
+    return chunks[:max_items]
 
 
 async def _call_llm(

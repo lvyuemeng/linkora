@@ -4,13 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "linkora"
-version = "0.3.0"
+version = "0.3.1"
 description = "Local Knowledge Network — AI-native research cli powered by local-first architecture"
 
 requires-python = ">=3.12"
 license = "MIT"
 authors = [
-    { name = "Zimo Liao", email = "zimoliao@mail.ustc.edu.cn" },
     { name = "nostalgia", email = "lv15623448685@gmail.com" },
 ]
 keywords = [
